@@ -1,0 +1,56 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | v2412
+    \\  /    A nd           | Web:     www.openfoam.com
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * thermophysicalProperties.j2 — Thermophysical model for buoyantSimpleFoam
+ * 
+ * buoyantSimpleFoam uses a compressible thermophysical model.
+ * For ABL (dry air, low Mach), hePsiThermo with perfectGas is standard.
+ *
+ * Variables:
+ *   physics.T_ref_K  — reference temperature [K] (default 300)
+ */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "constant";
+    object      thermophysicalProperties;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+thermoType
+{
+    type            hePsiThermo;
+    mixture         pureMixture;
+    transport       const;
+    thermo          hConst;
+    equationOfState perfectGas;
+    specie          specie;
+    energy          sensibleEnthalpy;
+}
+
+mixture
+{
+    specie
+    {
+        molWeight       28.9;   // Dry air [g/mol]
+    }
+    thermodynamics
+    {
+        Cp          1005;       // Specific heat capacity [J/(kg.K)]
+        Hf          0;          // Heat of formation
+    }
+    transport
+    {
+        mu          1.81e-5;    // Dynamic viscosity [Pa.s] at ~300K
+        Pr          0.71;       // Laminar Prandtl number
+    }
+}
+
+// ************************************************************************* //

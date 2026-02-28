@@ -1,0 +1,79 @@
+# Données (volumineuses, téléchargées via scripts)
+data/raw/
+data/processed/
+data/cfd-database/
+data/mlruns/
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/cfd-database/.gitkeep
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environnements virtuels
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Conda
+.conda/
+
+# Jupyter (legacy — migré vers Marimo .py)
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+*.ipynb
+
+# Éditeurs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Fichiers temporaires CFD
+*.foam
+*.OpenFOAM
+processor*/
+postProcessing/
+constant/polyMesh/
+
+# Fichiers CDS API (contient les clés API)
+.cdsapirc
+
+# Logs
+logs/
+*.log
+
+# Fichiers de checkpoints
+.checkpoints/
+
+# Cache requests-cache
+http_cache.sqlite
+
+# MLflow
+mlruns/
+
+# Fichiers GRIB temporaires
+*.grib
+*.grib2
+*.grb
+*.grb2
+
+# Fichiers NetCDF temporaires
+tmp_*.nc

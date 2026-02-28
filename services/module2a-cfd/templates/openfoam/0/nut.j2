@@ -1,0 +1,78 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  10
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * 0/nut.j2 — Turbulent kinematic viscosity for k-omega SST
+ *
+ * nut is a derived quantity computed from k and omega by the turbulence model.
+ * Initial value: nut_0 ≈ Cmu * k_0 / omega_0
+ * All boundaries are 'calculated' except walls which use nutkWallFunction.
+ */
+{%- set Cmu = 0.09 %}
+{%- set k_init    = inflow.u_star ** 2 / Cmu ** 0.5 %}
+{%- set omega_init = inflow.u_star / (inflow.kappa * inflow.z_ref) %}
+{%- set nut_init  = Cmu * k_init / omega_init %}
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      nut;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [0 2 -1 0 0 0 0];
+
+internalField   uniform {{ "%.6e" | format(nut_init) }};
+
+boundaryField
+{
+    west
+    {
+        type            calculated;
+        value           uniform {{ "%.6e" | format(nut_init) }};
+    }
+
+    east
+    {
+        type            calculated;
+        value           uniform {{ "%.6e" | format(nut_init) }};
+    }
+
+    south
+    {
+        type            calculated;
+        value           uniform {{ "%.6e" | format(nut_init) }};
+    }
+
+    north
+    {
+        type            calculated;
+        value           uniform {{ "%.6e" | format(nut_init) }};
+    }
+
+    top
+    {
+        type            calculated;
+        value           uniform {{ "%.6e" | format(nut_init) }};
+    }
+
+    terrain
+    {
+        type            nutkWallFunction;
+        value           uniform {{ "%.6e" | format(nut_init) }};
+    }
+
+    bottom
+    {
+        type            nutkWallFunction;
+        value           uniform {{ "%.6e" | format(nut_init) }};
+    }
+}
+
+// ************************************************************************* //

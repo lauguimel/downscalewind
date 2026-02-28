@@ -1,0 +1,23 @@
+# Module 1 — Temporal Downscaling
+# Versions alignées sur environment.yml du projet racine
+
+# Deep learning
+torch>=2.3.1
+torchvision>=0.18.0
+
+# Données météo
+zarr>=3.0.0
+numpy>=1.26.0
+xarray>=2024.3.0
+
+# Experiment tracking
+mlflow>=2.12.0
+
+# CLI
+click>=8.1.0
+
+# Configuration
+pyyaml>=6.0.1
+
+# Utilitaires
+tqdm>=4.66.0

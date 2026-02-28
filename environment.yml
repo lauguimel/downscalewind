@@ -1,0 +1,68 @@
+name: downscalewind
+channels:
+  - conda-forge
+  - pytorch
+  - defaults
+
+dependencies:
+  # Python
+  - python=3.11
+
+  # Données météo et géospatiales
+  - cdsapi=0.7.2
+  - xarray=2024.6.0
+  - zarr>=3.0.0
+  - netcdf4=1.7.1
+  - rasterio=1.3.10
+  - pyproj=3.6.1
+  - scipy=1.14.0
+  - numpy=1.26.4
+  - pandas=2.2.2
+
+  # CFD / maillage
+  - numpy-stl=3.1.1
+
+  # Machine learning
+  - pytorch=2.3.1
+  - torchvision=0.18.1
+  # cpuonly supprimé : sur Apple Silicon, MPS est inclus nativement dans PyTorch
+
+  # Outils
+  - click=8.1.7
+  - pyyaml=6.0.1
+  - tqdm=4.66.4
+  - python-json-logger=2.0.7
+  - pint=0.24.3
+  - tenacity=8.5.0
+  - jinja2=3.1.4
+  - blosc=1.21.6
+
+  # MLflow
+  - mlflow=2.14.1
+
+  # Notebooks
+  - jupyterlab=4.2.4
+  - ipykernel=6.29.5
+  - marimo>=0.20.0
+  - matplotlib=3.9.1
+  - seaborn=0.13.2
+  - cartopy=0.23.0
+
+  # Tests
+  - pytest=8.3.2
+  - pytest-cov=5.0.0
+
+  # setuptools<80 requis : setuptools>=80 retire pkg_resources (cassé avec mlflow 2.14)
+  - setuptools<80
+
+  # pip pour les packages non disponibles sur conda-forge
+  - pip
+  - pip:
+    - openmeteo-requests>=1.0.0
+    - requests-cache==1.2.1
+    - retry-requests==2.0.0
+    - torch-geometric==2.5.3
+    - torchdiffeq==0.2.3
+    - fluidfoam>=0.2.4
+    # Package interne partagé
+    - -e ./shared

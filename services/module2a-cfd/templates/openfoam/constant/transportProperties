@@ -1,0 +1,71 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | v2412
+    \\  /    A nd           | Web:     www.openfoam.com
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * transportProperties — static file (no Jinja2 templating needed)
+ * Newtonian air properties for incompressible/weakly-compressible ABL
+ *
+ * buoyantSimpleFoam solves for temperature and uses the Boussinesq
+ * approximation via a body-force term. The transport properties below
+ * describe dry air at standard conditions (~300 K, sea level).
+ *
+ * If the reference temperature needs to vary between runs, convert this
+ * to a .j2 template and expose beta = 1/T_ref_K as a variable.
+ */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "constant";
+    object      transportProperties;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// ---------------------------------------------------------------------------
+// Transport model
+// ---------------------------------------------------------------------------
+transportModel  Newtonian;
+
+// ---------------------------------------------------------------------------
+// Kinematic viscosity of air
+//   nu = mu / rho ≈ 1.81e-5 Pa·s / 1.225 kg/m³ ≈ 1.5e-5 m²/s at 300 K
+// ---------------------------------------------------------------------------
+nu              [0 2 -1 0 0 0 0]    1.5e-5;
+
+// ---------------------------------------------------------------------------
+// Thermal transport
+//   Pr  = mu*Cp/lambda ≈ 0.71 for air (laminar Prandtl number)
+//   Prt = turbulent Prandtl number; 0.7 is standard for atmospheric flows
+//         (ratio of momentum to thermal eddy diffusivity)
+// ---------------------------------------------------------------------------
+Pr              [0 0 0 0 0 0 0]     0.71;
+Prt             [0 0 0 0 0 0 0]     0.7;
+
+// ---------------------------------------------------------------------------
+// Thermal expansion coefficient (Boussinesq buoyancy)
+//   beta = 1 / T_ref  [1/K]
+//   For T_ref = 300 K:  beta = 1/300 ≈ 3.3e-3 K⁻¹
+//   This couples the temperature field to the momentum equation via:
+//     f_buoyancy = -beta * (T - T_ref) * g
+// ---------------------------------------------------------------------------
+beta            [0 0 0 -1 0 0 0]    3.3e-3;
+
+// ---------------------------------------------------------------------------
+// Reference temperature for Boussinesq linearisation
+//   Must be consistent with inflow.T_ref_K set in the 0/T.j2 field file.
+//   300 K corresponds to standard neutral ABL conditions.
+// ---------------------------------------------------------------------------
+TRef            [0 0 0 1 0 0 0]     300;
+
+// ---------------------------------------------------------------------------
+// Reference density (informational — buoyantSimpleFoam uses rho from EOS)
+//   rho_ref = 1.225 kg/m³ at 15°C, 101325 Pa (ISA standard)
+// ---------------------------------------------------------------------------
+// rhoRef       [1 -3 0 0 0 0 0]    1.225;
+
+// ************************************************************************* //

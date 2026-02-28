@@ -1,0 +1,106 @@
+# Configuration de la grille de runs CFD — Module 2A
+#
+# Deux modes :
+#   mode=poc   : produit cartésien de base, sans perturbations → 240 runs
+#               Destiné au PoC local (8 cœurs, ~10–80h selon résolution)
+#
+#   mode=full  : produit cartésien complet avec perturbations → ~50k–100k runs
+#               Destiné au HPC pour entraîner le GNN en production
+#
+# La même codebase run_cfd_batch.py lit ce fichier dans les deux modes.
+
+# ── Paramètres de base (communs aux deux modes) ───────────────────────────────
+
+directions_deg:
+  # 16 secteurs de 22.5° — couvre la rose complète
+  - 0.0
+  - 22.5
+  - 45.0
+  - 67.5
+  - 90.0
+  - 112.5
+  - 135.0
+  - 157.5
+  - 180.0
+  - 202.5
+  - 225.0    # ← direction dominante Perdigão (SW)
+  - 247.5
+  - 270.0
+  - 292.5
+  - 315.0
+  - 337.5
+
+speeds_ms:
+  # 5 vitesses représentant les régimes de vent typiques
+  - 3.0    # vent faible, effets thermiques dominants
+  - 6.0    # vent modéré, régime mixte
+  - 10.0   # vent moyen, RANS pleinement développé ← cas canonique benchmark
+  - 15.0   # vent fort, couche limite mécanique
+  - 20.0   # vent très fort, proche limites modèle log
+
+stabilities:
+  # 3 classes de stabilité atmosphérique (Richardson bulk cible)
+  - id: "stable"
+    Ri_b: 0.15          # stratification stable nocturne
+    label: "STA"
+    T_grad_Km: 0.5      # gradient de température (K/100m) dans la couche limite
+  - id: "neutral"
+    Ri_b: 0.0           # neutralité — cas de référence
+    label: "NEU"
+    T_grad_Km: 0.0
+  - id: "unstable"
+    Ri_b: -0.10         # instabilité convective diurne
+    label: "UNS"
+    T_grad_Km: -0.3
+
+# PoC — produit cartésien de base : 16 × 5 × 3 = 240 runs
+poc:
+  n_runs: 240
+  perturbations: null    # aucune perturbation stochastique en PoC
+
+# ── Perturbations stochastiques (mode full / HPC seulement) ──────────────────
+#
+# Pour chaque configuration (direction, vitesse, stabilité), on génère
+# N_pert perturbations en tirant dans les distributions ci-dessous.
+# Les valeurs min/max définissent l'intervalle uniforme de tirage.
+# Un seed fixe garantit la reproductibilité.
+
+full:
+  n_pert_per_config: 27   # → 240 × 27 ≈ 6500 runs (selon le README)
+  # Pour 50k–100k runs, augmenter n_pert_per_config ou ajouter des directions/vitesses
+
+  perturbations:
+    delta_T_grad_Km:
+      distribution: "uniform"
+      values: [-1.0, 0.0, 1.0]   # décalage du gradient thermique en K/100m
+    delta_ustar_frac:
+      distribution: "uniform"
+      values: [0.9, 1.0, 1.1]    # facteur multiplicatif sur u*
+    delta_dir_deg:
+      distribution: "uniform"
+      values: [-5.0, 0.0, 5.0]   # décalage de direction en degrés
+
+  seed_base: 42  # seed de base — seed_run = seed_base + run_index
+
+# ── Paramètres de maillage (sélectionnés après convergence study) ─────────────
+# Ces valeurs sont des defaults — run_convergence_study.py les mettra à jour.
+
+mesh:
+  resolution_m: 1000      # résolution horizontale cible (à valider par convergence)
+  context_cells: 3        # nombre de super-mailles de contexte (3×3 ou 5×5)
+  n_vertical_layers: 30   # nombre de couches verticales (à valider par convergence)
+  dz_min_m: 2.0           # première couche au sol (m)
+  domain_height_m: 7000   # hauteur du domaine CFD
+
+# ── Paramètres du solveur ─────────────────────────────────────────────────────
+
+solver:
+  name: "buoyantSimpleFoam"
+  n_iterations: 1000      # itérations SIMPLE (500 pour benchmark rapide)
+  n_cores: 8              # cœurs par run (parallélisation OpenFOAM)
+  convergence_tol:
+    continuity: 1.0e-4
+    momentum: 1.0e-3
+    k: 1.0e-3
+    omega: 1.0e-3
+    T: 1.0e-3

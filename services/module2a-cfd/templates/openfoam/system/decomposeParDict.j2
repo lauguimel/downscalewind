@@ -1,0 +1,27 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | v2412
+    \\  /    A nd           | Web:     www.openfoam.com
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * decomposeParDict.j2 — Parallel decomposition for buoyantSimpleFoam
+ * Variables:
+ *   solver.n_cores — number of MPI processes
+ */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      decomposeParDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+numberOfSubdomains  {{ solver.n_cores }};
+
+method          scotch;
+
+// ************************************************************************* //

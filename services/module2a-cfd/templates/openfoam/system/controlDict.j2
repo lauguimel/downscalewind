@@ -1,0 +1,100 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | v2412
+    \\  /    A nd           | Web:     www.openfoam.com
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * controlDict.j2 — Jinja2 template
+ * Steady-state SIMPLE loop for buoyantSimpleFoam ABL simulation
+ *
+ * Variables:
+ *   solver.n_iter          — total number of SIMPLE iterations (endTime)
+ *   solver.write_interval  — write results every N iterations (default 100)
+ */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// ---------------------------------------------------------------------------
+// Application
+// ---------------------------------------------------------------------------
+application     simpleFoam;     // incompressible RANS — appropriate for near-neutral ABL
+
+// ---------------------------------------------------------------------------
+// Time control
+//   For steady-state SIMPLE, deltaT = 1 and time is equivalent to iteration
+//   count.  startFrom latestTime allows restart from the last written result.
+// ---------------------------------------------------------------------------
+startFrom       latestTime;
+startTime       0;
+
+stopAt          endTime;
+endTime         {{ solver.n_iter }};
+
+deltaT          1;              // Pseudo time-step (iterations)
+
+// ---------------------------------------------------------------------------
+// Output control
+// ---------------------------------------------------------------------------
+writeControl    timeStep;
+writeInterval   {{ solver.write_interval | default(100) }};
+
+// Keep only the last two written time directories to save disk space.
+// Set to 0 to keep all results.
+purgeWrite      2;
+
+writeFormat     ascii;
+writePrecision  8;
+writeCompression off;
+
+timeFormat      general;
+timePrecision   6;
+
+// ---------------------------------------------------------------------------
+// Run-time modifiable dictionaries
+//   Allows changes to fvSolution/fvSchemes without restarting.
+// ---------------------------------------------------------------------------
+runTimeModifiable yes;
+
+// ---------------------------------------------------------------------------
+// Functions — residual monitoring and force/field sampling
+// ---------------------------------------------------------------------------
+functions
+{
+    // -- Convergence residuals written to postProcessing/ --
+    residuals
+    {
+        type            residuals;
+        libs            ( "libutilityFunctionObjects.so" );
+        fields          ( U p k omega );
+        executeControl  timeStep;
+        executeInterval 1;
+        writeControl    timeStep;
+        writeInterval   {{ solver.write_interval | default(100) }};
+    }
+
+    // -- Volume-averaged TKE over full domain --
+    volAverageTKE
+    {
+        type            volFieldValue;
+        libs            ( "libfieldFunctionObjects.so" );
+        fields          ( k );
+        operation       volAverage;
+        regionType      all;
+        writeFields     false;
+        executeControl  timeStep;
+        executeInterval 10;
+        writeControl    timeStep;
+        writeInterval   {{ solver.write_interval | default(100) }};
+    }
+}
+
+// ************************************************************************* //

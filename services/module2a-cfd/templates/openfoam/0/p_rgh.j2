@@ -1,0 +1,107 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | v2412
+    \\  /    A nd           | Web:     www.openfoam.com
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * 0/p_rgh.j2 — Jinja2 template
+ * Initial and boundary conditions for modified pressure p_rgh [Pa]
+ *
+ * p_rgh = p - rho * g * h
+ *   where h is the height above a reference datum.
+ * buoyantSimpleFoam solves for p_rgh rather than p to decouple the
+ * hydrostatic pressure gradient from the dynamic pressure, which is
+ * numerically important for stratified/buoyancy-driven flows.
+ *
+ * Variables:
+ *   physics.p_ref_Pa   — reference gauge pressure [Pa] (usually 0)
+ *   physics.rho_ref    — reference density [kg/m³] (1.225)
+ *
+ * Boundary condition choices:
+ *   Inlet faces:     fixedFluxPressure
+ *     Adjusts the pressure gradient at the boundary to be consistent with
+ *     the specified velocity flux.  Prevents spurious reflections.
+ *   Outlet / top:   totalPressure with p0 = 0
+ *     Fixes total pressure; allows flow to leave without reflecting.
+ *   Terrain / wall:  fixedFluxPressure
+ *     No-penetration at wall is enforced via U; pressure gradient is
+ *     adjusted to match the zero normal flux constraint.
+ */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      p_rgh;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+// p_ref = {{ physics.p_ref_Pa | default(0) }} Pa (gauge)
+// rho_ref = {{ physics.rho_ref | default(1.225) }} kg/m³
+
+dimensions      [1 -1 -2 0 0 0 0];
+
+// Initialise to zero gauge pressure (hydrostatic component removed)
+internalField   uniform 0;
+
+boundaryField
+{
+    // -----------------------------------------------------------------------
+    // Lateral faces + top: fixedValue 0
+    //   Zero-gauge dynamic pressure at all open boundaries.
+    //   This provides clear Dirichlet constraints for the pressure Poisson
+    //   solver, which is critical for stable convergence.
+    //   (fixedFluxPressure on all sides can lead to an underdetermined system)
+    // -----------------------------------------------------------------------
+    west
+    {
+        type            fixedValue;
+        value           uniform 0;
+    }
+
+    east
+    {
+        type            fixedValue;
+        value           uniform 0;
+    }
+
+    south
+    {
+        type            fixedValue;
+        value           uniform 0;
+    }
+
+    north
+    {
+        type            fixedValue;
+        value           uniform 0;
+    }
+
+    top
+    {
+        type            fixedValue;
+        value           uniform 0;
+    }
+
+    // -----------------------------------------------------------------------
+    // Terrain wall: fixedFluxPressure
+    //   No normal flow at wall; pressure gradient adjusted accordingly.
+    // -----------------------------------------------------------------------
+    terrain
+    {
+        type            fixedFluxPressure;
+        gradient        uniform 0;
+        value           uniform 0;
+    }
+
+    bottom
+    {
+        type            fixedFluxPressure;
+        gradient        uniform 0;
+        value           uniform 0;
+    }
+}
+
+// ************************************************************************* //

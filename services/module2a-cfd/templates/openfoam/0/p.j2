@@ -1,0 +1,63 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Version: 10
+    \\  /    A nd           | Web:     www.openfoam.org
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * 0/p.j2 — Kinematic pressure for simpleFoam [m²/s²]
+ *
+ * BC strategy (wind-direction-aware):
+ *   Inlet faces:  zeroGradient
+ *   Outlet faces: fixedValue 0 (Dirichlet reference for pressure Poisson solver)
+ *                 Phase 2: ERA5 interpolated pressure (nonuniform)
+ *   Top:          zeroGradient (don't constrain vertical motion)
+ *   Terrain:      zeroGradient
+ */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      p;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+// Outlet faces (p fixedValue): {{ outlet_faces | join(', ') }}
+
+dimensions      [0 2 -2 0 0 0 0];
+
+internalField   uniform 0;
+
+boundaryField
+{
+{% for face in ['west', 'east', 'south', 'north'] %}
+    {{ face }}
+    {
+{%- if face in outlet_faces %}
+        type            fixedValue;
+        value           uniform 0;
+{%- else %}
+        type            zeroGradient;
+{%- endif %}
+    }
+
+{% endfor %}
+    top
+    {
+        type            zeroGradient;
+    }
+
+    terrain
+    {
+        type            zeroGradient;
+    }
+
+    bottom
+    {
+        type            zeroGradient;
+    }
+}
+
+// ************************************************************************* //

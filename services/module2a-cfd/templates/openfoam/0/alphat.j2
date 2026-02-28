@@ -1,0 +1,106 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | v2412
+    \\  /    A nd           | Web:     www.openfoam.com
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * 0/alphat.j2 — Jinja2 template
+ * Initial and boundary conditions for turbulent thermal diffusivity alphat [kg/(m·s)]
+ *
+ * alphat = nut / Prt
+ *   where nut is the turbulent kinematic viscosity and Prt is the turbulent
+ *   Prandtl number.  buoyantSimpleFoam solves the temperature equation using
+ *   an effective thermal diffusivity = alpha_lam + alphat.
+ *
+ * alphat is not a primary solved variable — it is computed from nut by the
+ * turbulence model after each iteration.  The initial value of 0 is correct
+ * (nut = 0 initially; updated by the solver on the first iteration).
+ *
+ * Variables:
+ *   (none required — alphat is always initialised to zero)
+ *
+ * Wall BC:
+ *   compressible::alphatWallFunction
+ *   Computes alphat at the wall consistent with the turbulent wall function
+ *   treatment.  Prt = 0.85 is standard for atmospheric boundary layers
+ *   (slightly lower than free-stream 0.9 to account for roughness effects).
+ */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      alphat;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+dimensions      [1 -1 -1 0 0 0 0];
+
+// alphat initialised to zero — computed from nut by turbulence model
+internalField   uniform 0;
+
+boundaryField
+{
+    // -----------------------------------------------------------------------
+    // Lateral faces and top: calculated
+    //   alphat is computed internally from nut/Prt at these boundaries.
+    //   No explicit value is required; the 'calculated' BC reads from the
+    //   internal field register.
+    // -----------------------------------------------------------------------
+    west
+    {
+        type            calculated;
+        value           uniform 0;
+    }
+
+    east
+    {
+        type            calculated;
+        value           uniform 0;
+    }
+
+    south
+    {
+        type            calculated;
+        value           uniform 0;
+    }
+
+    north
+    {
+        type            calculated;
+        value           uniform 0;
+    }
+
+    top
+    {
+        type            calculated;
+        value           uniform 0;
+    }
+
+    // -----------------------------------------------------------------------
+    // Terrain wall: compressible::alphatWallFunction
+    //   Applies a wall-function model for turbulent thermal diffusivity.
+    //   Prt = 0.85 is used here (turbulent Prandtl number at the wall,
+    //   slightly lower than the free-stream value of 0.9).
+    //   This BC is consistent with the kqRWallFunction on k and
+    //   atmOmegaWallFunction on omega.
+    // -----------------------------------------------------------------------
+    terrain
+    {
+        type            compressible::alphatWallFunction;
+        Prt             0.85;
+        value           uniform 0;
+    }
+
+    bottom
+    {
+        type            compressible::alphatWallFunction;
+        Prt             0.85;
+        value           uniform 0;
+    }
+}
+
+// ************************************************************************* //

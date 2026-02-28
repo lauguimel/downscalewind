@@ -1,0 +1,142 @@
+version: "3.9"
+
+# DownscaleWind — Pipeline IA + CFD pour downscaling météo
+# Chaque service correspond à un module du pipeline.
+# Les services partagent les volumes data/ et logs/, ainsi que le package shared/.
+
+volumes:
+  data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/data
+  logs:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${PWD}/logs
+
+x-common-volumes: &common-volumes
+  - ./data:/data
+  - ./logs:/logs
+  - ./shared:/app/shared:ro
+  - ./configs:/app/configs:ro
+
+x-common-env: &common-env
+  PYTHONPATH: /app
+  LOG_LEVEL: INFO
+
+services:
+
+  # ─── Module 0 : Ingestion des données ──────────────────────────────────────
+  data-ingestion:
+    build:
+      context: services/data-ingestion
+      dockerfile: Dockerfile
+    volumes: *common-volumes
+    environment:
+      <<: *common-env
+      # Clé API Copernicus CDS — créer ~/.cdsapirc ou passer via env
+      CDS_API_KEY: ${CDS_API_KEY:-}
+      CDS_API_URL: ${CDS_API_URL:-https://cds.climate.copernicus.eu/api/v2}
+    profiles:
+      - ingestion
+    command: ["python", "ingest_era5.py", "--help"]
+
+  # ─── Module 1 : Downscaling temporel (NeuralODE + GATv2) ──────────────────
+  module1-temporal:
+    build:
+      context: services/module1-temporal
+      dockerfile: Dockerfile
+    volumes: *common-volumes
+    environment:
+      <<: *common-env
+      MLFLOW_TRACKING_URI: /data/mlruns
+    profiles:
+      - training
+    # TODO: command à définir quand le module est implémenté
+    command: ["echo", "Module 1 (temporal downscaling) — not yet implemented"]
+
+  # ─── Module 2A : CFD OpenFOAM batch runner ─────────────────────────────────
+  module2a-cfd:
+    build:
+      context: services/module2a-cfd
+      dockerfile: Dockerfile
+    volumes:
+      - ./data:/data
+      - ./logs:/logs
+      - ./shared:/app/shared:ro
+      - ./configs:/app/configs:ro
+      # OpenFOAM nécessite un accès en écriture aux répertoires de run
+      - ./data/cfd-database:/data/cfd-database
+    environment:
+      <<: *common-env
+      # Nombre de cœurs pour mpirun / snappyHexMesh
+      OMP_NUM_THREADS: ${OMP_NUM_THREADS:-8}
+    profiles:
+      - cfd
+    # TODO: command à définir quand le module est implémenté
+    command: ["echo", "Module 2A (CFD batch) — not yet implemented"]
+
+  # ─── Module 2B : Surrogate GNN spatial ────────────────────────────────────
+  module2b-surrogate:
+    build:
+      context: services/module2b-surrogate
+      dockerfile: Dockerfile
+    volumes: *common-volumes
+    environment:
+      <<: *common-env
+      MLFLOW_TRACKING_URI: /data/mlruns
+    profiles:
+      - training
+    # TODO: command à définir quand le module est implémenté
+    command: ["echo", "Module 2B (spatial surrogate) — not yet implemented"]
+
+  # ─── Module 3 : Turbulence stochastique sous-horaire (V2) ─────────────────
+  module3-stochastic:
+    build:
+      context: services/module3-stochastic
+      dockerfile: Dockerfile
+    volumes: *common-volumes
+    environment:
+      <<: *common-env
+    profiles:
+      - v2
+    # Optionnel V1 — non implémenté
+    command: ["echo", "Module 3 (stochastic turbulence) — V2 only"]
+
+  # ─── Validation ────────────────────────────────────────────────────────────
+  validation:
+    build:
+      context: services/validation
+      dockerfile: Dockerfile
+    volumes: *common-volumes
+    environment:
+      <<: *common-env
+    ports:
+      - "8888:8888"  # JupyterLab pour validation_report.ipynb
+    profiles:
+      - validation
+    # TODO: command à définir quand le module est implémenté
+    command: ["echo", "Validation service — not yet implemented"]
+
+  # ─── MLflow UI (suivi des expériences) ─────────────────────────────────────
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.14.1
+    volumes:
+      - ./data/mlruns:/mlflow/mlruns
+    ports:
+      - "5000:5000"
+    environment:
+      MLFLOW_BACKEND_STORE_URI: /mlflow/mlruns
+    command: ["mlflow", "ui", "--host", "0.0.0.0", "--port", "5000"]
+    profiles:
+      - mlflow
+
+# Usage :
+#   docker-compose --profile ingestion up data-ingestion
+#   docker-compose --profile cfd up module2a-cfd
+#   docker-compose --profile mlflow up mlflow
+#   docker-compose --profile training up module2b-surrogate

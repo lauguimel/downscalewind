@@ -1,0 +1,28 @@
+# Dépendances du service data-ingestion
+# Versions pinées pour reproductibilité
+
+# API météo
+cdsapi==0.7.2
+openmeteo-requests==0.3.0
+requests-cache==1.2.1
+retry-requests==2.0.0
+
+# Données scientifiques
+xarray==2024.6.0
+zarr==2.18.2
+netcdf4==1.7.1
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.14.0
+
+# Géospatial (pour les stubs SRTM/landcover)
+rasterio==1.3.10
+
+# CLI et utilitaires
+click==8.1.7
+pyyaml==6.0.1
+tenacity==8.5.0
+tqdm==4.66.4
+
+# Package partagé (installer en editable depuis le dossier shared/)
+# pip install -e ../../shared

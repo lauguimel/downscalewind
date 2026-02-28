@@ -1,0 +1,237 @@
+# Configuration du site Perdigão — Site de référence principal DownscaleWind
+#
+# Références :
+#   Fernando et al. (2019). The Perdigão: Peering into microscale details of mountain winds.
+#   BAMS. doi:10.1175/BAMS-D-17-0227.1
+#
+#   Mann et al. (2017). Complex terrain experiments in the New European Wind Atlas.
+#   Phil. Trans. R. Soc. A. doi:10.1098/rsta.2016.0101
+
+site:
+  name: "Perdigão"
+  country: "Portugal"
+  region: "Beira Interior"
+  description: >
+    Deux crêtes parallèles orientées NE-SO (~550 m ASL, ~100–150 m de relief relatif)
+    dans le centre du Portugal, à environ 200 km au nord-est de Lisbonne.
+    Site de référence pour la CFD atmosphérique en terrain complexe.
+    Caractéristiques : fort effet de canalisation du vent, zones de recirculation
+    entre les deux crêtes, écoulements de pente thermiques diurnes.
+  coordinates:
+    latitude: 39.716    # °N — crête principale (Tower T20)
+    longitude: -7.740   # °E (7.740°W)
+    elevation_m: 463    # m ASL — sommet crête principale (approx.)
+  terrain:
+    ridge_spacing_km: 1.4     # distance entre les deux crêtes parallèles
+    ridge_orientation_deg: 40 # azimut NE-SO (~40° par rapport au Nord)
+    max_slope_deg: 30         # pentes maximales observées sur les flancs
+    dominant_wind_dir_deg: 220 # direction dominante du vent (SSO)
+
+
+# Domaine ERA5 (7×7 mailles à 0.25°)
+# Centré sur la crête principale, couvre ~175×175 km
+era5_domain:
+  north: 40.5     # °N
+  west:  -8.5     # °E (négatif = Ouest)
+  south: 39.0     # °N
+  east:  -7.0     # °E
+  grid_spacing_deg: 0.25
+  n_lat: 7
+  n_lon: 7
+  # Coordonnées de la grille ERA5 centrée sur le site
+  # lat: [39.00, 39.25, 39.50, 39.75, 40.00, 40.25, 40.50]
+  # lon: [-8.50, -8.25, -8.00, -7.75, -7.50, -7.25, -7.00]
+
+
+# Domaine CFD OpenFOAM
+cfd_domain:
+  extent_km: 50       # côté du domaine carré (50×50 km)
+  height_m: 7000      # hauteur du domaine
+  resolution_m: 1000  # résolution de base du maillage
+  nx: 50              # nombre de cellules en x (à 1 km)
+  ny: 50              # nombre de cellules en y
+  nz: 50              # nombre de cellules en z (grading vertical)
+  vertical_grading: 4 # rapport de taille sol/sommet (raffinement vers le sol)
+  note: >
+    Le maillage de base est à 1 km. snappyHexMesh + addLayers ajoute 2 couches
+    de raffinement près du sol (~200–500 m). La résolution effective dans la
+    couche limite de surface est donc ~200 m.
+
+
+# Périodes de données
+periods:
+  # Période principale de validation (Intensive Observation Period)
+  iop:
+    start: "2017-05-01"
+    end:   "2017-06-15"
+    description: >
+      Période d'observation intensive de la campagne Perdigão 2017.
+      Conditions météo variées (vent synoptique, brise, stabilité neutre/stable/instable).
+      Données LIDAR Doppler + 50 mâts de mesure disponibles.
+  # Campagne complète
+  campaign:
+    start: "2017-01-01"
+    end:   "2017-12-31"
+  # Période d'entraînement ERA5
+  training:
+    start: "2016-01-01"
+    end:   "2016-12-31"
+  # Période de validation CERRA (pour décomposition d'erreur ERA5→CERRA→mâts)
+  cerra_validation:
+    start: "2017-01-01"
+    end:   "2017-12-31"
+    note: "CERRA (5.5 km) couvre cette période via CDS API"
+
+
+# Infrastructure de mesure
+measurement:
+  masts:
+    count: ~50          # tours instrumentées
+    max_height_m: 100   # hauteur maximale des mâts
+    heights_m: [10, 20, 40, 60, 80, 100]  # hauteurs typiques d'instrumentation
+    temporal_resolution_min: 10  # moyenne sur 10 minutes
+    instruments: ["cup_anemometer", "wind_vane", "sonic_anemometer"]
+    key_towers:
+      - id: "T20"
+        lat: 39.7246
+        lon: -7.7454
+        elevation_m: 550
+        position: "crête principale Nord"
+      - id: "T13"
+        lat: 39.7120
+        lon: -7.7500
+        elevation_m: 460
+        position: "flanc Sud crête principale"
+      - id: "T25"
+        lat: 39.7190
+        lon: -7.7280
+        elevation_m: 360
+        position: "vallée entre les deux crêtes"
+  lidar:
+    type: "Doppler LIDAR"
+    count: 2  # LIDARs déployés pendant l'IOP
+    range_m: 3000
+    temporal_resolution_s: 1
+    note: "Profils verticaux haute résolution disponibles dans le dataset NEWA"
+  radiosondes:
+    nearest_station: "Lisboa (LPPT)"
+    distance_km: ~200
+    frequency: "2x/jour (00h UTC, 12h UTC)"
+    use: "Validation des profils verticaux reconstruits depuis ERA5"
+
+
+# Sources de données
+data_sources:
+
+  era5:
+    provider: "Copernicus Climate Data Store (ECMWF)"
+    datasets:
+      pressure_levels: "reanalysis-era5-pressure-levels"
+      single_levels:   "reanalysis-era5-single-levels"
+    variables_pressure:
+      - {name: "u_component_of_wind",    short: "u", unit: "m/s"}
+      - {name: "v_component_of_wind",    short: "v", unit: "m/s"}
+      - {name: "geopotential",           short: "z", unit: "m2 s-2"}
+      - {name: "temperature",            short: "t", unit: "K"}
+      - {name: "specific_humidity",      short: "q", unit: "kg/kg"}
+    variables_surface:
+      - {name: "10m_u_component_of_wind", short: "u10", unit: "m/s"}
+      - {name: "10m_v_component_of_wind", short: "v10", unit: "m/s"}
+      - {name: "2m_temperature",          short: "t2m", unit: "K"}
+    pressure_levels_hpa: [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200]
+    temporal_resolution: "6h"    # pour les niveaux de pression
+    spatial_resolution_deg: 0.25
+    url: "https://cds.climate.copernicus.eu"
+    access: "Requiert clé API dans ~/.cdsapirc"
+
+  ifs_openmeteo:
+    provider: "Open-Meteo (ECMWF open data)"
+    models:
+      - id: "ecmwf_ifs025"
+        description: "IFS 0.25°, depuis 2024-02-03, 3-horaire"
+        use: "Inférence opérationnelle"
+      - id: "ecmwf_ifs_analysis_long_window"
+        description: "IFS HRES 9km, depuis 2017-01-01, horaire"
+        use: "Caractérisation domain shift ERA5→IFS sur période Perdigão"
+    variables_pressure: ["wind_speed", "wind_direction", "temperature",
+                         "geopotential_height", "relative_humidity"]
+    pressure_levels_hpa: [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200]
+    url: "https://historical-forecast-api.open-meteo.com"
+    access: "Sans authentification, gratuit"
+    limitation: >
+      Les composantes u/v ne sont pas directement disponibles.
+      Reconstruction : u = -speed * sin(dir_rad), v = -speed * cos(dir_rad)
+      (convention météorologique : vent VENANT DE la direction indiquée).
+      L'humidité spécifique (q) n'est pas disponible — utiliser RH comme proxy.
+
+  cerra:
+    provider: "Copernicus Climate Change Service (ECMWF)"
+    datasets:
+      pressure_levels: "reanalysis-cerra-pressure-levels"
+      single_levels:   "reanalysis-cerra-single-levels"
+    resolution_km: 5.5
+    temporal_resolution: "1h"
+    coverage: "Europe, 1984–2021"
+    url: "https://cds.climate.copernicus.eu"
+    use: >
+      Vérité terrain intermédiaire pour décomposition d'erreur :
+      ERA5 25km → CERRA 5.5km (erreur méso-échelle Module 1) et
+      CERRA 5.5km → mâts Perdigão (erreur orographique Module 2).
+
+  srtm:
+    provider: "NASA/USGS SRTM GL1"
+    resolution_m: 30
+    coverage: "Global, 60°S–60°N"
+    access: "pip install elevation (python wrapper) ou USGS EarthExplorer"
+    url: "https://earthexplorer.usgs.gov"
+    use: "Topographie pour maillage CFD (resample à 1 km)"
+
+  land_cover:
+    provider: "Copernicus Global Land Service"
+    product: "CGLS-LC100 v3"
+    resolution_m: 100
+    year: 2018  # plus proche de 2017
+    url: "https://lcviewer.vito.be/download"
+    use: "Carte de rugosité z₀ par classe de surface"
+
+  perdigao_campaign:
+    provider: "New European Wind Atlas (NEWA)"
+    url: "https://www.neweuropeanwindatlas.eu/data-and-models/perdigao"
+    access: "Accès libre après enregistrement"
+    content:
+      - "Données des ~50 mâts de mesure (IOP 2017)"
+      - "Données LIDAR Doppler (profils verticaux)"
+      - "Métadonnées des instruments"
+    format: "NetCDF"
+    reference: "Mann et al. (2017), doi:10.1098/rsta.2016.0101"
+
+  igra2:
+    provider: "NOAA IGRA (Integrated Global Radiosonde Archive)"
+    station: "Lisbonne (LPPT, 08579)"
+    distance_km: ~200
+    url: "https://www.ncei.noaa.gov/products/weather-balloon/integrated-global-radiosonde-archive"
+    use: "Validation des profils verticaux reconstruits depuis ERA5"
+    limitation: "Station éloignée (~200 km) — valide pour la structure synoptique, pas pour les effets locaux"
+
+
+# Paramètres physiques de référence pour le site
+physics:
+  z0_valley_m: 0.05     # rugosité dynamique — vallée agricole
+  z0_ridge_m:  0.10     # rugosité dynamique — crête avec végétation arbustive
+  z0_forest_m: 1.00     # rugosité dynamique — zones forestières
+  reference_height_m: 100  # hauteur de référence pour la normalisation des profils
+  dominant_stability:
+    day:   "neutre à légèrement instable (Ri_b ∈ [-0.5, 0])"
+    night: "stable à très stable (Ri_b ∈ [0, 0.5])"
+    transition: "instable convectif (Ri_b < -0.5, ~10% du temps)"
+
+
+# Critères de succès PoC
+success_criteria:
+  rmse_reduction_vs_era5: ">= 30%"  # sur les mâts en zone de relief marqué
+  coverage_rate_95pct: ">= 80%"     # 80% des observations dans l'enveloppe 95%
+  inference_latency_ms: "<= 500"    # profil vertical sur 1 point géographique
+  note: >
+    Ces seuils sont indicatifs. Le critère RMSE >= 30% est ambitieux mais compatible
+    avec la littérature sur des cas similaires (WRF 1km vs ERA5 en terrain complexe
+    montre 40–60% de réduction). À documenter après la première évaluation sur données.

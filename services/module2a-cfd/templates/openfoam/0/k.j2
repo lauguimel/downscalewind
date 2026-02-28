@@ -1,0 +1,68 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Version: 10
+    \\  /    A nd           | Web:     www.openfoam.org
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * 0/k.j2 — Turbulent kinetic energy [m²/s²]
+ *
+ * k_init = u_star² / sqrt(Cmu) — ABL equilibrium value
+ *
+ * BC strategy:
+ *   Inlet faces:  fixedValue (ABL-consistent k)
+ *   Outlet faces: zeroGradient
+ *   Top:          zeroGradient
+ *   Terrain:      kqRWallFunction
+ */
+{%- set Cmu = 0.09 %}
+{%- set k_init = inflow.u_star ** 2 / Cmu ** 0.5 %}
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      k;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+// k_init = u_star²/√Cmu = {{ inflow.u_star }}²/√{{ Cmu }} = {{ "%.4f" | format(k_init) }} m²/s²
+
+dimensions      [0 2 -2 0 0 0 0];
+
+internalField   uniform {{ "%.6f" | format(k_init) }};
+
+boundaryField
+{
+{% for face in ['west', 'east', 'south', 'north'] %}
+    {{ face }}
+    {
+{%- if face in inlet_faces %}
+        type            fixedValue;
+        value           uniform {{ "%.6f" | format(k_init) }};
+{%- else %}
+        type            zeroGradient;
+{%- endif %}
+    }
+
+{% endfor %}
+    top
+    {
+        type            zeroGradient;
+    }
+
+    terrain
+    {
+        type            kqRWallFunction;
+        value           uniform {{ "%.6f" | format(k_init) }};
+    }
+
+    bottom
+    {
+        type            kqRWallFunction;
+        value           uniform {{ "%.6f" | format(k_init) }};
+    }
+}
+
+// ************************************************************************* //

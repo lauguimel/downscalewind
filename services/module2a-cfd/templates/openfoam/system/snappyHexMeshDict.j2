@@ -1,0 +1,201 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | v2412
+    \\  /    A nd           | Web:     www.openfoam.com
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * snappyHexMeshDict.j2 — Jinja2 template
+ * Castellated + snap + layer addition for Perdigão terrain
+ *
+ * Variables:
+ *   refine_level             — max refinement level (= n_refine_levels)
+ *   refine_distances         — list of (distance_m, level) for terrain distance refinement
+ *   n_layers                 — number of boundary-layer cells on terrain
+ */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      snappyHexMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// ---------------------------------------------------------------------------
+// Processing stages
+// ---------------------------------------------------------------------------
+castellatedMesh true;
+snap            true;
+addLayers       true;
+
+// ---------------------------------------------------------------------------
+// Geometry
+//   terrain.stl must be present in constant/triSurface/
+// ---------------------------------------------------------------------------
+geometry
+{
+    terrain
+    {
+        type triSurfaceMesh;
+        file "terrain.stl";
+        // Treat the STL as a single named surface for boundary conditions
+        name terrain;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Castellated mesh controls
+// ---------------------------------------------------------------------------
+castellatedMeshControls
+{
+    // Maximum cell counts
+    maxLocalCells   10000000;    // Per-processor limit
+    maxGlobalCells  50000000;    // Global limit before parallel balancing
+
+    // Cell removal — fraction of cells required to retain a region
+    minRefinementCells  10;
+    nCellsBetweenLevels  2;     // Buffer layers between refinement levels
+
+    // Feature angle: extra refinement near edges where surface normals differ by more
+    resolveFeatureAngle 30;
+
+    // Feature edge refinement (requires extractFeatures to be run first)
+    features
+    (
+        {
+            file    "terrain.eMesh";
+            level   {{ refine_level }};
+        }
+    );
+
+    // Surface-based refinement
+    refinementSurfaces
+    {
+        terrain
+        {
+            // (min max) refinement levels — snappy uses max when near surface
+            level ( {{ refine_level }} {{ refine_level }} );
+
+            // Patch created for terrain surface
+            patchInfo
+            {
+                type wall;
+            }
+        }
+    }
+
+    // Distance-based refinement: fine near terrain, coarse aloft
+    // Each level halves cell size in all 3 directions (octree)
+    refinementRegions
+    {
+        terrain
+        {
+            mode    distance;
+            levels  (
+{%- for dist, level in refine_distances %}
+                ( {{ dist }} {{ level }} )
+{%- endfor %}
+            );
+        }
+    }
+
+    // Location of a point guaranteed to be inside the mesh (not inside terrain)
+    // Adjust to a point above terrain — typically domain centre at hub height
+    locationInMesh ( {{ domain.half_x }} {{ domain.half_y }} 200 );
+
+    // Allow free-standing zone faces
+    allowFreeStandingZoneFaces true;
+}
+
+// ---------------------------------------------------------------------------
+// Snap controls
+// ---------------------------------------------------------------------------
+snapControls
+{
+    nSmoothPatch        3;       // Smoothing iterations on patch
+    tolerance           2.0;    // Maximum snapping distance (in cell size units)
+    nSolveIter          30;     // Displacement solver iterations
+    nRelaxIter          5;      // Relaxation iterations
+    nFeatureSnapIter    10;     // Iterations for feature snapping
+    implicitFeatureSnap false;
+    explicitFeatureSnap true;
+    multiRegionFeatureSnap false;
+}
+
+// ---------------------------------------------------------------------------
+// Layer addition controls
+// ---------------------------------------------------------------------------
+addLayersControls
+{
+    // Relative sizes: thicknesses relative to undistorted cell size
+    relativeSizes true;
+
+    // Per-patch layer configuration
+    layers
+    {
+        terrain
+        {
+            nSurfaceLayers {{ n_layers }};
+        }
+    }
+
+    // Layer thickness parameters
+    expansionRatio          1.2;        // Growth ratio between successive layers
+    finalLayerThickness     0.3;        // Thickness of innermost layer (relative)
+    minThickness            0.1;        // Minimum acceptable layer thickness (relative)
+
+    // Quality controls
+    nGrow                   0;
+    featureAngle            60;         // Angle below which surface is considered flat
+    slipFeatureAngle        30;
+    nRelaxIter              3;
+    nSmoothSurfaceNormals   1;
+    nSmoothNormals          3;
+    nSmoothThickness        10;
+    maxFaceThicknessRatio   0.5;
+    maxThicknessToMedialRatio 0.3;
+    minMedialAxisAngle      90;
+    nBufferCellsNoExtrude   0;
+    nLayerIter              50;
+}
+
+// ---------------------------------------------------------------------------
+// Mesh quality controls
+//   Applied after castellated mesh and after layer addition.
+//   Tighter values improve mesh quality at the cost of more relaxation.
+// ---------------------------------------------------------------------------
+meshQualityControls
+{
+    maxNonOrtho             65;
+    maxBoundarySkewness     20;
+    maxInternalSkewness     4;
+    maxConcave              80;
+    minFlatness             0.5;
+    minVol                  1e-13;
+    minTetQuality           1e-30;
+    minArea                 -1;
+    minTwist                0.02;
+    minDeterminant          0.001;
+    minFaceWeight           0.05;
+    minVolRatio             0.01;
+    minTriangleTwist        -1;
+
+    // Number of error distribution smoothing iterations
+    nSmoothScale            4;
+    errorReduction          0.75;
+}
+
+// Write flags
+writeFlags
+(
+    scalarLevels
+    layerSets
+    layerFields
+);
+
+// Merge tolerance (relative to bounding box)
+mergeTolerance 1e-6;
+
+// ************************************************************************* //

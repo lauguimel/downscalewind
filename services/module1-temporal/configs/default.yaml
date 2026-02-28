@@ -1,0 +1,26 @@
+# Module 1 — Temporal Downscaling — Hyperparamètres par défaut
+# CLI flags ont priorité sur ces valeurs (voir train.py)
+
+model:
+  n_vars: 5           # u, v, z, t, q
+  n_levels: 10        # [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200] hPa
+  n_hidden: 48        # canaux cachés du CNN résiduel 3D
+  n_intermediate: 5   # pas intermédiaires à produire (1h, 2h, 3h, 4h, 5h)
+  # dx_m et dy_m sont écrasés au runtime (corrigés par std_u/std_v des NormStats)
+  dx_m: 21480.0       # 0.25° × 111320 m/° × cos(40°N) en mètres
+  dy_m: 27830.0       # 0.25° × 111320 m/° en mètres
+
+training:
+  grid_size: 7        # fenêtre spatiale — ablation: 3, 5, 7, 9, 11, 13 (null = tout)
+  batch_size: 32
+  lr: 3.0e-4
+  weight_decay: 1.0e-5
+  grad_clip: 1.0
+  max_epochs: 300
+  patience: 30        # early stopping sur val RMSE de u
+  n_workers: 2        # DataLoader workers
+
+# Splits temporels (définis dans dataset.py mais rappelés ici pour référence)
+# train : 2016-01-01 → 2016-10-31
+# val   : 2016-11-01 → 2016-12-31
+# test  : 2017-05-01 → 2017-06-15 (IOP Perdigão — ne jamais toucher pendant le train)

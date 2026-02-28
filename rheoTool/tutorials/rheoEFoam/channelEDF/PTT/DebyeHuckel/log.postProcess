@@ -1,0 +1,38 @@
+/*---------------------------------------------------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  9
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+Build  : 9-b456138dc4bc
+Exec   : postProcess -func sampleDict -latestTime
+Date   : May 09 2025
+Time   : 06:43:58
+Host   : "53fb47eb5f71"
+PID    : 207
+I/O    : uncollated
+Case   : /data/rheoTool/tutorials/rheoEFoam/channelEDF/PTT/DebyeHuckel
+nProcs : 1
+sigFpe : Enabling floating point exception trapping (FOAM_SIGFPE).
+fileModificationChecking : Monitoring run-time modified files using timeStampMaster (fileModificationSkew 10)
+allowSystemOperations : Allowing user-supplied system call operations
+
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+Create time
+
+Create mesh for time = 25
+
+Reading set description:
+    lineVert
+
+Time = 25
+
+Reading fields:
+    volVectorFields: U
+    volSymmTensorFields: tau
+
+Executing functionObjects
+
+End
+

@@ -1,0 +1,110 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | v2412
+    \\  /    A nd           | Web:     www.openfoam.com
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * fvSchemes.j2 — Jinja2 template
+ * Discretisation schemes for buoyantSimpleFoam with k-omega SST
+ * ABL flow over complex terrain (Perdigão)
+ *
+ * No Jinja2 variables required in this file — schemes are fixed for the
+ * physics configuration. Include this template directly or extend as needed.
+ */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSchemes;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// ---------------------------------------------------------------------------
+// Time derivative schemes
+//   steadyState — correct for SIMPLE steady-state solvers.
+// ---------------------------------------------------------------------------
+ddtSchemes
+{
+    default         steadyState;
+}
+
+// ---------------------------------------------------------------------------
+// Gradient schemes
+//   Gauss linear: second-order central-difference on all fields.
+//   cellLimited: bounds gradient to prevent overshoots on skewed cells.
+// ---------------------------------------------------------------------------
+gradSchemes
+{
+    default         Gauss linear;
+    grad(U)         cellLimited Gauss linear 1;
+    grad(k)         cellLimited Gauss linear 1;
+    grad(omega)     cellLimited Gauss linear 1;
+    grad(T)         cellLimited Gauss linear 1;
+}
+
+// ---------------------------------------------------------------------------
+// Divergence (convection) schemes
+//   U:     linearUpwind — bounded second-order, uses grad(U) limiter.
+//          Stable on complex terrain meshes while preserving accuracy.
+//   k,ω,T: limitedLinear 1 — TVD-limited linear; ensures boundedness of
+//          positive-definite scalars (k ≥ 0, ω > 0, T > 0).
+//   phi:   linear for face interpolation of flux.
+// ---------------------------------------------------------------------------
+divSchemes
+{
+    default                         none;
+
+    // Momentum — linearUpwind with gradient limiter (bounded for robustness)
+    div(phi,U)                      bounded Gauss linearUpwind grad(U);
+
+    // Turbulence scalars — bounded upwind (robust for complex terrain)
+    div(phi,k)                      bounded Gauss upwind;
+    div(phi,omega)                  bounded Gauss upwind;
+
+    // Turbulent diffusion — OF10 simpleFoam form (nuEff = nu + nut, dev2 operator)
+    div((nuEff*dev2(T(grad(U)))))       Gauss linear;
+}
+
+// ---------------------------------------------------------------------------
+// Laplacian schemes
+//   Gauss linear limited corrected 0.5
+//   'limited corrected' bounds the non-orthogonal correction to avoid
+//   divergence on highly non-orthogonal terrain cells.  The coefficient
+//   0.5 is a good compromise for typical snappy meshes with non-ortho < 70°.
+// ---------------------------------------------------------------------------
+laplacianSchemes
+{
+    default         Gauss linear limited corrected 0.5;
+}
+
+// ---------------------------------------------------------------------------
+// Interpolation schemes
+//   linear: second-order face interpolation (default).
+// ---------------------------------------------------------------------------
+interpolationSchemes
+{
+    default         linear;
+}
+
+// ---------------------------------------------------------------------------
+// Surface-normal gradient schemes
+//   limited corrected 0.5: same non-orthogonal correction as laplacian.
+// ---------------------------------------------------------------------------
+snGradSchemes
+{
+    default         limited corrected 0.5;
+}
+
+// ---------------------------------------------------------------------------
+// Wall distance method used by k-omega SST
+// ---------------------------------------------------------------------------
+wallDist
+{
+    method          meshWave;
+}
+
+// ************************************************************************* //

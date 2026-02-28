@@ -1,0 +1,68 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Version: 10
+    \\  /    A nd           | Web:     www.openfoam.org
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * 0/U.j2 — Velocity boundary conditions
+ *
+ * BC strategy (wind-direction-aware):
+ *   Inlet faces:  fixedValue (ERA5 hub-height wind vector)
+ *   Outlet faces: zeroGradient
+ *   Top:          zeroGradient (don't constrain vertical motion / gravity waves)
+ *   Terrain:      noSlip
+ */
+{%- set fd_x = inflow.flowDir_x -%}
+{%- set fd_y = inflow.flowDir_y -%}
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volVectorField;
+    location    "0";
+    object      U;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+// Wind direction: {{ inflow.wind_dir }}° FROM North
+// Flow direction (CFD): ({{ "%.4f" | format(fd_x) }}, {{ "%.4f" | format(fd_y) }}, 0)
+// u_hub = {{ inflow.u_hub }} m/s
+// Inlet faces: {{ inlet_faces | join(', ') }}
+// Outlet faces: {{ outlet_faces | join(', ') }}
+
+dimensions      [0 1 -1 0 0 0 0];
+
+internalField   uniform ( {{ "%.6f" | format(inflow.u_hub * fd_x) }} {{ "%.6f" | format(inflow.u_hub * fd_y) }} 0 );
+
+boundaryField
+{
+{% for face in ['west', 'east', 'south', 'north'] %}
+    {{ face }}
+    {
+{%- if face in inlet_faces %}
+        type            fixedValue;
+        value           uniform ( {{ "%.6f" | format(inflow.u_hub * fd_x) }} {{ "%.6f" | format(inflow.u_hub * fd_y) }} 0 );
+{%- else %}
+        type            zeroGradient;
+{%- endif %}
+    }
+
+{% endfor %}
+    top
+    {
+        type            zeroGradient;
+    }
+
+    terrain
+    {
+        type            noSlip;
+    }
+
+    bottom
+    {
+        type            noSlip;
+    }
+}
+
+// ************************************************************************* //

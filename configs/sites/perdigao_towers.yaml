@@ -1,0 +1,425 @@
+towers:
+  rne01:
+    altitude_m: 453.6
+    heights_m:
+    - 10
+    lat: 39.710533
+    lon: -7.726282
+  rne02:
+    altitude_m: 458.3
+    heights_m:
+    - 10
+    - 20
+    lat: 39.711479
+    lon: -7.728018
+  rne03:
+    altitude_m: 461.7
+    heights_m:
+    - 10
+    lat: 39.712818
+    lon: -7.729255
+  rne04:
+    altitude_m: 454.0
+    heights_m:
+    - 10
+    lat: 39.715137
+    lon: -7.731758
+  rne06:
+    altitude_m: 451.1
+    heights_m:
+    - 10
+    - 20
+    lat: 39.717697
+    lon: -7.734503
+  rne07:
+    altitude_m: 466.9
+    heights_m:
+    - 10
+    - 20
+    lat: 39.720291
+    lon: -7.73789
+  rsw01:
+    altitude_m: 472.1
+    heights_m:
+    - 10
+    - 20
+    lat: 39.701847
+    lon: -7.739815
+  rsw02:
+    altitude_m: 478.2
+    heights_m:
+    - 10
+    - 20
+    lat: 39.702732
+    lon: -7.740941
+  rsw03:
+    altitude_m: 472.9
+    heights_m:
+    - 10
+    - 20
+    - 30
+    - 40
+    - 60
+    lat: 39.703686
+    lon: -7.741678
+  rsw04:
+    altitude_m: 473.7
+    heights_m:
+    - 10
+    lat: 39.705154
+    lon: -7.743025
+  rsw05:
+    altitude_m: 479.1
+    heights_m:
+    - 10
+    lat: 39.70858
+    lon: -7.746012
+  rsw06:
+    altitude_m: 482.5
+    heights_m:
+    - 10
+    - 20
+    - 30
+    - 40
+    - 60
+    lat: 39.709824
+    lon: -7.747262
+  rsw07:
+    altitude_m: 490.5
+    heights_m:
+    - 10
+    - 20
+    lat: 39.712669
+    lon: -7.750339
+  rsw08:
+    altitude_m: 488.9
+    heights_m:
+    - 10
+    - 20
+    lat: 39.713943
+    lon: -7.751363
+  tnw01:
+    altitude_m: 297.8
+    heights_m:
+    - 2
+    - 10
+    - 20
+    lat: 39.709274
+    lon: -7.752824
+  tnw02:
+    altitude_m: 392.4
+    heights_m:
+    - 2
+    - 10
+    - 20
+    lat: 39.710407
+    lon: -7.750561
+  tnw03:
+    altitude_m: 486.8
+    heights_m:
+    - 2
+    - 10
+    lat: 39.711403
+    lon: -7.749239
+  tnw04:
+    altitude_m: 395.2
+    heights_m:
+    - 2
+    - 4
+    - 6
+    - 8
+    - 10
+    - 12
+    - 20
+    lat: 39.712322
+    lon: -7.746414
+  tnw05:
+    altitude_m: 368.0
+    heights_m:
+    - 2
+    - 4
+    - 6
+    - 8
+    - 10
+    - 12
+    - 20
+    lat: 39.713028
+    lon: -7.745908
+  tnw06:
+    altitude_m: 333.9
+    heights_m:
+    - 2
+    - 4
+    - 6
+    - 8
+    - 10
+    - 12
+    - 20
+    lat: 39.714657
+    lon: -7.743198
+  tnw07:
+    altitude_m: 286.5
+    heights_m:
+    - 4
+    - 6
+    - 8
+    - 10
+    - 12
+    - 20
+    - 30
+    - 40
+    - 60
+    lat: 39.715797
+    lon: -7.741407
+  tnw08:
+    altitude_m: 339.4
+    heights_m:
+    - 2
+    - 10
+    - 20
+    lat: 39.716938
+    lon: -7.739507
+  tnw09:
+    altitude_m: 388.2
+    heights_m:
+    - 2
+    - 10
+    lat: 39.717915
+    lon: -7.738166
+  tnw10:
+    altitude_m: 413.5
+    heights_m:
+    - 10
+    - 20
+    - 30
+    - 40
+    - 60
+    lat: 39.718273
+    lon: -7.737138
+  tnw11:
+    altitude_m: 437.0
+    heights_m:
+    - 2
+    - 10
+    - 20
+    lat: 39.718884
+    lon: -7.736073
+  tnw12:
+    altitude_m: 421.3
+    heights_m:
+    - 2
+    - 4
+    - 6
+    - 8
+    - 10
+    - 12
+    - 20
+    - 28
+    lat: 39.71907
+    lon: -7.735457
+  tnw13:
+    altitude_m: 384.5
+    heights_m:
+    - 2
+    - 4
+    - 6
+    - 8
+    - 10
+    - 12
+    - 20
+    - 28
+    lat: 39.719608
+    lon: -7.734928
+  tnw14:
+    altitude_m: 349.0
+    heights_m:
+    - 2
+    - 4
+    - 6
+    - 8
+    - 10
+    - 12
+    - 20
+    - 28
+    lat: 39.719959
+    lon: -7.733971
+  tnw15:
+    altitude_m: 330.4
+    heights_m:
+    - 2
+    - 4
+    - 6
+    - 8
+    - 10
+    - 12
+    - 20
+    - 28
+    lat: 39.7202
+    lon: -7.733384
+  tnw16:
+    altitude_m: 306.6
+    heights_m:
+    - 2
+    - 4
+    - 6
+    - 8
+    - 10
+    - 12
+    - 20
+    - 28
+    lat: 39.720425
+    lon: -7.732487
+  tse01:
+    altitude_m: 252.7
+    heights_m:
+    - 10
+    - 30
+    lat: 39.703129
+    lon: -7.748782
+  tse02:
+    altitude_m: 372.3
+    heights_m:
+    - 10
+    - 30
+    lat: 39.704884
+    lon: -7.745283
+  tse04:
+    altitude_m: 473.0
+    heights_m:
+    - 10
+    - 20
+    - 30
+    - 40
+    - 60
+    - 78
+    - 80
+    - 100
+    lat: 39.705967
+    lon: -7.743718
+  tse05:
+    altitude_m: 422.5
+    heights_m:
+    - 2
+    lat: 39.707462
+    lon: -7.742497
+  tse06:
+    altitude_m: 387.9
+    heights_m:
+    - 10
+    - 20
+    - 30
+    - 40
+    - 60
+    lat: 39.708012
+    lon: -7.740875
+  tse07:
+    altitude_m: 348.8
+    heights_m:
+    - 10
+    - 20
+    lat: 39.70871
+    lon: -7.738731
+  tse08:
+    altitude_m: 341.5
+    heights_m:
+    - 10
+    - 20
+    lat: 39.70932
+    lon: -7.73689
+  tse09:
+    altitude_m: 305.3
+    heights_m:
+    - 10
+    - 20
+    - 30
+    - 40
+    - 60
+    - 80
+    - 100
+    lat: 39.711212
+    lon: -7.734835
+  tse10:
+    altitude_m: 332.9
+    heights_m:
+    - 10
+    - 30
+    lat: 39.71191
+    lon: -7.733416
+  tse11:
+    altitude_m: 355.1
+    heights_m:
+    - 10
+    - 20
+    - 30
+    - 40
+    - 60
+    lat: 39.71236
+    lon: -7.732714
+  tse12:
+    altitude_m: 414.6
+    heights_m:
+    - 10
+    - 20
+    lat: 39.712994
+    lon: -7.731383
+  tse13:
+    altitude_m: 452.9
+    heights_m:
+    - 10
+    - 20
+    - 30
+    - 40
+    - 60
+    - 80
+    - 100
+    lat: 39.713596
+    lon: -7.730355
+  v01:
+    altitude_m: 330.6
+    heights_m:
+    - 2
+    - 10
+    lat: 39.708122
+    lon: -7.729931
+  v03:
+    altitude_m: 307.7
+    heights_m:
+    - 2
+    - 10
+    lat: 39.709873
+    lon: -7.733875
+  v04:
+    altitude_m: 295.7
+    heights_m:
+    - 2
+    - 10
+    lat: 39.712425
+    lon: -7.737182
+  v05:
+    altitude_m: 291.6
+    heights_m:
+    - 2
+    - 10
+    - 20
+    lat: 39.713737
+    lon: -7.738777
+  v06:
+    altitude_m: 288.6
+    heights_m:
+    - 2
+    - 10
+    - 20
+    lat: 39.714771
+    lon: -7.740047
+  v07:
+    altitude_m: 281.5
+    heights_m:
+    - 2
+    - 4
+    - 6
+    - 8
+    - 10
+    - 12
+    - 20
+    lat: 39.716755
+    lon: -7.743718

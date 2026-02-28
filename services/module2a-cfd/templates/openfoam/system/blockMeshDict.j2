@@ -1,0 +1,178 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | v2412
+    \\  /    A nd           | Web:     www.openfoam.com
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * blockMeshDict.j2 — Jinja2 template for buoyantSimpleFoam ABL simulation
+ * Perdigão complex terrain — coarse background mesh (snappyHexMesh refines later)
+ *
+ * Domain variables (all in metres):
+ *   domain.x_min, domain.x_max  — West/East limits
+ *   domain.y_min, domain.y_max  — South/North limits
+ *   domain.z_min, domain.z_max  — Bottom/Top limits (z_min = 0)
+ *
+ * Mesh variables:
+ *   mesh.nx, mesh.ny, mesh.nz   — Cell counts in X, Y, Z
+ *   mesh.x_grading              — X expansion ratio (uniform → 1)
+ *   mesh.y_grading              — Y expansion ratio (uniform → 1)
+ *   mesh.z_grading              — Z expansion ratio (>1 = coarser aloft)
+ *
+ * Coordinate convention:
+ *   X = East (+), Y = North (+), Z = up (+)
+ *   Origin typically at domain centre, ground level.
+ */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// ---------------------------------------------------------------------------
+// Scaling — all coordinates are in metres
+// ---------------------------------------------------------------------------
+scale 1;
+
+// ---------------------------------------------------------------------------
+// Vertices  (8 corners of the bounding box)
+//
+//   4 -------- 5
+//   |          |   (top face, z = z_max)
+//   7 -------- 6
+//
+//   0 -------- 1
+//   |          |   (bottom face, z = z_min = 0)
+//   3 -------- 2
+//
+//   Vertex numbering (OpenFOAM right-hand rule):
+//   0 = (x_min, y_min, z_min)   1 = (x_max, y_min, z_min)
+//   2 = (x_max, y_max, z_min)   3 = (x_min, y_max, z_min)
+//   4 = (x_min, y_min, z_max)   5 = (x_max, y_min, z_max)
+//   6 = (x_max, y_max, z_max)   7 = (x_min, y_max, z_max)
+// ---------------------------------------------------------------------------
+vertices
+(
+    ( {{ domain.x_min }} {{ domain.y_min }} {{ domain.z_min }} )   // 0
+    ( {{ domain.x_max }} {{ domain.y_min }} {{ domain.z_min }} )   // 1
+    ( {{ domain.x_max }} {{ domain.y_max }} {{ domain.z_min }} )   // 2
+    ( {{ domain.x_min }} {{ domain.y_max }} {{ domain.z_min }} )   // 3
+    ( {{ domain.x_min }} {{ domain.y_min }} {{ domain.z_max }} )   // 4
+    ( {{ domain.x_max }} {{ domain.y_min }} {{ domain.z_max }} )   // 5
+    ( {{ domain.x_max }} {{ domain.y_max }} {{ domain.z_max }} )   // 6
+    ( {{ domain.x_min }} {{ domain.y_max }} {{ domain.z_max }} )   // 7
+);
+
+// ---------------------------------------------------------------------------
+// Blocks
+//   Single hexahedral block spanning the full domain.
+//   Refinement is handled by snappyHexMesh.
+//
+//   Grading convention: simpleGrading (dx dy dz)
+//     z_grading > 1  → cells expand from bottom to top
+//                      (fine near ground, coarse aloft) — typical for ABL
+// ---------------------------------------------------------------------------
+blocks
+(
+    hex (0 1 2 3 4 5 6 7)
+    ( {{ mesh.nx }} {{ mesh.ny }} {{ mesh.nz }} )
+    simpleGrading
+    (
+        {{ mesh.x_grading }}   // X: uniform unless terrain slope requires it
+        {{ mesh.y_grading }}   // Y: uniform
+        {{ mesh.z_grading }}   // Z: expansion upward (coarser aloft)
+    )
+);
+
+// ---------------------------------------------------------------------------
+// Edges — straight edges only (no curved edges needed for box mesh)
+// ---------------------------------------------------------------------------
+edges
+(
+);
+
+// ---------------------------------------------------------------------------
+// Boundary patches
+//
+//   west   — x = x_min  (potential inflow face)
+//   east   — x = x_max  (potential outflow face)
+//   south  — y = y_min  (potential inflow face)
+//   north  — y = y_max  (potential inflow face)
+//   top    — z = z_max  (upper boundary)
+//   bottom — z = z_min  (ground / terrain base, replaced by snappyHexMesh)
+//
+//   NOTE: The actual inlet/outlet assignment is done in the 0/ field files
+//         using atmBoundaryLayerInletVelocity, which handles all wind directions.
+// ---------------------------------------------------------------------------
+boundary
+(
+    west
+    {
+        type patch;
+        faces
+        (
+            (0 4 7 3)   // x = x_min face
+        );
+    }
+
+    east
+    {
+        type patch;
+        faces
+        (
+            (1 2 6 5)   // x = x_max face
+        );
+    }
+
+    south
+    {
+        type patch;
+        faces
+        (
+            (0 1 5 4)   // y = y_min face
+        );
+    }
+
+    north
+    {
+        type patch;
+        faces
+        (
+            (3 7 6 2)   // y = y_max face
+        );
+    }
+
+    top
+    {
+        type patch;
+        faces
+        (
+            (4 5 6 7)   // z = z_max face
+        );
+    }
+
+    bottom
+    {
+        // This patch will be replaced/removed by snappyHexMesh when it
+        // inserts the terrain surface from terrain.stl.
+        // Keep type 'wall' consistent with terrain treatment.
+        type wall;
+        faces
+        (
+            (0 3 2 1)   // z = z_min face
+        );
+    }
+);
+
+// ---------------------------------------------------------------------------
+// Merge patch pairs — none for single-block mesh
+// ---------------------------------------------------------------------------
+mergePatchPairs
+(
+);
+
+// ************************************************************************* //

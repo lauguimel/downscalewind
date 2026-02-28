@@ -1,0 +1,124 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | v2412
+    \\  /    A nd           | Web:     www.openfoam.com
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * 0/T.j2 — Jinja2 template
+ * Initial and boundary conditions for temperature field
+ *
+ * Variables:
+ *   inflow.T_ref     — reference / inflow temperature [K]
+ *   inflow.L_mo      — Monin-Obukhov length [m]
+ *                       0  → neutral stratification  (zeroGradient at ground)
+ *                      >0  → stable stratification
+ *                      <0  → unstable / convective
+ *   physics.T_ref_K  — background reference temperature (same as inflow.T_ref
+ *                       for a neutral run)
+ *
+ * Neutral ABL (L_mo = 0):
+ *   Temperature is passive; ground BC is zeroGradient (no heat flux).
+ *
+ * Stable/unstable ABL (L_mo ≠ 0):
+ *   A surface heat flux BC should be used instead; modify the 'terrain' entry
+ *   below.  A fixedGradient based on the Monin-Obukhov heat flux:
+ *     q_s = -u_star * T_star  where  T_star = -(kappa * z_ref * dT/dz)|_s
+ *   is recommended.  For production use, replace zeroGradient with
+ *   externalWallHeatFlux or a custom BC.
+ */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      T;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+// T_ref = {{ inflow.T_ref }} K
+// L_mo  = {{ inflow.L_mo }} m  (0 = neutral, >0 = stable, <0 = unstable)
+
+dimensions      [0 0 0 1 0 0 0];
+
+// Initialise entire domain at reference temperature
+internalField   uniform {{ inflow.T_ref }};
+
+boundaryField
+{
+    // -----------------------------------------------------------------------
+    // Lateral inflow faces: fixedValue at T_ref
+    //   Provides a uniform temperature profile at inlets.
+    //   For a realistic ABL with a temperature inversion, replace with a
+    //   codedFixedValue that applies a piecewise-linear profile.
+    // -----------------------------------------------------------------------
+    west
+    {
+        type            inletOutlet;
+        inletValue      uniform {{ inflow.T_ref }};
+        value           uniform {{ inflow.T_ref }};
+    }
+
+    east
+    {
+        type            inletOutlet;
+        inletValue      uniform {{ inflow.T_ref }};
+        value           uniform {{ inflow.T_ref }};
+    }
+
+    south
+    {
+        type            inletOutlet;
+        inletValue      uniform {{ inflow.T_ref }};
+        value           uniform {{ inflow.T_ref }};
+    }
+
+    north
+    {
+        type            inletOutlet;
+        inletValue      uniform {{ inflow.T_ref }};
+        value           uniform {{ inflow.T_ref }};
+    }
+
+    // -----------------------------------------------------------------------
+    // Top boundary: inletOutlet
+    //   Allows temperature to advect out freely; applies T_ref on downflow.
+    // -----------------------------------------------------------------------
+    top
+    {
+        type            inletOutlet;
+        inletValue      uniform {{ inflow.T_ref }};
+        value           uniform {{ inflow.T_ref }};
+    }
+
+    // -----------------------------------------------------------------------
+    // Terrain surface:
+    //   Neutral (L_mo = 0):  zeroGradient — no heat flux through surface.
+    //   Stable/unstable:     fixedGradient or externalWallHeatFlux — see
+    //                        comments in file header.
+    //
+    //   The conditional below selects the correct BC automatically.
+    // -----------------------------------------------------------------------
+    terrain
+    {
+{%- if inflow.L_mo is none or inflow.L_mo == 0 %}
+        // Neutral stratification (or L_mo not computed): no surface heat flux
+        type            zeroGradient;
+{%- else %}
+        // Non-neutral: apply a uniform surface temperature as a first
+        // approximation.  Replace with a proper heat flux BC for production.
+        // T_surface ≈ T_ref + dT (user must supply surface temperature offset)
+        type            fixedValue;
+        value           uniform {{ inflow.T_ref }};
+{%- endif %}
+    }
+
+    bottom
+    {
+        // Flat bottom patch (may be absent after snappyHexMesh)
+        type            zeroGradient;
+    }
+}
+
+// ************************************************************************* //

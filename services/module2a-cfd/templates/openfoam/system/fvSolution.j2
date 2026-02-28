@@ -1,0 +1,142 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Version: 10
+    \\  /    A nd           | Web:     www.openfoam.org
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * fvSolution.j2 — Linear solvers and SIMPLE settings for simpleFoam
+ * Incompressible k-omega SST, ABL over complex terrain (Perdigão)
+ */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      fvSolution;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+solvers
+{
+    // -- Phi (velocity potential solved by potentialFoam for div-free init) --
+    Phi
+    {
+        solver          PCG;
+        preconditioner  DIC;
+        tolerance       1e-7;
+        relTol          0.01;
+        maxIter         200;
+    }
+
+    // -- Kinematic pressure (p = p_abs/rho, [m²/s²]) --
+    //    PCG+DIC: robust for all mesh sizes (no coarsening threshold issues).
+    p
+    {
+        solver          PCG;
+        preconditioner  DIC;
+        tolerance       1e-7;
+        relTol          0.01;
+        maxIter         200;
+    }
+
+    pFinal
+    {
+        $p;
+        relTol          0;
+    }
+
+    // -- Velocity --
+    U
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-6;
+        relTol          0.1;
+        maxIter         50;
+    }
+
+    UFinal
+    {
+        $U;
+        relTol          0;
+    }
+
+    // -- Turbulent kinetic energy --
+    k
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-6;
+        relTol          0.1;
+        maxIter         50;
+    }
+
+    kFinal
+    {
+        $k;
+        relTol          0;
+    }
+
+    // -- Specific dissipation rate --
+    omega
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-6;
+        relTol          0.1;
+        maxIter         50;
+    }
+
+    omegaFinal
+    {
+        $omega;
+        relTol          0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// potentialFoam settings (used for divergence-free initialisation)
+// ---------------------------------------------------------------------------
+potentialFlow
+{
+    nNonOrthogonalCorrectors 10;
+}
+
+// ---------------------------------------------------------------------------
+// SIMPLE algorithm (steady-state incompressible)
+// ---------------------------------------------------------------------------
+SIMPLE
+{
+    nNonOrthogonalCorrectors 2;
+
+    residualControl
+    {
+        p               1e-4;
+        U               1e-4;
+        k               1e-4;
+        omega           1e-4;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Relaxation factors
+// ---------------------------------------------------------------------------
+relaxationFactors
+{
+    fields
+    {
+        p               0.3;
+    }
+
+    equations
+    {
+        U               0.7;
+        k               0.5;
+        omega           0.5;
+    }
+}
+
+// ************************************************************************* //
