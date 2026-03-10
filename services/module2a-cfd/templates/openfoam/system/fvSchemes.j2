@@ -7,7 +7,7 @@
 \*---------------------------------------------------------------------------*/
 /*
  * fvSchemes.j2 — Jinja2 template
- * Discretisation schemes for buoyantSimpleFoam with k-omega SST
+ * Discretisation schemes for simpleFoam with k-epsilon
  * ABL flow over complex terrain (Perdigão)
  *
  * No Jinja2 variables required in this file — schemes are fixed for the
@@ -42,7 +42,7 @@ gradSchemes
     default         Gauss linear;
     grad(U)         cellLimited Gauss linear 1;
     grad(k)         cellLimited Gauss linear 1;
-    grad(omega)     cellLimited Gauss linear 1;
+    grad(epsilon)   cellLimited Gauss linear 1;
     grad(T)         cellLimited Gauss linear 1;
 }
 
@@ -50,8 +50,8 @@ gradSchemes
 // Divergence (convection) schemes
 //   U:     linearUpwind — bounded second-order, uses grad(U) limiter.
 //          Stable on complex terrain meshes while preserving accuracy.
-//   k,ω,T: limitedLinear 1 — TVD-limited linear; ensures boundedness of
-//          positive-definite scalars (k ≥ 0, ω > 0, T > 0).
+//   k,ε,T: limitedLinear 1 — TVD-limited linear; ensures boundedness of
+//          positive-definite scalars (k ≥ 0, ε > 0, T > 0).
 //   phi:   linear for face interpolation of flux.
 // ---------------------------------------------------------------------------
 divSchemes
@@ -63,10 +63,27 @@ divSchemes
 
     // Turbulence scalars — bounded upwind (robust for complex terrain)
     div(phi,k)                      bounded Gauss upwind;
-    div(phi,omega)                  bounded Gauss upwind;
+    div(phi,epsilon)                bounded Gauss upwind;
 
-    // Turbulent diffusion — OF10 simpleFoam form (nuEff = nu + nut, dev2 operator)
-    div((nuEff*dev2(T(grad(U)))))       Gauss linear;
+    // Turbulent diffusion (dev2 operator)
+    // simpleFoam: div((nuEff*dev2(T(grad(U)))))
+    // buoyantSimpleFoam: div(((rho*nuEff)*dev2(T(grad(U)))))
+    div((nuEff*dev2(T(grad(U)))))           Gauss linear;
+    div(((rho*nuEff)*dev2(T(grad(U)))))     Gauss linear;
+{% if solver.thermal | default(false) %}
+
+    // Temperature — bounded linearUpwind
+    div(phi,T)                          bounded Gauss linearUpwind grad(T);
+{% if solver.name | default('simpleFoam') == 'buoyantSimpleFoam' %}
+
+    // Energy transport — buoyantSimpleFoam (heRhoThermo)
+    // sensibleEnthalpy → h; sensibleInternalEnergy → e
+    div(phi,h)                          bounded Gauss linearUpwind default;
+    div(phi,e)                          bounded Gauss linearUpwind default;
+    div(phi,K)                          bounded Gauss upwind;
+    div(phi,Ekp)                        bounded Gauss upwind;
+{% endif %}
+{% endif %}
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +117,7 @@ snGradSchemes
 }
 
 // ---------------------------------------------------------------------------
-// Wall distance method used by k-omega SST
+// Wall distance method (used by wall functions)
 // ---------------------------------------------------------------------------
 wallDist
 {

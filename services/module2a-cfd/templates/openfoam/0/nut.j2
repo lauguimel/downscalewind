@@ -6,16 +6,16 @@
      \\/     M anipulation  |
 \*---------------------------------------------------------------------------*/
 /*
- * 0/nut.j2 — Turbulent kinematic viscosity for k-omega SST
+ * 0/nut.j2 — Turbulent kinematic viscosity for k-epsilon
  *
- * nut is a derived quantity computed from k and omega by the turbulence model.
- * Initial value: nut_0 ≈ Cmu * k_0 / omega_0
+ * nut is a derived quantity computed from k and epsilon by the turbulence model.
+ * Initial value: nut_0 = Cmu * k_0² / epsilon_0
  * All boundaries are 'calculated' except walls which use nutkWallFunction.
  */
 {%- set Cmu = 0.09 %}
-{%- set k_init    = inflow.u_star ** 2 / Cmu ** 0.5 %}
-{%- set omega_init = inflow.u_star / (inflow.kappa * inflow.z_ref) %}
-{%- set nut_init  = Cmu * k_init / omega_init %}
+{%- set k_init       = inflow.u_star ** 2 / Cmu ** 0.5 %}
+{%- set epsilon_init = Cmu ** 0.75 * k_init ** 1.5 / (inflow.kappa * inflow.z_ref) %}
+{%- set nut_init     = Cmu * k_init ** 2 / epsilon_init %}
 FoamFile
 {
     version     2.0;

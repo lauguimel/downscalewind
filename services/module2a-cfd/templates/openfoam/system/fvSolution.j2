@@ -7,7 +7,7 @@
 \*---------------------------------------------------------------------------*/
 /*
  * fvSolution.j2 — Linear solvers and SIMPLE settings for simpleFoam
- * Incompressible k-omega SST, ABL over complex terrain (Perdigão)
+ * Incompressible k-epsilon, ABL over complex terrain (Perdigão)
  */
 FoamFile
 {
@@ -31,7 +31,7 @@ solvers
         maxIter         200;
     }
 
-    // -- Kinematic pressure (p = p_abs/rho, [m²/s²]) --
+    // -- Pressure --
     //    PCG+DIC: robust for all mesh sizes (no coarsening threshold issues).
     p
     {
@@ -43,6 +43,18 @@ solvers
     }
 
     pFinal
+    {
+        $p;
+        relTol          0;
+    }
+
+    // -- Modified pressure p_rgh (for buoyantSimpleFoam) --
+    p_rgh
+    {
+        $p;
+    }
+
+    p_rghFinal
     {
         $p;
         relTol          0;
@@ -80,8 +92,8 @@ solvers
         relTol          0;
     }
 
-    // -- Specific dissipation rate --
-    omega
+    // -- Turbulent dissipation rate --
+    epsilon
     {
         solver          PBiCGStab;
         preconditioner  DILU;
@@ -90,11 +102,54 @@ solvers
         maxIter         50;
     }
 
-    omegaFinal
+    epsilonFinal
     {
-        $omega;
+        $epsilon;
         relTol          0;
     }
+{% if solver.thermal | default(false) %}
+
+    // -- Temperature --
+    T
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-6;
+        relTol          0.1;
+        maxIter         50;
+    }
+
+    TFinal
+    {
+        $T;
+        relTol          0;
+    }
+{% if solver.name | default('simpleFoam') == 'buoyantSimpleFoam' %}
+
+    // -- Enthalpy / Internal energy (buoyantSimpleFoam with heRhoThermo) --
+    h
+    {
+        $T;
+    }
+
+    hFinal
+    {
+        $T;
+        relTol          0;
+    }
+
+    e
+    {
+        $T;
+    }
+
+    eFinal
+    {
+        $T;
+        relTol          0;
+    }
+{% endif %}
+{% endif %}
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +158,8 @@ solvers
 potentialFlow
 {
     nNonOrthogonalCorrectors 10;
+    PhiRefCell      0;
+    PhiRefValue     0;
 }
 
 // ---------------------------------------------------------------------------
@@ -110,14 +167,20 @@ potentialFlow
 // ---------------------------------------------------------------------------
 SIMPLE
 {
-    nNonOrthogonalCorrectors 2;
+    // 3 correctors needed for terrain meshes with maxNonOrtho > 70°
+    nNonOrthogonalCorrectors 3;
 
     residualControl
     {
         p               1e-4;
         U               1e-4;
         k               1e-4;
-        omega           1e-4;
+        epsilon         1e-4;
+{% if solver.name | default('simpleFoam') == 'buoyantSimpleFoam' %}
+        p_rgh           1e-4;
+        h               1e-4;
+        e               1e-4;
+{% endif %}
     }
 }
 
@@ -129,13 +192,23 @@ relaxationFactors
     fields
     {
         p               0.3;
+{% if solver.name | default('simpleFoam') == 'buoyantSimpleFoam' %}
+        p_rgh           0.3;
+{% endif %}
     }
 
     equations
     {
         U               0.7;
         k               0.5;
-        omega           0.5;
+        epsilon         0.5;
+{% if solver.thermal | default(false) %}
+        T               0.7;
+{% endif %}
+{% if solver.name | default('simpleFoam') == 'buoyantSimpleFoam' %}
+        h               0.7;
+        e               0.7;
+{% endif %}
     }
 }
 

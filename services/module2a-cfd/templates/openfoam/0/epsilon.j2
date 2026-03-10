@@ -6,31 +6,35 @@
      \\/     M anipulation  |
 \*---------------------------------------------------------------------------*/
 /*
- * 0/k.j2 — Turbulent kinetic energy [m²/s²]
+ * 0/epsilon.j2 — Turbulent dissipation rate [m²/s³]
  *
- * k_init = u_star² / sqrt(Cmu) — ABL equilibrium value
+ * epsilon_init = Cmu^0.75 * k^1.5 / (kappa * z_ref)
+ *   ABL equilibrium at reference height (Richards & Hoxey 1993)
  *
  * BC strategy (Robin / inletOutlet on all lateral faces):
  *   All lateral:  inletOutlet — Dirichlet (inflow) or Neumann (outflow)
  *   Top:          zeroGradient
- *   Terrain:      kqRWallFunction
+ *   Terrain:      epsilonWallFunction
  */
 {%- set Cmu = 0.09 %}
 {%- set k_init = inflow.u_star ** 2 / Cmu ** 0.5 %}
+{%- set epsilon_init = Cmu ** 0.75 * k_init ** 1.5 / (inflow.kappa * inflow.z_ref) %}
 FoamFile
 {
     version     2.0;
     format      ascii;
     class       volScalarField;
     location    "0";
-    object      k;
+    object      epsilon;
 }
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
-// k_init = u_star²/√Cmu = {{ inflow.u_star }}²/√{{ Cmu }} = {{ "%.4f" | format(k_init) }} m²/s²
+// epsilon_init = Cmu^0.75 * k^1.5 / (kappa * z_ref)
+//             = {{ "%.4e" | format(Cmu ** 0.75) }} * {{ "%.4f" | format(k_init) }}^1.5 / ({{ inflow.kappa }} * {{ inflow.z_ref }})
+//             = {{ "%.6e" | format(epsilon_init) }} m²/s³
 
-dimensions      [0 2 -2 0 0 0 0];
+dimensions      [0 2 -3 0 0 0 0];
 
-internalField   uniform {{ "%.6f" | format(k_init) }};
+internalField   uniform {{ "%.6e" | format(epsilon_init) }};
 
 boundaryField
 {
@@ -38,8 +42,8 @@ boundaryField
     {{ face }}
     {
         type            inletOutlet;
-        inletValue      uniform {{ "%.6f" | format(k_init) }};
-        value           uniform {{ "%.6f" | format(k_init) }};
+        inletValue      uniform {{ "%.6e" | format(epsilon_init) }};
+        value           uniform {{ "%.6e" | format(epsilon_init) }};
     }
 
 {% endfor %}
@@ -50,14 +54,14 @@ boundaryField
 
     terrain
     {
-        type            kqRWallFunction;
-        value           uniform {{ "%.6f" | format(k_init) }};
+        type            epsilonWallFunction;
+        value           uniform {{ "%.6e" | format(epsilon_init) }};
     }
 
     bottom
     {
-        type            kqRWallFunction;
-        value           uniform {{ "%.6f" | format(k_init) }};
+        type            epsilonWallFunction;
+        value           uniform {{ "%.6e" | format(epsilon_init) }};
     }
 }
 

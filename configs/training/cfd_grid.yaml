@@ -94,13 +94,23 @@ mesh:
 
 # ── Paramètres du solveur ─────────────────────────────────────────────────────
 
+# --- Cascade strategy (multi-resolution initialisation) ---
+cascade:
+  resolutions_m: [500, 250, 100, 40]
+  solvers: [simpleFoam, simpleFoam, buoyantSimpleFoam, buoyantSimpleFoam]
+  n_iter_per_level: [1000, 800, 1500, 2000]
+  # Each level initialised via mapFields from the previous converged level.
+  # Transition simpleFoam→buoyantSimpleFoam: convert_fields.py rescales p [m²/s²]→[Pa].
+
+# --- Final solver (finest level) ---
 solver:
-  name: "buoyantSimpleFoam"
-  n_iterations: 1000      # itérations SIMPLE (500 pour benchmark rapide)
+  name: "buoyantSimpleFoam"   # compressible rho(p,T), replaces simpleFoam
+  thermal: true
+  n_iterations: 2000      # itérations SIMPLE (initialised from coarser level)
   n_cores: 8              # cœurs par run (parallélisation OpenFOAM)
   convergence_tol:
     continuity: 1.0e-4
     momentum: 1.0e-3
     k: 1.0e-3
-    omega: 1.0e-3
+    epsilon: 1.0e-3
     T: 1.0e-3

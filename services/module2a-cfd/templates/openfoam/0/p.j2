@@ -6,14 +6,13 @@
      \\/     M anipulation  |
 \*---------------------------------------------------------------------------*/
 /*
- * 0/p.j2 — Kinematic pressure for simpleFoam [m²/s²]
+ * 0/p.j2 — Pressure field
  *
- * BC strategy (wind-direction-aware):
- *   Inlet faces:  zeroGradient
- *   Outlet faces: fixedValue 0 (Dirichlet reference for pressure Poisson solver)
- *                 Phase 2: ERA5 interpolated pressure (nonuniform)
- *   Top:          zeroGradient (don't constrain vertical motion)
- *   Terrain:      zeroGradient
+ * simpleFoam:          kinematic [m²/s²], fixed reference
+ * buoyantSimpleFoam:   dynamic [Pa], calculated from p_rgh + rho*g*h
+ *
+ * Variables:
+ *   solver.name — determines pressure type and dimensions
  */
 FoamFile
 {
@@ -24,8 +23,44 @@ FoamFile
     object      p;
 }
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
-// Outlet faces (p fixedValue): {{ outlet_faces | join(', ') }}
 
+{%- if solver.name | default("simpleFoam") == "buoyantSimpleFoam" %}
+// buoyantSimpleFoam: dynamic pressure [Pa]
+// p is derived from p_rgh via p = p_rgh + rho*g*h
+dimensions      [1 -1 -2 0 0 0 0];
+
+internalField   uniform 101325;
+
+boundaryField
+{
+{% for face in ['west', 'east', 'south', 'north'] %}
+    {{ face }}
+    {
+        type            calculated;
+        value           uniform 101325;
+    }
+
+{% endfor %}
+    top
+    {
+        type            calculated;
+        value           uniform 101325;
+    }
+
+    terrain
+    {
+        type            calculated;
+        value           uniform 101325;
+    }
+
+    bottom
+    {
+        type            calculated;
+        value           uniform 101325;
+    }
+}
+{%- else %}
+// simpleFoam: kinematic pressure [m²/s²]
 dimensions      [0 2 -2 0 0 0 0];
 
 internalField   uniform 0;
@@ -35,12 +70,8 @@ boundaryField
 {% for face in ['west', 'east', 'south', 'north'] %}
     {{ face }}
     {
-{%- if face in outlet_faces %}
         type            fixedValue;
         value           uniform 0;
-{%- else %}
-        type            zeroGradient;
-{%- endif %}
     }
 
 {% endfor %}
@@ -59,5 +90,6 @@ boundaryField
         type            zeroGradient;
     }
 }
+{%- endif %}
 
 // ************************************************************************* //

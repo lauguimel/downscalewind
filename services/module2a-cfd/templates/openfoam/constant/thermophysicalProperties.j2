@@ -6,13 +6,21 @@
      \\/     M anipulation  |
 \*---------------------------------------------------------------------------*/
 /*
- * thermophysicalProperties.j2 — Thermophysical model for buoyantSimpleFoam
- * 
- * buoyantSimpleFoam uses a compressible thermophysical model.
- * For ABL (dry air, low Mach), hePsiThermo with perfectGas is standard.
+ * thermophysicalProperties.j2 — Thermophysical model for ABL simulation
+ *
+ * Required by buoyantSimpleFoam.
+ * NOT used by simpleFoam.
+ *
+ * Two modes controlled by solver.boussinesq (default: false):
+ *   - Boussinesq: rhoConst + explicit buoyancy fvOption
+ *     Replicates the old buoyantBoussinesqSimpleFoam behaviour.
+ *     rhoConst avoids heRhoThermo Newton divergence; buoyancy enters
+ *     only through a coded momentum source (Boussinesq approximation).
+ *   - Compressible: ideal gas rho = p/(R*T)
  *
  * Variables:
- *   physics.T_ref_K  — reference temperature [K] (default 300)
+ *   physics.T_ref_K      — reference temperature [K] (default 300)
+ *   solver.boussinesq    — if true, use rhoConst + buoyancy source (default: false)
  */
 FoamFile
 {
@@ -24,13 +32,20 @@ FoamFile
 }
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
+{%- set T_ref = physics.T_ref_K | default(300.0) %}
+{%- set boussinesq = solver.boussinesq | default(false) %}
+
 thermoType
 {
-    type            hePsiThermo;
+    type            heRhoThermo;
     mixture         pureMixture;
     transport       const;
     thermo          hConst;
-    equationOfState perfectGas;
+{%- if boussinesq %}
+    equationOfState rhoConst;          // constant density; buoyancy via fvOption
+{%- else %}
+    equationOfState perfectGas;        // rho = p / (R * T)
+{%- endif %}
     specie          specie;
     energy          sensibleEnthalpy;
 }
@@ -51,6 +66,12 @@ mixture
         mu          1.81e-5;    // Dynamic viscosity [Pa.s] at ~300K
         Pr          0.71;       // Laminar Prandtl number
     }
+{%- if boussinesq %}
+    equationOfState
+    {
+        rho         1.225;      // Constant density [kg/m³]
+    }
+{%- endif %}
 }
 
 // ************************************************************************* //

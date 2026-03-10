@@ -7,7 +7,7 @@
 \*---------------------------------------------------------------------------*/
 /*
  * controlDict.j2 — Jinja2 template
- * Steady-state SIMPLE loop for buoyantSimpleFoam ABL simulation
+ * Steady-state SIMPLE loop for simpleFoam k-ε ABL simulation
  *
  * Variables:
  *   solver.n_iter          — total number of SIMPLE iterations (endTime)
@@ -26,7 +26,7 @@ FoamFile
 // ---------------------------------------------------------------------------
 // Application
 // ---------------------------------------------------------------------------
-application     simpleFoam;     // incompressible RANS — appropriate for near-neutral ABL
+application     {{ solver.name | default("simpleFoam") }};
 
 // ---------------------------------------------------------------------------
 // Time control
@@ -74,12 +74,29 @@ functions
     {
         type            residuals;
         libs            ( "libutilityFunctionObjects.so" );
-        fields          ( U p k omega );
+        fields          ( U p k epsilon{% if solver.thermal | default(false) %} T{% endif %} );
         executeControl  timeStep;
         executeInterval 1;
         writeControl    timeStep;
         writeInterval   {{ solver.write_interval | default(100) }};
     }
+
+{% if solver.thermal | default(false) and solver.name | default('simpleFoam') != 'buoyantSimpleFoam' %}
+    // -- Scalar transport for temperature (Boussinesq with simpleFoam) --
+    // Solves the advection-diffusion equation for T as a passive scalar,
+    // replacing the enthalpy equation that causes crashes in buoyantSimpleFoam
+    // on large atmospheric domains.
+    scalarTransportT
+    {
+        type            scalarTransport;
+        libs            ( "libsolverFunctionObjects.so" );
+        field           T;
+        D               2.03e-05;       // thermal diffusivity of air [m²/s]
+        nCorr           0;
+        resetOnStartUp  false;
+        schemesField    T;
+    }
+{% endif %}
 
     // -- Volume-averaged TKE over full domain --
     volAverageTKE

@@ -1,0 +1,200 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  {{ of_version | default(10) }}
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * fvOptions.j2 — Source terms for ABL simulation
+ *
+ * Conditional blocks:
+ *   physics.coriolis (default true)  — Coriolis force on U
+ *   canopy.enabled   (default false) — Plant canopy drag on U, k, epsilon
+ *
+ * Note: Foundation OpenFOAM uses 'coded' fvModel.  ESI atmCoriolisUSource /
+ *       atmPlantCanopy* are NOT compatible.
+ *
+ * References:
+ *   Sogachev & Panferov (2006) — TKE-dissipation for plant canopy
+ *   Letzgus et al. (WES 2023) — Perdigão CFD with k-epsilon + canopy
+ */
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      fvOptions;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+{% if physics.coriolis | default(true) -%}
+// -------------------------------------------------------------------------
+// Coriolis force (coded fvModel)
+//   f = 2 * Omega * sin(lat)  where Omega = 7.2921e-5 rad/s
+//   At Perdigão lat=39.716°N → f ≈ 9.30e-5 rad/s
+// -------------------------------------------------------------------------
+coriolisForce
+{
+    type            coded;
+    selectionMode   all;
+
+    field           U;
+    name            coriolisSource;
+
+    codeAddSup
+    #{
+        const scalar f = 9.30e-5;
+
+        const volVectorField& U = mesh().lookupObject<volVectorField>("U");
+        const scalarField& V = mesh().V();
+
+        vectorField& source = eqn.source();
+        forAll(U, cellI)
+        {
+            // Coriolis: -f × U  →  S_x = +f*Uy, S_y = -f*Ux
+            // source is on RHS so we subtract
+            source[cellI].x() -= f * U[cellI].y() * V[cellI];
+            source[cellI].y() += f * U[cellI].x() * V[cellI];
+        }
+    #};
+}
+{% endif -%}
+
+{% if solver.boussinesq | default(false) -%}
+// -------------------------------------------------------------------------
+// Boussinesq buoyancy force (coded fvModel)
+//   Kinematic momentum source for simpleFoam (no rho multiplier).
+//   F_buoy = -beta * (T - TRef) * g
+//   This replicates the old buoyantBoussinesqSimpleFoam behaviour.
+// -------------------------------------------------------------------------
+boussinesqBuoyancy
+{
+    type            coded;
+    selectionMode   all;
+
+    field           U;
+    name            boussinesqBuoyancySource;
+
+    codeAddSup
+    #{
+        const scalar beta = {{ "%.4e" | format(1.0 / (physics.T_ref_K | default(300.0))) }};
+        const scalar TRef = {{ "%.2f" | format(physics.T_ref_K | default(300.0)) }};
+
+        const volScalarField& T = mesh().lookupObject<volScalarField>("T");
+        const scalarField& V = mesh().V();
+
+        vectorField& source = eqn.source();
+        forAll(T, cellI)
+        {
+            // Boussinesq (kinematic): F = -beta * (T - TRef) * g
+            // g = (0, 0, -9.81), source is on RHS so subtract
+            scalar dT = T[cellI] - TRef;
+            source[cellI].z() += beta * dT * 9.81 * V[cellI];
+        }
+    #};
+}
+{% endif -%}
+
+{% if canopy.enabled | default(false) -%}
+// -------------------------------------------------------------------------
+// Plant canopy drag on momentum
+//   F_drag = -Cd * LAD * |U| * U
+//   Cd = {{ canopy.Cd | default(0.2) }} (Sogachev & Panferov 2006)
+//   LAD volScalarField must be present in the case (from generate_lad_field.py)
+// -------------------------------------------------------------------------
+canopyDrag
+{
+    type            coded;
+    selectionMode   all;
+    field           U;
+    name            canopyDragSource;
+
+    codeAddSup
+    #{
+        const scalar Cd = {{ canopy.Cd | default(0.2) }};
+        const volVectorField& U = mesh().lookupObject<volVectorField>("U");
+        const volScalarField& LAD = mesh().lookupObject<volScalarField>("LAD");
+        const scalarField& V = mesh().V();
+
+        vectorField& source = eqn.source();
+        forAll(U, cellI)
+        {
+            if (LAD[cellI] > SMALL)
+            {
+                scalar magU = mag(U[cellI]);
+                // Drag force: adds to source (opposite to U direction)
+                source[cellI] += Cd * LAD[cellI] * magU * U[cellI] * V[cellI];
+            }
+        }
+    #};
+}
+
+// -------------------------------------------------------------------------
+// Plant canopy TKE source
+//   S_k = Cd * LAD * |U|^3  (wake production, Sogachev & Panferov 2006)
+// -------------------------------------------------------------------------
+canopyTKE
+{
+    type            coded;
+    selectionMode   all;
+    field           k;
+    name            canopyTKESource;
+
+    codeAddSup
+    #{
+        const scalar Cd = {{ canopy.Cd | default(0.2) }};
+        const volVectorField& U = mesh().lookupObject<volVectorField>("U");
+        const volScalarField& LAD = mesh().lookupObject<volScalarField>("LAD");
+        const scalarField& V = mesh().V();
+
+        scalarField& source = eqn.source();
+        forAll(U, cellI)
+        {
+            if (LAD[cellI] > SMALL)
+            {
+                scalar magU = mag(U[cellI]);
+                // S_k = Cd * LAD * |U|³
+                source[cellI] -= Cd * LAD[cellI] * Foam::pow(magU, 3) * V[cellI];
+            }
+        }
+    #};
+}
+
+// -------------------------------------------------------------------------
+// Plant canopy epsilon source
+//   S_eps = C4_eps * (eps/k) * S_k
+//   C4_eps = {{ canopy.C4_eps | default(0.9) }} (Sogachev & Panferov 2006)
+// -------------------------------------------------------------------------
+canopyEpsilon
+{
+    type            coded;
+    selectionMode   all;
+    field           epsilon;
+    name            canopyEpsilonSource;
+
+    codeAddSup
+    #{
+        const scalar Cd = {{ canopy.Cd | default(0.2) }};
+        const scalar C4eps = {{ canopy.C4_eps | default(0.9) }};
+        const volVectorField& U = mesh().lookupObject<volVectorField>("U");
+        const volScalarField& LAD = mesh().lookupObject<volScalarField>("LAD");
+        const volScalarField& k = mesh().lookupObject<volScalarField>("k");
+        const volScalarField& epsilon = mesh().lookupObject<volScalarField>("epsilon");
+        const scalarField& V = mesh().V();
+
+        scalarField& source = eqn.source();
+        forAll(U, cellI)
+        {
+            if (LAD[cellI] > SMALL && k[cellI] > SMALL)
+            {
+                scalar magU = mag(U[cellI]);
+                scalar Sk = Cd * LAD[cellI] * Foam::pow(magU, 3);
+                // S_eps = C4_eps * (eps/k) * S_k
+                source[cellI] -= C4eps * (epsilon[cellI] / k[cellI]) * Sk * V[cellI];
+            }
+        }
+    #};
+}
+{% endif -%}
+
+// ************************************************************************* //

@@ -11,9 +11,9 @@
  *
  * p_rgh = p - rho * g * h
  *   where h is the height above a reference datum.
- * buoyantSimpleFoam solves for p_rgh rather than p to decouple the
- * hydrostatic pressure gradient from the dynamic pressure, which is
- * numerically important for stratified/buoyancy-driven flows.
+ * buoyantBoussinesqSimpleFoam solves for p_rgh rather than p to decouple
+ * the hydrostatic pressure gradient from the dynamic pressure.
+ * For simpleFoam (neutral), p_rgh ≡ p (no buoyancy correction).
  *
  * Variables:
  *   physics.p_ref_Pa   — reference gauge pressure [Pa] (usually 0)
@@ -43,18 +43,54 @@ FoamFile
 
 dimensions      [1 -1 -2 0 0 0 0];
 
-// Initialise to zero gauge pressure (hydrostatic component removed)
-internalField   uniform 0;
+{%- set boussinesq = solver.boussinesq | default(false) %}
+{%- set p_init = 0 if boussinesq else 101325 %}
+// Boussinesq: gauge pressure (rho independent of p, es=Cp*T is linear)
+// perfectGas: atmospheric (rho=p/(RT) needs realistic p to avoid negative T)
+internalField   uniform {{ p_init }};
 
 boundaryField
 {
     // -----------------------------------------------------------------------
-    // Lateral faces + top: fixedValue 0
-    //   Zero-gauge dynamic pressure at all open boundaries.
-    //   This provides clear Dirichlet constraints for the pressure Poisson
-    //   solver, which is critical for stable convergence.
-    //   (fixedFluxPressure on all sides can lead to an underdetermined system)
+    // Lateral faces:
+    //   simpleFoam / buoyantBoussinesqSimpleFoam (incompressible):
+    //     fixedValue 0 — zero kinematic gauge pressure, Dirichlet constraint.
+    //   buoyantSimpleFoam (compressible, p in Pa):
+    //     fixedFluxPressure — adjusts gradient to be consistent with inletOutlet
+    //     velocity flux on lateral faces. Prevents singularity in compressible
+    //     pressure Poisson when combined with non-trivial hydrostatic field.
+    //
+    // Top: fixedValue 0 for all solvers (clean Dirichlet at domain ceiling).
     // -----------------------------------------------------------------------
+{% if solver.name | default("simpleFoam") == "buoyantSimpleFoam" %}
+    west
+    {
+        type            fixedFluxPressure;
+        gradient        uniform 0;
+        value           uniform {{ p_init }};
+    }
+
+    east
+    {
+        type            fixedFluxPressure;
+        gradient        uniform 0;
+        value           uniform {{ p_init }};
+    }
+
+    south
+    {
+        type            fixedFluxPressure;
+        gradient        uniform 0;
+        value           uniform {{ p_init }};
+    }
+
+    north
+    {
+        type            fixedFluxPressure;
+        gradient        uniform 0;
+        value           uniform {{ p_init }};
+    }
+{% else %}
     west
     {
         type            fixedValue;
@@ -78,11 +114,12 @@ boundaryField
         type            fixedValue;
         value           uniform 0;
     }
+{% endif %}
 
     top
     {
         type            fixedValue;
-        value           uniform 0;
+        value           uniform {{ p_init }};
     }
 
     // -----------------------------------------------------------------------
@@ -93,14 +130,14 @@ boundaryField
     {
         type            fixedFluxPressure;
         gradient        uniform 0;
-        value           uniform 0;
+        value           uniform {{ p_init }};
     }
 
     bottom
     {
         type            fixedFluxPressure;
         gradient        uniform 0;
-        value           uniform 0;
+        value           uniform {{ p_init }};
     }
 }
 

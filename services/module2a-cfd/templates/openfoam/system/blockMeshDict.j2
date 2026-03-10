@@ -6,7 +6,7 @@
      \\/     M anipulation  |
 \*---------------------------------------------------------------------------*/
 /*
- * blockMeshDict.j2 — Jinja2 template for buoyantSimpleFoam ABL simulation
+ * blockMeshDict.j2 — Jinja2 template for simpleFoam k-ε ABL simulation
  * Perdigão complex terrain — coarse background mesh (snappyHexMesh refines later)
  *
  * Domain variables (all in metres):
@@ -105,8 +105,8 @@ edges
 //   top    — z = z_max  (upper boundary)
 //   bottom — z = z_min  (ground / terrain base, replaced by snappyHexMesh)
 //
-//   NOTE: The actual inlet/outlet assignment is done in the 0/ field files
-//         using atmBoundaryLayerInletVelocity, which handles all wind directions.
+//   NOTE: All lateral faces use inletOutlet (Robin BC) — automatic inlet/outlet
+//         switching per cell face based on flux sign. No manual assignment needed.
 // ---------------------------------------------------------------------------
 boundary
 (

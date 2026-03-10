@@ -7,12 +7,17 @@
 \*---------------------------------------------------------------------------*/
 /*
  * turbulenceProperties — static file (no Jinja2 templating needed)
- * k-omega SST turbulence model for ABL simulation
+ * Standard k-epsilon turbulence model for ABL simulation
  *
- * k-omega SST (Menter 1994) is the recommended closure for ABL flows over
- * complex terrain: it blends k-omega near walls with k-epsilon in the free
- * stream, handles adverse pressure gradients, and is compatible with the
- * atmBoundaryLayer* boundary conditions in OpenFOAM 9.
+ * k-epsilon is the validated closure for steady-state ABL flows over
+ * complex terrain at Perdigão (Letzgus et al., WES 2023; Neunaber et al.,
+ * WES 2022; Palma et al., WES 2020). It is consistent with the
+ * atmBoundaryLayer* inlet BCs and atmPlantCanopy* source terms in
+ * OpenFOAM ESI v2006+.
+ *
+ * References:
+ *   Richards & Hoxey (1993) — ABL equilibrium profiles for k-epsilon
+ *   Parente et al. (2011)   — Modified k-epsilon for horizontal homogeneity
  */
 FoamFile
 {
@@ -28,27 +33,18 @@ simulationType  RAS;
 
 RAS
 {
-    // k-omega SST: shear stress transport variant of k-omega
-    RASModel        kOmegaSST;
+    RASModel        kEpsilon;
 
     turbulence      on;
 
     printCoeffs     yes;    // Print model coefficients to stdout at startup
 
-    // Model coefficients — default Menter (1994) values
-    // alphaK1     0.85;
-    // alphaK2     1.0;
-    // alphaOmega1 0.5;
-    // alphaOmega2 0.856;
-    // beta1       0.075;
-    // beta2       0.0828;
-    // betaStar    0.09;
-    // gamma1      0.5555;
-    // gamma2      0.4403;
-    // a1          0.31;
-    // b1          1.0;
-    // c1          10.0;
-    // F3          no;
+    // Standard k-epsilon coefficients (Launder & Spalding, 1974)
+    // Cmu         0.09;
+    // C1          1.44;
+    // C2          1.92;
+    // sigmaK      1.0;
+    // sigmaEps    1.3;
 }
 
 // ************************************************************************* //

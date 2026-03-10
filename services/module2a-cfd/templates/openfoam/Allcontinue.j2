@@ -1,0 +1,103 @@
+#!/bin/bash
+set -euo pipefail
+
+# Ensure we run inside the case directory
+cd "${0%/*}" || exit 1
+
+if [ "${WM_PROJECT_DIR:-}" = "" ]; then
+    echo "ERROR: Please run after sourcing OpenFOAM (WM_PROJECT_DIR not set)." >&2
+    exit 1
+fi
+
+. "$WM_PROJECT_DIR/bin/tools/RunFunctions"
+
+usage() {
+    cat <<'USAGE'
+Usage: ./Allcontinue <nProcs> [targetEndTime]
+
+  <nProcs>         Number of MPI ranks to use.
+  [targetEndTime]  Optional new endTime (default: current endTime + 1000).
+
+This script restarts {{ solver.name | default('simpleFoam') }} from the latest available time.
+It handles changing the number of processors automatically.
+USAGE
+}
+
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+    usage
+    exit 1
+fi
+
+NPROCS=$1
+
+# Get latest time — check processor directories first
+if [ -d "processor0" ]; then
+    echo "Found decomposed case, reading latest time from processor directories..."
+    LATEST_TIME=$(foamListTimes -processor -latestTime 2>/dev/null || echo "")
+else
+    LATEST_TIME=$(foamListTimes -latestTime 2>/dev/null || echo "")
+fi
+
+if [ -z "$LATEST_TIME" ]; then
+    echo "ERROR: No time directories found. Did you run Allrun first?" >&2
+    exit 1
+fi
+
+# If targetEndTime provided, use it; otherwise add 1000 iterations
+if [ "$#" -eq 2 ]; then
+    TARGET_END=$2
+else
+    CURRENT_END=$(foamDictionary system/controlDict -entry endTime -value)
+    TARGET_END=$(awk "BEGIN{print $CURRENT_END + 1000}")
+fi
+
+echo "========================================"
+echo "Continuing case from t=$LATEST_TIME to t=$TARGET_END using $NPROCS processor(s)"
+echo "========================================"
+
+# Configure for restart
+foamDictionary system/controlDict -entry startFrom -set latestTime > /dev/null
+foamDictionary system/controlDict -entry endTime -set "$TARGET_END" > /dev/null
+
+if [ "$NPROCS" -gt 1 ]; then
+    CURRENT_NPROCS=$(foamDictionary system/decomposeParDict -entry numberOfSubdomains -value 2>/dev/null || echo "0")
+
+    foamDictionary system/decomposeParDict -entry numberOfSubdomains -set "$NPROCS" > /dev/null
+
+    NEED_REDECOMPOSE=false
+
+    if [ ! -d "processor0" ]; then
+        NEED_REDECOMPOSE=true
+        echo "No processor directories found, decomposing..."
+    elif [ "$CURRENT_NPROCS" != "$NPROCS" ]; then
+        NEED_REDECOMPOSE=true
+        echo "Number of processors changed from $CURRENT_NPROCS to $NPROCS"
+        echo "Reconstructing latest time and redecomposing..."
+        runApplication reconstructPar -latestTime
+        rm -rf processor*
+    fi
+
+    if [ "$NEED_REDECOMPOSE" = true ]; then
+        runApplication decomposePar
+    fi
+
+    # Remove log file to allow re-run
+    rm -f log.{{ solver.name | default('simpleFoam') }}
+
+    runParallel {{ solver.name | default('simpleFoam') }}
+    runApplication reconstructPar -latestTime
+else
+    if [ -d "processor0" ]; then
+        echo "Processor directories found, reconstructing for serial run..."
+        runApplication reconstructPar -latestTime
+        rm -rf processor*
+    fi
+
+    rm -f log.{{ solver.name | default('simpleFoam') }}
+    runApplication {{ solver.name | default('simpleFoam') }}
+fi
+
+echo "========================================"
+echo "Continuation finished. Final time:"
+foamListTimes -latestTime
+echo "========================================"

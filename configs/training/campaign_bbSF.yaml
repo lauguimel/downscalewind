@@ -1,0 +1,30 @@
+# Sweep config for hpc-sim SweepGenerator — Boussinesq thermal
+# Uses simpleFoam + scalarTransport function object for T + coded Boussinesq fvOption
+# (buoyantSimpleFoam/buoyantBoussinesqSimpleFoam crash in OF9 on atmospheric domains)
+# 16 directions × 5 speeds × 3 stabilities = 240 cases
+
+parameters:
+  solver: [simpleFoam]
+  direction_deg: [0.0, 22.5, 45.0, 67.5, 90.0, 112.5, 135.0, 157.5, 180.0, 202.5, 225.0, 247.5, 270.0, 292.5, 315.0, 337.5]
+  speed_ms: [3.0, 6.0, 10.0, 15.0, 20.0]
+  stability: [neutral, stable, unstable]
+
+# HPC resources (similar to simpleFoam; scalarTransport adds negligible overhead)
+resources:
+  ncpus: 12
+  mem: 8GB
+  walltime: "5:00:00"
+
+# Physics flags (used by generate_campaign.py)
+physics:
+  thermal: true
+  boussinesq: true
+  coriolis: true
+  canopy: false
+
+# Mesh settings
+mesh:
+  resolution_m: 100
+  domain_km: 10
+  context_cells: 1
+  n_refine_levels: 2

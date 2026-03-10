@@ -1,0 +1,71 @@
+#!/bin/sh
+cd ${0%/*} || exit 1    # run from this directory
+
+# Source tutorial run functions
+. $WM_PROJECT_DIR/bin/tools/RunFunctions
+
+if [ "$#" -lt 1 ]; then
+    echo "Usage: ./Allrun <nProcs> [--mesh-only]"
+    echo "  nProcs     Number of processors"
+    echo "  --mesh-only  Stop after mesh generation (for ParaView check)"
+    exit 1
+fi
+
+NPROCS=$1
+MESH_ONLY=false
+if [ "${2:-}" = "--mesh-only" ]; then
+    MESH_ONLY=true
+fi
+
+SOLVER="{{ solver.name | default('simpleFoam') }}"
+
+# Helper: check that the last command succeeded
+check_log() {
+    LOG=$1
+    if grep -q "FOAM FATAL" "$LOG" 2>/dev/null; then
+        echo "========================================" >&2
+        echo "ERROR: $(basename $LOG .log) failed — see $LOG" >&2
+        tail -5 "$LOG" >&2
+        echo "========================================" >&2
+        exit 1
+    fi
+}
+
+# ---- Mesh generation ----
+runApplication blockMesh
+check_log log.blockMesh
+
+# surfaceFeatures works for OF7+ (surfaceFeatureExtract is deprecated since OF8)
+runApplication surfaceFeatures
+check_log log.surfaceFeatures
+
+runApplication snappyHexMesh -overwrite
+check_log log.snappyHexMesh
+
+runApplication checkMesh -latestTime
+
+if [ "$MESH_ONLY" = true ]; then
+    echo "========================================"
+    echo "Mesh generation complete (--mesh-only)."
+    echo "Open case.foam in ParaView to inspect."
+    echo "========================================"
+    exit 0
+fi
+
+# ---- Divergence-free velocity initialisation ----
+runApplication potentialFoam -writePhi
+check_log log.potentialFoam
+
+# ---- Main solve ----
+if [ "$NPROCS" -gt 1 ]; then
+    foamDictionary system/decomposeParDict -entry numberOfSubdomains -set $NPROCS
+    runApplication decomposePar
+    runParallel $SOLVER
+    runApplication reconstructPar -latestTime
+else
+    runApplication $SOLVER
+fi
+
+echo "========================================"
+echo "Run complete."
+echo "========================================"
