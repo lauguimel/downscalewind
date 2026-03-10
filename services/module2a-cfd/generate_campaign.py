@@ -238,7 +238,7 @@ def expand_cases(
         # In OF9, buoyantBoussinesqSimpleFoam is merged into buoyantSimpleFoam
         # with Boussinesq equation of state. Map solver name accordingly.
         actual_solver = solver
-        boussinesq = False
+        boussinesq = physics.get("boussinesq", False)
         if solver == "buoyantBoussinesqSimpleFoam":
             actual_solver = "buoyantSimpleFoam"
             boussinesq = True
