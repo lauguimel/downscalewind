@@ -2,7 +2,7 @@
 generate_campaign.py — Generate OpenFOAM cases for the multi-solver campaign
 
 Reads a campaign sweep YAML and generates complete OpenFOAM case directories
-for each parameter combination. Optionally registers cases in the hpc-sim database.
+for each parameter combination. Produces a campaign.yaml for kraken-sim.
 
 Usage
 -----
@@ -14,10 +14,6 @@ Usage
     python generate_campaign.py configs/training/campaign_simpleFoam.yaml \
         --group pilot_sf --prefix pilot_sf \
         --filter-directions 231 40 --filter-speeds 10
-
-    # Register in hpc-sim database
-    python generate_campaign.py configs/training/campaign_simpleFoam.yaml \
-        --group sf --prefix prd_sf --db /path/to/cases.db
 """
 
 from __future__ import annotations
@@ -196,6 +192,9 @@ class CampaignCase:
     boussinesq: bool = False
     n_iterations: int = 2000
     write_interval: int = 200
+    ncpus: int = 12
+    walltime: str = "04:00:00"
+    mem: str = "32gb"
 
 
 def load_campaign_config(yaml_path: Path) -> dict:
@@ -330,7 +329,6 @@ def generate_case_dir(
         inflow_json=inflow_json,
         n_refine_levels=case.n_refine_levels,
         domain_km=case.domain_km,
-        of_version=9,
         solver_name=case.solver,
         thermal=case.thermal,
         boussinesq=case.boussinesq,
@@ -365,13 +363,28 @@ def _patch_control_dict(case_dir: Path, n_iter: int, write_interval: int) -> Non
     cd_path.write_text(text)
 
 
+def _render_run_pbs(case_dir: Path, case: CampaignCase) -> None:
+    """Render run.pbs.j2 into the case directory."""
+    from jinja2 import Environment, FileSystemLoader
+
+    template_dir = MODULE_DIR / "templates" / "openfoam"
+    env = Environment(loader=FileSystemLoader(str(template_dir)))
+    template = env.get_template("run.pbs.j2")
+    content = template.render(
+        case_id=case.case_id,
+        ncpus=case.ncpus,
+        mem=case.mem,
+        walltime=case.walltime,
+    )
+    (case_dir / "run.pbs").write_text(content)
+
+
 def generate_campaign(
     config_path: Path,
     output_base: Path,
     site_config_path: Path,
     group_name: str | None = None,
     prefix: str = "prd",
-    db_path: Path | None = None,
     srtm_tif: Path | None = None,
     filter_directions: list[float] | None = None,
     filter_speeds: list[float] | None = None,
@@ -389,11 +402,9 @@ def generate_campaign(
     site_config_path : Path
         Path to sites/perdigao.yaml.
     group_name : str | None
-        Group name for hpc-sim database.
+        Group name for campaign.yaml.
     prefix : str
         Case ID prefix (e.g., 'prd_sf' for simpleFoam).
-    db_path : Path | None
-        Path to hpc-sim SQLite database. If provided, cases are registered.
     srtm_tif : Path | None
         SRTM DEM GeoTIFF.
     filter_directions, filter_speeds, filter_stabilities : list | None
@@ -433,7 +444,7 @@ def generate_campaign(
 
     # Generate cases
     mesh_cache: dict[str, Path] = {}
-    manifest = {}
+    campaign_cases = []
     for case in cases:
         case_dir = generate_case_dir(
             case=case,
@@ -442,63 +453,42 @@ def generate_campaign(
             srtm_tif=srtm_tif,
             mesh_cache=mesh_cache,
         )
-        manifest[case.case_id] = {
-            "solver": case.solver,
-            "direction_deg": case.direction_deg,
-            "speed_ms": case.speed_ms,
-            "stability": case.stability,
-            "thermal": case.thermal,
-            "resolution_m": case.resolution_m,
-            "domain_km": case.domain_km,
-        }
+        # Render run.pbs from template
+        _render_run_pbs(case_dir, case)
 
-    # Save manifest
-    manifest_path = output_base / f"campaign_manifest_{prefix}.json"
-    with open(manifest_path, "w") as f:
-        json.dump(manifest, f, indent=2)
-    logger.info("Manifest saved: %s (%d cases)", manifest_path, len(manifest))
+        campaign_cases.append({
+            "id": case.case_id,
+            "dir": case.case_id,
+            "script": "run.pbs",
+            "ncpus": case.ncpus,
+            "tags": {
+                "direction_deg": case.direction_deg,
+                "speed_ms": case.speed_ms,
+                "stability": case.stability,
+                "solver": case.solver,
+                "resolution_m": case.resolution_m,
+            },
+        })
 
-    # Register in hpc-sim database if requested
-    if db_path is not None:
-        _register_in_hpcsim(db_path, cases, group_name, cfg.get("resources", {}))
+    # Write kraken-sim campaign.yaml
+    campaign_yaml = {
+        "name": f"perdigao_{prefix}",
+        "hpc": {
+            "host": "aqua.qut.edu.au",
+            "username": "maitreje",
+            "remote_base_dir": f"/home/maitreje/downscalewind/{prefix}",
+        },
+        "parser": "openfoam",
+        "inject_monitoring": True,
+        "monitoring_fields": ["U", "p", "k", "epsilon"],
+        "cases": campaign_cases,
+    }
+    campaign_path = output_base / "campaign.yaml"
+    with open(campaign_path, "w") as f:
+        yaml.dump(campaign_yaml, f, default_flow_style=False, sort_keys=False)
+    logger.info("Campaign YAML saved: %s (%d cases)", campaign_path, len(campaign_cases))
 
     return cases
-
-
-def _register_in_hpcsim(
-    db_path: Path,
-    cases: list[CampaignCase],
-    group_name: str | None,
-    resources: dict,
-) -> None:
-    """Register campaign cases in the hpc-sim SQLite database."""
-    try:
-        # Try importing hpc_sim
-        hpc_sim_root = PROJECT_ROOT.parent / "hpc-sim"
-        sys.path.insert(0, str(hpc_sim_root / "src"))
-        from hpc_sim.core.db import CaseDatabase
-
-        db = CaseDatabase(str(db_path))
-        db_cases = []
-        for case in cases:
-            db_cases.append({
-                "case_id": case.case_id,
-                "parameters": {
-                    "solver": case.solver,
-                    "direction_deg": case.direction_deg,
-                    "speed_ms": case.speed_ms,
-                    "stability": case.stability,
-                    "thermal": case.thermal,
-                    "resolution_m": case.resolution_m,
-                },
-                "group_name": group_name,
-            })
-        db.add_cases(db_cases)
-        logger.info("Registered %d cases in hpc-sim DB: %s", len(cases), db_path)
-    except ImportError:
-        logger.warning("hpc_sim not importable — skipping DB registration")
-    except Exception as e:
-        logger.error("Failed to register in hpc-sim DB: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -523,9 +513,8 @@ def main():
         default=PROJECT_ROOT / "configs" / "sites" / "perdigao.yaml",
         help="Site config YAML",
     )
-    parser.add_argument("--group", type=str, default=None, help="hpc-sim group name")
+    parser.add_argument("--group", type=str, default=None, help="Group name for campaign.yaml")
     parser.add_argument("--prefix", type=str, default="prd", help="Case ID prefix")
-    parser.add_argument("--db", type=Path, default=None, help="hpc-sim database path")
     parser.add_argument("--srtm", type=Path, default=None, help="SRTM GeoTIFF path")
     parser.add_argument(
         "--filter-directions", type=float, nargs="+", default=None,
@@ -556,7 +545,6 @@ def main():
         site_config_path=args.site,
         group_name=args.group,
         prefix=args.prefix,
-        db_path=args.db,
         srtm_tif=srtm,
         filter_directions=args.filter_directions,
         filter_speeds=args.filter_speeds,

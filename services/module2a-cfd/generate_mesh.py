@@ -26,7 +26,7 @@ Usage
 
 References
 ----------
-  Neunaber et al. (WES 2023) — OpenFOAM ABL at Perdigão, resolution 12.5 m, ESI v2012
+  Neunaber et al. (WES 2023) — OpenFOAM ABL at Perdigão, resolution 12.5 m, OF2412 ESI
 """
 
 from __future__ import annotations
@@ -45,8 +45,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-CENTRAL_ZONE_KM    = 25.0       # km — width of the refined central zone
-SUPER_MAILLE_KM    = CENTRAL_ZONE_KM
+DEFAULT_DOMAIN_KM  = 25.0       # km — default width of the refined central zone
 DOMAIN_HEIGHT_M    = 3000.0     # reduced from 7 km — sufficient for ABL
 AR_TARGET          = 5.0        # target aspect ratio (dx/dz at ground)
 STL_FILENAME       = "terrain.stl"
@@ -69,6 +68,7 @@ def compute_domain_geometry(
     context_cells: int,
     n_z: int | None = None,
     n_refine_levels: int = DEFAULT_REFINE_LEVELS,
+    domain_km: float = DEFAULT_DOMAIN_KM,
 ) -> dict:
     """Compute all domain dimensions and cell counts.
 
@@ -87,13 +87,15 @@ def compute_domain_geometry(
     n_refine_levels:
         Number of snappyHexMesh refinement levels.  blockMesh base cell =
         resolution_m * 2^n_refine_levels.
+    domain_km:
+        Width of the central (refined) zone in km (default 25).
 
     Returns
     -------
     dict with geometry parameters ready to be passed to Jinja2 templates.
     """
-    central_m  = CENTRAL_ZONE_KM * 1000.0
-    total_m    = context_cells * SUPER_MAILLE_KM * 1000.0
+    central_m  = domain_km * 1000.0
+    total_m    = context_cells * domain_km * 1000.0
 
     # Base cell size for blockMesh (coarse); snappy refines to resolution_m
     base_cell_m = resolution_m * (2 ** n_refine_levels)
@@ -108,7 +110,7 @@ def compute_domain_geometry(
         grading_y = "1"
     else:
         # The outer zone (half the buffer on each side)
-        outer_km   = (context_cells - 1) / 2.0 * SUPER_MAILLE_KM
+        outer_km   = (context_cells - 1) / 2.0 * domain_km
         outer_m    = outer_km * 1000.0
         # Outer cells are 2× coarser than base (already coarse)
         n_outer_cells = max(3, int(round(outer_m / (base_cell_m * 2))))
@@ -293,6 +295,8 @@ def dem_to_stl(
     terrain.save(str(out_stl))
     logger.info("Terrain STL saved: %s (%d triangles)", out_stl, n_tri)
 
+    return {"z_min": float(Z.min()), "z_max": float(Z.max())}
+
 
 # ---------------------------------------------------------------------------
 # Jinja2 template rendering
@@ -331,6 +335,9 @@ def render_templates(
 
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text(rendered)
+        # Preserve execute permission for shell scripts (Allrun, Allcontinue, etc.)
+        if tmpl_path.stat().st_mode & 0o111:
+            out_file.chmod(out_file.stat().st_mode | 0o111)
         logger.debug("Rendered: %s → %s", rel, out_rel)
 
     # Copy static files (no .j2 extension)
@@ -358,6 +365,10 @@ def generate_mesh(
     inflow_json: Path | None = None,
     n_z: int | None = None,
     n_refine_levels: int = DEFAULT_REFINE_LEVELS,
+    domain_km: float = DEFAULT_DOMAIN_KM,
+    solver_name: str = "simpleFoam",
+    thermal: bool = False,
+    **kwargs,
 ) -> dict:
     """Generate an OpenFOAM case directory with mesh and boundary condition files.
 
@@ -383,6 +394,8 @@ def generate_mesh(
         Number of vertical layers.
     n_refine_levels:
         Number of snappyHexMesh refinement levels (default 2).
+    domain_km:
+        Width of the central (refined) zone in km (default 25).
 
     Returns
     -------
@@ -396,7 +409,7 @@ def generate_mesh(
     site_lon = site["coordinates"]["longitude"]
 
     # ---- geometry -------------------------------------------------------
-    geom = compute_domain_geometry(resolution_m, context_cells, n_z, n_refine_levels)
+    geom = compute_domain_geometry(resolution_m, context_cells, n_z, n_refine_levels, domain_km)
     logger.info(
         "Domain: %.0f×%.0f km, base=%.0fm → target=%.0fm, context=%d×%d, "
         "blockMesh=%d×%d×%d cells",
@@ -415,6 +428,7 @@ def generate_mesh(
     DEG_LAT = 1.0 / 111_000.0
     DEG_LON = 1.0 / (111_000.0 * np.cos(np.radians(site_lat)))
 
+    terrain_z_max = 0.0
     if srtm_tif is not None and Path(srtm_tif).exists():
         bounds = (
             site_lon - half_m * DEG_LON,
@@ -422,7 +436,7 @@ def generate_mesh(
             site_lon + half_m * DEG_LON,
             site_lat + half_m * DEG_LAT,
         )
-        dem_to_stl(
+        terrain_stats = dem_to_stl(
             srtm_tif=Path(srtm_tif),
             out_stl=stl_path,
             bounds_lonlat=bounds,
@@ -430,11 +444,27 @@ def generate_mesh(
             site_lat=site_lat,
             site_lon=site_lon,
         )
+        terrain_z_max = terrain_stats["z_max"]
     else:
         logger.warning(
             "No SRTM raster provided or found — generating flat terrain STL"
         )
         _write_flat_terrain_stl(stl_path, geom["total_x_m"], geom["total_y_m"])
+
+    # Adjust domain height: DOMAIN_HEIGHT_M above highest terrain point
+    domain_z_max = terrain_z_max + DOMAIN_HEIGHT_M
+    geom["total_z_m"] = domain_z_max
+
+    # Recalculate vertical grading for the actual domain height
+    base_cell_m = geom["base_cell_m"]
+    dz_ground_base = base_cell_m / AR_TARGET
+    actual_n_z = geom["n_z"]
+    actual_grading = max(1.0, 2.0 * domain_z_max / (actual_n_z * dz_ground_base) - 1.0)
+    actual_grading = min(actual_grading, 20.0)
+    geom["grading_z"] = f"{actual_grading:.4f}"
+
+    logger.info("Terrain z_max=%.0fm → domain z_max=%.0fm (%.0fm above terrain), grading_z=%.2f",
+                terrain_z_max, domain_z_max, DOMAIN_HEIGHT_M, actual_grading)
 
     # ---- inflow params -------------------------------------------------------
     inflow = {
@@ -455,36 +485,12 @@ def generate_mesh(
         with open(inflow_json) as f:
             inflow.update(json.load(f))
 
-    # ---- Inlet/outlet face assignment based on wind direction -----------------
-    import math as _math
-
-    wind_dir = float(inflow.get("wind_dir", 270.0))  # degrees FROM North
-    wind_rad = _math.radians(wind_dir)
-    # Met convention: wind_dir = direction wind comes FROM
-    # sin(wind_dir) > 0 → wind from E sector → east face = inlet
-    # sin(wind_dir) < 0 → wind from W sector → west face = inlet
-    # cos(wind_dir) > 0 → wind from N sector → north face = inlet
-    # cos(wind_dir) < 0 → wind from S sector → south face = inlet
-    inlet_faces = []
-    outlet_faces = []
-    if _math.sin(wind_rad) > 0.1:
-        inlet_faces.append("east");   outlet_faces.append("west")
-    elif _math.sin(wind_rad) < -0.1:
-        inlet_faces.append("west");   outlet_faces.append("east")
-    else:
-        inlet_faces += ["west", "east"]
-
-    if _math.cos(wind_rad) > 0.1:
-        inlet_faces.append("north");  outlet_faces.append("south")
-    elif _math.cos(wind_rad) < -0.1:
-        inlet_faces.append("south");  outlet_faces.append("north")
-    else:
-        inlet_faces += ["south", "north"]
-
-    logger.info(
-        "Wind dir %.1f° → inlet faces: %s, outlet faces: %s",
-        wind_dir, inlet_faces, outlet_faces,
-    )
+    # ---- Robin BC: inletOutlet on all lateral faces ----------------------------
+    # All lateral faces use inletOutlet (auto inlet/outlet per cell face based on
+    # flux direction). No manual inlet/outlet assignment needed.
+    # Reference: Venkatraman et al. (WES 2023) — Robin BC for ABL at Perdigão.
+    wind_dir = float(inflow.get("wind_dir", 270.0))
+    logger.info("Wind dir %.1f° — Robin BC on all lateral faces", wind_dir)
 
     # ---- Jinja2 context -------------------------------------------------------
     n_cores = 8  # default parallel decomposition
@@ -512,12 +518,12 @@ def generate_mesh(
             "grading_x":   geom["grading_x"],
             "grading_y":   geom["grading_y"],
             "grading_z":   geom["grading_z"],
-            "half_x":      half_x,
-            "half_y":      half_y,
-            "x_min":       0.0,
-            "x_max":       geom["total_x_m"],
-            "y_min":       0.0,
-            "y_max":       geom["total_y_m"],
+            "half_x":      0.0,
+            "half_y":      0.0,
+            "x_min":       -half_x,
+            "x_max":       half_x,
+            "y_min":       -half_y,
+            "y_max":       half_y,
             "z_min":       0.0,
             "z_max":       geom["total_z_m"],
         },
@@ -539,17 +545,23 @@ def generate_mesh(
         "refine_distances": refine_distances,
         "n_layers":         N_SNAP_LAYERS,
         "inflow": inflow,
-        "inlet_faces":  inlet_faces,
-        "outlet_faces": outlet_faces,
         "physics": {
             "T_ref_K":  float(inflow.get("T_ref", 300.0)),
             "p_ref_Pa": 0.0,
             "rho_ref":  1.225,
         },
         "solver": {
-            "n_iter":         500,
+            "name":           solver_name,
+            "n_iter":         1000,
             "write_interval": 100,
             "n_cores":        n_cores,
+            "thermal":        thermal,
+            "boussinesq":     kwargs.get("boussinesq", False),
+        },
+        "canopy": {
+            "enabled": False,  # Set to True after generate_lad_field.py
+            "Cd": 0.2,
+            "C4_eps": 0.9,
         },
         "parallel": {
             "n_cores": n_cores,
@@ -559,6 +571,30 @@ def generate_mesh(
     # ---- render templates -------------------------------------------------------
     logger.info("Rendering OpenFOAM templates → %s", output_dir)
     render_templates(template_dir, output_dir, jinja_ctx)
+
+    # ---- Remove solver-incompatible constant files --------------------------------
+    # buoyantSimpleFoam uses thermophysicalProperties (Boussinesq or perfectGas).
+    # simpleFoam uses transportProperties (incompressible, nu only).
+    if solver_name == "buoyantSimpleFoam":
+        tp = output_dir / "constant" / "transportProperties"
+        if tp.exists():
+            tp.unlink()
+            logger.info("Removed transportProperties (not used by buoyantSimpleFoam)")
+    elif solver_name == "simpleFoam":
+        thermo = output_dir / "constant" / "thermophysicalProperties"
+        if thermo.exists():
+            thermo.unlink()
+            logger.info("Removed thermophysicalProperties (not used by simpleFoam)")
+    else:
+        # Legacy: buoyantBoussinesqSimpleFoam uses transportProperties
+        thermo = output_dir / "constant" / "thermophysicalProperties"
+        if thermo.exists():
+            thermo.unlink()
+            logger.info("Removed thermophysicalProperties (not used by %s)", solver_name)
+
+    # ---- create empty .foam file for ParaView -------------------------------------
+    foam_file = output_dir / "case.foam"
+    foam_file.touch()
 
     logger.info("Case directory ready: %s", output_dir)
     return geom
@@ -623,10 +659,16 @@ if __name__ == "__main__":
                         help="Number of vertical layers (auto if not set)")
     parser.add_argument("--n-refine-levels", type=int, default=DEFAULT_REFINE_LEVELS,
                         help=f"snappyHexMesh refinement levels (default {DEFAULT_REFINE_LEVELS})")
+    parser.add_argument("--domain-km",      type=float, default=DEFAULT_DOMAIN_KM,
+                        help=f"Central zone width in km (default {DEFAULT_DOMAIN_KM})")
     parser.add_argument("--srtm",           default=None,
                         help="SRTM GeoTIFF path (default: data/raw/srtm_<site>_30m.tif)")
     parser.add_argument("--inflow-json",    default=None,
                         help="Inflow profile JSON (from prepare_inflow.py)")
+    parser.add_argument("--solver",         default="simpleFoam",
+                        help="Solver name (simpleFoam or buoyantBoussinesqSimpleFoam)")
+    parser.add_argument("--thermal",        action="store_true",
+                        help="Enable thermal coupling (buoyantBoussinesqSimpleFoam)")
     parser.add_argument("--output",         required=True,
                         help="Output OpenFOAM case directory")
     args = parser.parse_args()
@@ -659,6 +701,9 @@ if __name__ == "__main__":
         inflow_json=args.inflow_json,
         n_z=args.n_z,
         n_refine_levels=args.n_refine_levels,
+        domain_km=args.domain_km,
+        solver_name=args.solver,
+        thermal=args.thermal,
     )
 
     print(f"Case generated: {args.output}")

@@ -35,9 +35,9 @@ check_log() {
 runApplication blockMesh
 check_log log.blockMesh
 
-# surfaceFeatures works for OF7+ (surfaceFeatureExtract is deprecated since OF8)
-runApplication surfaceFeatures
-check_log log.surfaceFeatures
+# surfaceFeatureExtract for ESI v2412
+runApplication surfaceFeatureExtract
+check_log log.surfaceFeatureExtract
 
 runApplication snappyHexMesh -overwrite
 check_log log.snappyHexMesh

@@ -41,10 +41,13 @@ cd services/data-ingestion
 python ingest_era5.py --site perdigao --start 2016-01 --end 2017-12 --output ../../data/raw/era5_perdigao.zarr
 python ingest_era5_hourly.py --site perdigao --start 2016-01 --end 2017-06 --output ../../data/raw/era5_hourly_perdigao.zarr
 
-# Docker (all services)
-docker-compose --profile ingestion up data-ingestion
-docker-compose --profile cfd up module2a-cfd
-docker-compose --profile mlflow up mlflow
+# Module 2A — case generation
+cd services/module2a-cfd
+python generate_campaign.py configs/training/cfd_grid.yaml --output ../../data/campaign/cases --prefix prd
+
+# Module 2A — deployment (kraken-sim)
+kraken-sim smoke data/campaign/cases/campaign.yaml
+kraken-sim load data/campaign/cases/campaign.yaml
 
 # Tests (no test suite yet — debug_notebook.py serves as integration test)
 cd services/module1-temporal && marimo run debug_notebook.py
@@ -87,9 +90,11 @@ validation/      → reads all outputs, produces metrics + figures
 - **ERA5 grid convention**: lat[0]=North, v>0=northward
 
 ### Module 2A — CFD (in progress)
-- OpenFOAM buoyantSimpleFoam via Docker (`opencfd/openfoam-default:v2412`)
+- OpenFOAM `simpleFoam` (k-ε, OF2412 ESI) via Apptainer on HPC
 - 240 runs: 16 directions × 5 speeds × 3 stabilities
-- Pipeline: SRTM→STL→snappyHexMesh→solver→fluidfoam→Zarr
+- Source terms: Coriolis + plant canopy drag (fvOptions)
+- Land cover: ESA WorldCover 2021 (10 m) + ETH Canopy Height 2020 (10 m)
+- Pipeline: SRTM→STL→snappyHexMesh→solver→kraken-sim→Parquet→Zarr
 
 ## Data Splits (never change)
 - train: 2016-01-01 → 2016-10-31
@@ -114,6 +119,7 @@ validation/      → reads all outputs, produces metrics + figures
 - `services/module1-temporal/src/dataset.py` — ERA5TemporalDataset
 - `services/module1-temporal/train.py` — AdamW + CosineWarmRestart + MLflow
 - `configs/sites/perdigao.yaml` — all site metadata (coordinates, ERA5 grid, CFD domain, data sources)
-- `configs/training/cfd_grid.yaml` — 240-run parametric grid
+- `configs/training/cfd_grid.yaml` — parametric grid (directions × speeds × stabilities)
+- `services/module2a-cfd/generate_campaign.py` — campaign case generation + kraken-sim manifest
 - `DECISIONS.md` — 13 architectural decisions with status (STABLE/A_REVOIR/OUVERTE)
 - `LIMITATIONS.md` — scientific assumptions and validity conditions

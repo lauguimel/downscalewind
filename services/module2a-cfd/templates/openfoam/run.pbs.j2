@@ -1,0 +1,9 @@
+#!/bin/bash -l
+#PBS -N {{ case_id }}
+#PBS -l select=1:ncpus={{ ncpus }}:mem={{ mem | default('32gb') }}
+#PBS -l walltime={{ walltime | default('04:00:00') }}
+#PBS -j oe
+
+cd $PBS_O_WORKDIR
+
+OF2412.sh -- "./Allrun {{ ncpus }}"
