@@ -1,33 +1,32 @@
 import marimo
 
-__generated_with = "0.20.2"
+__generated_with = "0.20.4"
 app = marimo.App()
 
 
 @app.cell
 def _():
     import marimo as mo
+
     return (mo,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # Module 2A — Validation Matrix (Full Factorial)
+    # Module 2A — Mesh Convergence Study (sf vs bbsf)
 
-    **Site**: Perdigão, Portugal (canonical case: 217°, 7.85 m/s, neutral)
-    **Domain**: 25×25 km centred on obs masts
+    **Site**: Perdigão, Portugal — 2 observed IOP conditions
+    **Domain**: 5×5 km centred on obs masts
     **Solver**: OF2412 ESI → kraken-sim deployment
 
     ## Goal
-    Evaluate the impact of 5 factors on CFD accuracy vs Perdigão observations:
-    1. **Solver**: simpleFoam vs buoyantSimpleFoam
-    2. **Coriolis**: on vs off
-    3. **Canopy drag**: on vs off
-    4. **Resolution**: 500 m, 250 m, 100 m
-    5. **fvSchemes**: robust (upwind k/ε) vs accurate (linearUpwind k/ε)
+    Grid convergence study comparing **simpleFoam** vs **buoyantSimpleFoam**
+    on 4 resolutions (250, 100, 50, 30 m) against Perdigão observations.
 
-    Full factorial: 2 × 2 × 2 × 3 × 2 = **48 cases**
+    Fixed physics: Coriolis on, canopy drag on, fvSchemes robust (upwind k/ε).
+
+    2 solvers × 4 resolutions × 2 meteo = **16 cases**
     """)
     return
 
@@ -39,7 +38,7 @@ def _():
 
     ROOT = Path(__file__).parent.parent.resolve() if "__file__" in dir() else Path("..").resolve()
     DATA = ROOT / "data"
-    CASES_DIR = DATA / "campaign" / "validation"
+    CASES_DIR = DATA / "campaign" / "convergence_sf_bbsf"
     CASES_DIR.mkdir(parents=True, exist_ok=True)
 
     _cfd_path = str(ROOT / "services" / "module2a-cfd")
@@ -60,7 +59,7 @@ def _():
 
 @app.cell
 def _(mo):
-    mo.md("## Validation matrix (full factorial)")
+    mo.md("## Convergence matrix (sf vs bbsf × 4 resolutions × 2 meteo)")
     return
 
 
@@ -69,39 +68,51 @@ def _(mo):
     import itertools
     import pandas as pd
 
-    # --- Fixed meteorological conditions (canonical Perdigão case) ---
-    DIRECTION_DEG = 217.0
-    SPEED_MS = 7.85
-    STABILITY = "neutral"
-    DOMAIN_KM = 25.0
-    CONTEXT_CELLS = 1  # 25 km domain, no buffer needed
+    DOMAIN_KM = 5.0
+    CONTEXT_CELLS = 1
 
-    # --- Factors to vary ---
+    # --- Two observed meteo conditions from Perdigão IOP ---
+    meteo_cases = [
+        {"label": "sw", "direction_deg": 228.7, "speed_ms": 10.46, "stability": "neutral",
+         "timestamp": "2017-05-11T06:00", "description": "SW dominant, canonical"},
+        {"label": "east", "direction_deg": 91.7, "speed_ms": 7.88, "stability": "neutral",
+         "timestamp": "2017-05-23T18:00", "description": "Easterly, perpendicular to ridges"},
+    ]
+
+    # --- Fixed physics ---
+    CORIOLIS = True
+    CANOPY = True
+    FVSCHEMES = "robust"
+
+    # --- Factors to vary: solver × resolution ---
     solvers = ["simpleFoam", "buoyantSimpleFoam"]
-    coriolis_opts = [True, False]
-    canopy_opts = [True, False]
-    resolutions_m = [500, 250, 100]
-    fvschemes_opts = ["robust", "accurate"]
+    resolutions_m = [250, 100, 50, 30]
 
-    # --- Full factorial ---
-    combos = list(itertools.product(solvers, coriolis_opts, canopy_opts, resolutions_m, fvschemes_opts))
+    # --- Convergence matrix: meteo × solver × resolution ---
+    rows = []
+    for meteo in meteo_cases:
+        for solver, res in itertools.product(solvers, resolutions_m):
+            _tag = "sf" if solver == "simpleFoam" else "bbsf"
+            case_id = f"{meteo['label']}_{_tag}_{res}m"
+            rows.append({
+                "case_id": case_id,
+                "meteo": meteo["label"],
+                "timestamp": meteo["timestamp"],
+                "direction_deg": meteo["direction_deg"],
+                "speed_ms": meteo["speed_ms"],
+                "stability": meteo["stability"],
+                "solver": solver,
+                "coriolis": CORIOLIS,
+                "canopy": CANOPY,
+                "resolution_m": res,
+                "fvschemes": FVSCHEMES,
+                "domain_km": DOMAIN_KM,
+            })
 
-    matrix = pd.DataFrame(combos, columns=["solver", "coriolis", "canopy", "resolution_m", "fvschemes"])
-    matrix.insert(0, "case_id", [
-        f"v_{row.solver[:2]}_{('cor' if row.coriolis else 'noc')}_{('can' if row.canopy else 'nca')}_{row.resolution_m}m_{row.fvschemes[:3]}"
-        for row in matrix.itertuples()
-    ])
-    matrix["direction_deg"] = DIRECTION_DEG
-    matrix["speed_ms"] = SPEED_MS
-    matrix["stability"] = STABILITY
-    matrix["domain_km"] = DOMAIN_KM
+    matrix = pd.DataFrame(rows)
 
-    mo.md(f"**{len(matrix)} cases** in full factorial design")
-
-    return (
-        CONTEXT_CELLS, DIRECTION_DEG, DOMAIN_KM, SPEED_MS, STABILITY,
-        canopy_opts, coriolis_opts, fvschemes_opts, matrix, resolutions_m, solvers,
-    )
+    mo.md(f"**{len(matrix)} cases** — 2 meteo × 2 solvers × {len(resolutions_m)} resolutions")
+    return CONTEXT_CELLS, DOMAIN_KM, matrix
 
 
 @app.cell
@@ -112,7 +123,7 @@ def _(matrix, mo):
 
 @app.cell
 def _(mo):
-    generate_btn = mo.ui.run_button(label="Generate all 48 cases + campaign.yaml")
+    generate_btn = mo.ui.run_button(label="Generate all 16 cases + campaign.yaml")
     generate_btn
     return (generate_btn,)
 
@@ -129,39 +140,39 @@ def _(CASES_DIR, CONTEXT_CELLS, SITE_CFG, SRTM_TIF, generate_btn, matrix, mo):
     logging.basicConfig(level=logging.WARNING)
 
     generated = []
-    for row in matrix.itertuples():
-        case_dir = CASES_DIR / row.case_id
+    for _row in matrix.itertuples():
+        case_dir = CASES_DIR / _row.case_id
         if case_dir.exists():
-            generated.append(row.case_id)
+            generated.append(_row.case_id)
             continue
 
         # Build inflow
         _inflow = build_parametric_inflow(
-            speed_ms=row.speed_ms,
-            direction_deg=row.direction_deg,
-            stability=row.stability,
+            speed_ms=_row.speed_ms,
+            direction_deg=_row.direction_deg,
+            stability=_row.stability,
         )
-        _inflow_json = CASES_DIR / "inflow_profiles" / f"inflow_{row.case_id}.json"
+        _inflow_json = CASES_DIR / "inflow_profiles" / f"inflow_{_row.case_id}.json"
         _inflow_json.parent.mkdir(parents=True, exist_ok=True)
         with open(_inflow_json, "w") as _fh:
             json.dump(_inflow, _fh, indent=2)
 
         # Generate case
-        _thermal = row.solver == "buoyantSimpleFoam"
-        _boussinesq = row.solver == "buoyantSimpleFoam"
+        _thermal = _row.solver == "buoyantSimpleFoam"
+        _boussinesq = _row.solver == "buoyantSimpleFoam"
 
         generate_mesh(
             site_cfg=SITE_CFG,
-            resolution_m=float(row.resolution_m),
+            resolution_m=float(_row.resolution_m),
             context_cells=CONTEXT_CELLS,
             output_dir=case_dir,
             srtm_tif=SRTM_TIF if SRTM_TIF.exists() else None,
             inflow_json=_inflow_json,
-            domain_km=row.domain_km,
-            solver_name=row.solver,
+            domain_km=_row.domain_km,
+            solver_name=_row.solver,
             thermal=_thermal,
-            coriolis=row.coriolis,
-            canopy_enabled=row.canopy,
+            coriolis=_row.coriolis,
+            canopy_enabled=_row.canopy,
             boussinesq=_boussinesq,
         )
 
@@ -169,22 +180,22 @@ def _(CASES_DIR, CONTEXT_CELLS, SITE_CFG, SRTM_TIF, generate_btn, matrix, mo):
         _patch_control_dict(case_dir, 2000, 200)
 
         # Patch fvSchemes if accurate
-        if row.fvschemes == "accurate":
+        if _row.fvschemes == "accurate":
             _patch_fvschemes_accurate(case_dir)
 
         # Render run.pbs
         _case = CampaignCase(
-            case_id=row.case_id, solver=row.solver,
-            direction_deg=row.direction_deg, speed_ms=row.speed_ms,
-            stability=row.stability, thermal=_thermal,
-            coriolis=row.coriolis, canopy=row.canopy,
-            resolution_m=row.resolution_m, domain_km=row.domain_km,
+            case_id=_row.case_id, solver=_row.solver,
+            direction_deg=_row.direction_deg, speed_ms=_row.speed_ms,
+            stability=_row.stability, thermal=_thermal,
+            coriolis=_row.coriolis, canopy=_row.canopy,
+            resolution_m=_row.resolution_m, domain_km=_row.domain_km,
             context_cells=CONTEXT_CELLS, n_refine_levels=2,
-            boussinesq=_boussinesq, fvschemes_variant=row.fvschemes,
+            boussinesq=_boussinesq, fvschemes_variant=_row.fvschemes,
         )
         _render_run_pbs(case_dir, _case)
 
-        generated.append(row.case_id)
+        generated.append(_row.case_id)
 
     mo.md(f"**{len(generated)} cases generated** in `{CASES_DIR}`")
     return (generated,)
@@ -192,53 +203,45 @@ def _(CASES_DIR, CONTEXT_CELLS, SITE_CFG, SRTM_TIF, generate_btn, matrix, mo):
 
 @app.cell
 def _(CASES_DIR, SITE_CFG, generated, matrix, mo):
-    # --- Write campaign.yaml manifest ---
-    import yaml as _yaml
-
-    _cases_list = []
-    for row in matrix.itertuples():
-        if row.case_id in generated:
-            _cases_list.append({
-                "id": row.case_id,
-                "dir": row.case_id,
-                "script": "run.pbs",
-                "ncpus": 12,
-                "tags": {
-                    "solver": row.solver,
-                    "direction_deg": float(row.direction_deg),
-                    "speed_ms": float(row.speed_ms),
-                    "stability": row.stability,
-                    "resolution_m": int(row.resolution_m),
-                    "coriolis": bool(row.coriolis),
-                    "canopy": bool(row.canopy),
-                    "fvschemes": row.fvschemes,
-                },
-            })
-
-    # Remote dir: geohash 8 chars (≈±20 m precision)
+    # --- Write campaign.yaml via CampaignBuilder ---
     from generate_campaign import _geohash_encode
+    from kraken_sim.schema import CampaignBuilder
+
     _ghash = _geohash_encode(SITE_CFG["site"]["coordinates"]["latitude"],
                               SITE_CFG["site"]["coordinates"]["longitude"], precision=8)
     _remote_dir = f"/home/maitreje/campaigns/{_ghash}"
 
-    _manifest = {
-        "name": "perdigao_validation_factorial",
-        "hpc": {
-            "host": "aqua.qut.edu.au",
-            "username": "maitreje",
-            "remote_base_dir": _remote_dir,
-        },
-        "parser": "openfoam",
-        "inject_monitoring": True,
-        "monitoring_fields": ["U", "p", "k", "epsilon"],
-        "cases": _cases_list,
-    }
+    _builder = CampaignBuilder(
+        name="perdigao_convergence_sf_bbsf",
+        hpc_host="aqua.qut.edu.au",
+        hpc_username="maitreje",
+        hpc_remote_dir=_remote_dir,
+        monitoring_fields=["U", "p", "k", "epsilon"],
+        auto_group=["solver", "resolution_m"],
+    )
+
+    for _row in matrix.itertuples():
+        if _row.case_id in generated:
+            _builder.add_case(
+                case_id=_row.case_id,
+                case_dir=_row.case_id,
+                ncpus=12,
+                tags={
+                    "solver": _row.solver,
+                    "direction_deg": float(_row.direction_deg),
+                    "speed_ms": float(_row.speed_ms),
+                    "stability": _row.stability,
+                    "resolution_m": int(_row.resolution_m),
+                    "coriolis": bool(_row.coriolis),
+                    "canopy": bool(_row.canopy),
+                    "fvschemes": _row.fvschemes,
+                },
+            )
 
     _manifest_path = CASES_DIR / "campaign.yaml"
-    with open(_manifest_path, "w") as _fh:
-        _yaml.dump(_manifest, _fh, default_flow_style=False, sort_keys=False)
+    _builder.write_yaml(_manifest_path)
 
-    mo.md(f"**campaign.yaml** written: `{_manifest_path}` ({len(_cases_list)} cases)")
+    mo.md(f"**campaign.yaml** written: `{_manifest_path}` ({len(generated)} cases)")
     return
 
 
@@ -265,16 +268,16 @@ def _(mo):
 
     ```bash
     # 1. Smoke test (1 case, local Docker OF2412)
-    kraken-sim smoke data/campaign/validation/campaign.yaml
+    kraken-sim smoke data/campaign/convergence_sf_bbsf/campaign.yaml
 
-    # 2. Deploy all 48 cases on HPC
-    kraken-sim load data/campaign/validation/campaign.yaml
+    # 2. Deploy all 16 cases on HPC
+    kraken-sim load data/campaign/convergence_sf_bbsf/campaign.yaml
 
     # 3. Monitor convergence
-    kraken-sim status data/campaign/validation/campaign.yaml
+    kraken-sim status data/campaign/convergence_sf_bbsf/campaign.yaml
 
     # 4. Download results → Parquet
-    kraken-sim pull data/campaign/validation/campaign.yaml
+    kraken-sim pull data/campaign/convergence_sf_bbsf/campaign.yaml
     ```
 
     After results are downloaded, use `compare_cfd_obs.py` to evaluate

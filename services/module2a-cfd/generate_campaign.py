@@ -542,12 +542,30 @@ def generate_campaign(
         # Render run.pbs from template
         _render_run_pbs(case_dir, case)
 
-        campaign_cases.append({
-            "id": case.case_id,
-            "dir": case.case_id,
-            "script": "run.pbs",
-            "ncpus": case.ncpus,
-            "tags": {
+    # Build remote dir from site geohash (8 chars ≈ ±20 m precision)
+    site_lat = site_cfg["site"]["coordinates"]["latitude"]
+    site_lon = site_cfg["site"]["coordinates"]["longitude"]
+    ghash = _geohash_encode(site_lat, site_lon, precision=8)
+    remote_dir = f"/home/maitreje/campaigns/{ghash}/{prefix}"
+
+    # Write kraken-sim campaign.yaml via CampaignBuilder
+    from kraken_sim.schema import CampaignBuilder
+
+    builder = CampaignBuilder(
+        name=f"perdigao_{prefix}",
+        hpc_host="aqua.qut.edu.au",
+        hpc_username="maitreje",
+        hpc_remote_dir=remote_dir,
+        monitoring_fields=["U", "p", "k", "epsilon"],
+        auto_group=["solver", "stability"],
+    )
+
+    for case in cases:
+        builder.add_case(
+            case_id=case.case_id,
+            case_dir=case.case_id,
+            ncpus=case.ncpus,
+            tags={
                 "solver": case.solver,
                 "direction_deg": case.direction_deg,
                 "speed_ms": case.speed_ms,
@@ -559,31 +577,11 @@ def generate_campaign(
                 "thermal": case.thermal,
                 "fvschemes": case.fvschemes_variant,
             },
-        })
+        )
 
-    # Build remote dir from site geohash (8 chars ≈ ±20 m precision)
-    site_lat = site_cfg["site"]["coordinates"]["latitude"]
-    site_lon = site_cfg["site"]["coordinates"]["longitude"]
-    ghash = _geohash_encode(site_lat, site_lon, precision=8)
-    remote_dir = f"/home/maitreje/campaigns/{ghash}/{prefix}"
-
-    # Write kraken-sim campaign.yaml
-    campaign_yaml = {
-        "name": f"perdigao_{prefix}",
-        "hpc": {
-            "host": "aqua.qut.edu.au",
-            "username": "maitreje",
-            "remote_base_dir": remote_dir,
-        },
-        "parser": "openfoam",
-        "inject_monitoring": True,
-        "monitoring_fields": ["U", "p", "k", "epsilon"],
-        "cases": campaign_cases,
-    }
     campaign_path = output_base / "campaign.yaml"
-    with open(campaign_path, "w") as f:
-        yaml.dump(campaign_yaml, f, default_flow_style=False, sort_keys=False)
-    logger.info("Campaign YAML saved: %s (%d cases)", campaign_path, len(campaign_cases))
+    builder.write_yaml(campaign_path)
+    logger.info("Campaign YAML saved: %s (%d cases)", campaign_path, len(cases))
 
     return cases
 
