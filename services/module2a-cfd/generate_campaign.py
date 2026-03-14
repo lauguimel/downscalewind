@@ -46,6 +46,42 @@ logger = logging.getLogger("generate_campaign")
 
 
 # ---------------------------------------------------------------------------
+# Geohash encoding (no external dependency)
+# ---------------------------------------------------------------------------
+_GEOHASH_BASE32 = "0123456789bcdefghjkmnpqrstuvwxyz"
+
+
+def _geohash_encode(lat: float, lon: float, precision: int = 8) -> str:
+    """Encode lat/lon to a geohash string."""
+    lat_range, lon_range = [-90.0, 90.0], [-180.0, 180.0]
+    bits = [16, 8, 4, 2, 1]
+    ch, bit, is_lon = 0, 0, True
+    result = []
+    while len(result) < precision:
+        if is_lon:
+            mid = (lon_range[0] + lon_range[1]) / 2
+            if lon >= mid:
+                ch |= bits[bit]
+                lon_range[0] = mid
+            else:
+                lon_range[1] = mid
+        else:
+            mid = (lat_range[0] + lat_range[1]) / 2
+            if lat >= mid:
+                ch |= bits[bit]
+                lat_range[0] = mid
+            else:
+                lat_range[1] = mid
+        is_lon = not is_lon
+        if bit < 4:
+            bit += 1
+        else:
+            result.append(_GEOHASH_BASE32[ch])
+            ch, bit = 0, 0
+    return "".join(result)
+
+
+# ---------------------------------------------------------------------------
 # Stability presets
 # ---------------------------------------------------------------------------
 STABILITY_PRESETS = {
@@ -190,6 +226,7 @@ class CampaignCase:
     context_cells: int
     n_refine_levels: int
     boussinesq: bool = False
+    fvschemes_variant: str = "robust"  # "robust" (upwind k/eps) or "accurate" (linearUpwind k/eps)
     n_iterations: int = 2000
     write_interval: int = 200
     ncpus: int = 12
@@ -211,15 +248,32 @@ def expand_cases(
     filter_speeds: list[float] | None = None,
     filter_stabilities: list[str] | None = None,
 ) -> list[CampaignCase]:
-    """Expand parameter grid into a list of CampaignCase objects."""
-    params = cfg["parameters"]
+    """Expand parameter grid into a list of CampaignCase objects.
+
+    Supports two YAML formats:
+      - New (cfd_grid.yaml): top-level directions_deg, speeds_ms, stabilities, solver
+      - Legacy: parameters.direction_deg, parameters.speed_ms, etc.
+    """
+    # Support both YAML layouts
+    if "parameters" in cfg:
+        params = cfg["parameters"]
+        directions = params["direction_deg"]
+        speeds = params["speed_ms"]
+        stabilities = params["stability"]
+        solvers = params["solver"]
+    else:
+        directions = cfg["directions_deg"]
+        speeds = cfg["speeds_ms"]
+        # stabilities can be a list of dicts [{id: "neutral", ...}] or strings
+        raw_stab = cfg["stabilities"]
+        stabilities = [s["id"] if isinstance(s, dict) else s for s in raw_stab]
+        # solver from solver.name or default
+        solver_cfg = cfg.get("solver", {})
+        solver_name = solver_cfg.get("name", "simpleFoam") if isinstance(solver_cfg, dict) else solver_cfg
+        solvers = [solver_name]
+
     physics = cfg.get("physics", {})
     mesh = cfg.get("mesh", {})
-
-    solvers = params["solver"]
-    directions = params["direction_deg"]
-    speeds = params["speed_ms"]
-    stabilities = params["stability"]
 
     # Apply filters
     if filter_directions:
@@ -331,8 +385,14 @@ def generate_case_dir(
         domain_km=case.domain_km,
         solver_name=case.solver,
         thermal=case.thermal,
+        coriolis=case.coriolis,
+        canopy_enabled=case.canopy,
         boussinesq=case.boussinesq,
     )
+
+    # Patch fvSchemes if "accurate" variant requested
+    if case.fvschemes_variant == "accurate":
+        _patch_fvschemes_accurate(case_dir)
 
     # Override controlDict with campaign-specific settings
     # (generate_mesh defaults to 1000 iterations)
@@ -361,6 +421,32 @@ def _patch_control_dict(case_dir: Path, n_iter: int, write_interval: int) -> Non
     text = re.sub(r"endTime\s+\d+;", f"endTime         {n_iter};", text)
     text = re.sub(r"writeInterval\s+\d+;", f"writeInterval   {write_interval};", text)
     cd_path.write_text(text)
+
+
+def _patch_fvschemes_accurate(case_dir: Path) -> None:
+    """Patch fvSchemes: switch k/epsilon from upwind to linearUpwind.
+
+    Default (robust): bounded Gauss upwind for k and epsilon.
+    Accurate variant: bounded Gauss linearUpwind for k and epsilon.
+    More accurate but can be less stable on coarse/skewed meshes.
+    """
+    import re
+    fvs_path = case_dir / "system" / "fvSchemes"
+    if not fvs_path.exists():
+        return
+    text = fvs_path.read_text()
+    text = re.sub(
+        r"div\(phi,k\)\s+bounded Gauss upwind;",
+        "div(phi,k)                      bounded Gauss linearUpwind grad(k);",
+        text,
+    )
+    text = re.sub(
+        r"div\(phi,epsilon\)\s+bounded Gauss upwind;",
+        "div(phi,epsilon)                bounded Gauss linearUpwind grad(epsilon);",
+        text,
+    )
+    fvs_path.write_text(text)
+    logger.info("fvSchemes patched to 'accurate' (linearUpwind k/epsilon)")
 
 
 def _render_run_pbs(case_dir: Path, case: CampaignCase) -> None:
@@ -462,13 +548,24 @@ def generate_campaign(
             "script": "run.pbs",
             "ncpus": case.ncpus,
             "tags": {
+                "solver": case.solver,
                 "direction_deg": case.direction_deg,
                 "speed_ms": case.speed_ms,
                 "stability": case.stability,
-                "solver": case.solver,
                 "resolution_m": case.resolution_m,
+                "domain_km": case.domain_km,
+                "coriolis": case.coriolis,
+                "canopy": case.canopy,
+                "thermal": case.thermal,
+                "fvschemes": case.fvschemes_variant,
             },
         })
+
+    # Build remote dir from site geohash (8 chars ≈ ±20 m precision)
+    site_lat = site_cfg["site"]["coordinates"]["latitude"]
+    site_lon = site_cfg["site"]["coordinates"]["longitude"]
+    ghash = _geohash_encode(site_lat, site_lon, precision=8)
+    remote_dir = f"/home/maitreje/campaigns/{ghash}/{prefix}"
 
     # Write kraken-sim campaign.yaml
     campaign_yaml = {
@@ -476,7 +573,7 @@ def generate_campaign(
         "hpc": {
             "host": "aqua.qut.edu.au",
             "username": "maitreje",
-            "remote_base_dir": f"/home/maitreje/downscalewind/{prefix}",
+            "remote_base_dir": remote_dir,
         },
         "parser": "openfoam",
         "inject_monitoring": True,

@@ -13,21 +13,21 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    # Module 2A — CFD Case Generator
+    # Module 2A — Validation Matrix (Full Factorial)
 
-    **Site**: Perdigão, Portugal
-    **Solver**: simpleFoam + k-ε (OF2412 ESI)
-    **Deployment**: kraken-sim (manifest-based)
+    **Site**: Perdigão, Portugal (canonical case: 217°, 7.85 m/s, neutral)
+    **Domain**: 25×25 km centred on obs masts
+    **Solver**: OF2412 ESI → kraken-sim deployment
 
-    This notebook generates OpenFOAM case directories and the `campaign.yaml`
-    manifest for kraken-sim deployment. It does NOT run CFD — that's handled
-    by kraken-sim on HPC.
+    ## Goal
+    Evaluate the impact of 5 factors on CFD accuracy vs Perdigão observations:
+    1. **Solver**: simpleFoam vs buoyantSimpleFoam
+    2. **Coriolis**: on vs off
+    3. **Canopy drag**: on vs off
+    4. **Resolution**: 500 m, 250 m, 100 m
+    5. **fvSchemes**: robust (upwind k/ε) vs accurate (linearUpwind k/ε)
 
-    ## Workflow
-    1. Configure case parameters (direction, speed, stability, mesh)
-    2. Generate single validation case OR batch campaign
-    3. Use `kraken-sim smoke campaign.yaml` to test locally
-    4. Use `kraken-sim load campaign.yaml` to deploy on HPC
+    Full factorial: 2 × 2 × 2 × 3 × 2 = **48 cases**
     """)
     return
 
@@ -35,146 +35,225 @@ def _(mo):
 @app.cell
 def _():
     import sys
-    sys.path.insert(0, '..')
     from pathlib import Path
-    import yaml
 
-    ROOT = Path('..').resolve()
-    DATA = ROOT / 'data'
-    CASES_DIR = DATA / 'campaign' / 'cases'
+    ROOT = Path(__file__).parent.parent.resolve() if "__file__" in dir() else Path("..").resolve()
+    DATA = ROOT / "data"
+    CASES_DIR = DATA / "campaign" / "validation"
     CASES_DIR.mkdir(parents=True, exist_ok=True)
 
-    with open(ROOT / 'configs' / 'sites' / 'perdigao.yaml') as _f:
-        SITE_CFG = yaml.safe_load(_f)
+    _cfd_path = str(ROOT / "services" / "module2a-cfd")
+    if _cfd_path not in sys.path:
+        sys.path.insert(0, _cfd_path)
+
+    import yaml
+    with open(ROOT / "configs" / "sites" / "perdigao.yaml") as _fh:
+        SITE_CFG = yaml.safe_load(_fh)
+
+    SRTM_TIF = ROOT / "data" / "raw" / "srtm_perdigao_30m.tif"
 
     print(f"Site: {SITE_CFG['site']['name']}")
-    print(f"Root: {ROOT}")
-    print(f"Cases: {CASES_DIR}")
-    return DATA, CASES_DIR, ROOT, SITE_CFG, yaml
+    print(f"Cases dir: {CASES_DIR}")
+    print(f"SRTM: exists={SRTM_TIF.exists()}")
+    return CASES_DIR, DATA, ROOT, SITE_CFG, SRTM_TIF
 
 
 @app.cell
 def _(mo):
-    # --- Case parameters form ---
-    direction = mo.ui.slider(0, 350, step=10, value=220, label="Wind direction [°]")
-    speed = mo.ui.slider(3, 20, step=1, value=10, label="Wind speed [m/s]")
-    stability = mo.ui.dropdown(["neutral", "stable", "unstable"], value="neutral", label="Stability")
-    resolution = mo.ui.dropdown([1000, 500, 250, 100], value=100, label="Resolution [m]")
-    domain_km = mo.ui.slider(10, 50, step=5, value=25, label="Domain [km]")
-    context_cells = mo.ui.dropdown([1, 3, 5], value=3, label="Context cells")
-    ncpus = mo.ui.slider(1, 24, step=1, value=12, label="CPUs")
-    canopy = mo.ui.switch(value=False, label="Canopy drag")
-    coriolis = mo.ui.switch(value=True, label="Coriolis force")
-
-    form = mo.vstack([
-        mo.md("### Case parameters"),
-        mo.hstack([direction, speed, stability]),
-        mo.hstack([resolution, domain_km, context_cells]),
-        mo.hstack([ncpus, canopy, coriolis]),
-    ])
-    form
-    return canopy, context_cells, coriolis, direction, domain_km, ncpus, resolution, speed, stability
+    mo.md("## Validation matrix (full factorial)")
+    return
 
 
 @app.cell
-def _(CASES_DIR, SITE_CFG, canopy, context_cells, coriolis, direction, domain_km, mo, ncpus, resolution, speed, stability):
-    # --- Generate single validation case ---
-    generate_btn = mo.ui.run_button(label="Generate single case")
+def _(mo):
+    import itertools
+    import pandas as pd
+
+    # --- Fixed meteorological conditions (canonical Perdigão case) ---
+    DIRECTION_DEG = 217.0
+    SPEED_MS = 7.85
+    STABILITY = "neutral"
+    DOMAIN_KM = 25.0
+    CONTEXT_CELLS = 1  # 25 km domain, no buffer needed
+
+    # --- Factors to vary ---
+    solvers = ["simpleFoam", "buoyantSimpleFoam"]
+    coriolis_opts = [True, False]
+    canopy_opts = [True, False]
+    resolutions_m = [500, 250, 100]
+    fvschemes_opts = ["robust", "accurate"]
+
+    # --- Full factorial ---
+    combos = list(itertools.product(solvers, coriolis_opts, canopy_opts, resolutions_m, fvschemes_opts))
+
+    matrix = pd.DataFrame(combos, columns=["solver", "coriolis", "canopy", "resolution_m", "fvschemes"])
+    matrix.insert(0, "case_id", [
+        f"v_{row.solver[:2]}_{('cor' if row.coriolis else 'noc')}_{('can' if row.canopy else 'nca')}_{row.resolution_m}m_{row.fvschemes[:3]}"
+        for row in matrix.itertuples()
+    ])
+    matrix["direction_deg"] = DIRECTION_DEG
+    matrix["speed_ms"] = SPEED_MS
+    matrix["stability"] = STABILITY
+    matrix["domain_km"] = DOMAIN_KM
+
+    mo.md(f"**{len(matrix)} cases** in full factorial design")
+
+    return (
+        CONTEXT_CELLS, DIRECTION_DEG, DOMAIN_KM, SPEED_MS, STABILITY,
+        canopy_opts, coriolis_opts, fvschemes_opts, matrix, resolutions_m, solvers,
+    )
+
+
+@app.cell
+def _(matrix, mo):
+    mo.ui.table(matrix, selection=None)
+    return
+
+
+@app.cell
+def _(mo):
+    generate_btn = mo.ui.run_button(label="Generate all 48 cases + campaign.yaml")
     generate_btn
+    return (generate_btn,)
 
-    if generate_btn.value:
-        sys_path_hack = __import__('sys')
-        sys_path_hack.path.insert(0, str(__import__('pathlib').Path('..').resolve() / 'services' / 'module2a-cfd'))
 
-        from generate_mesh import generate_mesh
-        from generate_campaign import build_parametric_inflow
-        import json
+@app.cell
+def _(CASES_DIR, CONTEXT_CELLS, SITE_CFG, SRTM_TIF, generate_btn, matrix, mo):
+    mo.stop(not generate_btn.value, mo.md("*Click the button above to generate all cases.*"))
 
-        case_id = f"val_{direction.value:03d}deg_{speed.value:02d}ms_{stability.value}"
-        case_dir = CASES_DIR / case_id
+    import json
+    import logging
+    from generate_mesh import generate_mesh
+    from generate_campaign import build_parametric_inflow, CampaignCase, _patch_fvschemes_accurate, _patch_control_dict, _render_run_pbs
+
+    logging.basicConfig(level=logging.WARNING)
+
+    generated = []
+    for row in matrix.itertuples():
+        case_dir = CASES_DIR / row.case_id
+        if case_dir.exists():
+            generated.append(row.case_id)
+            continue
 
         # Build inflow
-        inflow = build_parametric_inflow(
-            speed_ms=speed.value,
-            direction_deg=direction.value,
-            stability=stability.value,
+        _inflow = build_parametric_inflow(
+            speed_ms=row.speed_ms,
+            direction_deg=row.direction_deg,
+            stability=row.stability,
         )
+        _inflow_json = CASES_DIR / "inflow_profiles" / f"inflow_{row.case_id}.json"
+        _inflow_json.parent.mkdir(parents=True, exist_ok=True)
+        with open(_inflow_json, "w") as _fh:
+            json.dump(_inflow, _fh, indent=2)
 
-        # Write inflow JSON
-        inflow_json = CASES_DIR / "inflow_profiles" / f"inflow_{case_id}.json"
-        inflow_json.parent.mkdir(parents=True, exist_ok=True)
-        with open(inflow_json, "w") as f:
-            json.dump(inflow, f, indent=2)
+        # Generate case
+        _thermal = row.solver == "buoyantSimpleFoam"
+        _boussinesq = row.solver == "buoyantSimpleFoam"
 
-        # Detect SRTM
-        srtm = __import__('pathlib').Path('..').resolve() / 'data' / 'raw' / 'srtm_perdigao_30m.tif'
-
-        geom = generate_mesh(
+        generate_mesh(
             site_cfg=SITE_CFG,
-            resolution_m=resolution.value,
-            context_cells=context_cells.value,
+            resolution_m=float(row.resolution_m),
+            context_cells=CONTEXT_CELLS,
             output_dir=case_dir,
-            srtm_tif=srtm if srtm.exists() else None,
-            inflow_json=inflow_json,
-            domain_km=domain_km.value,
-            solver_name="simpleFoam",
+            srtm_tif=SRTM_TIF if SRTM_TIF.exists() else None,
+            inflow_json=_inflow_json,
+            domain_km=row.domain_km,
+            solver_name=row.solver,
+            thermal=_thermal,
+            coriolis=row.coriolis,
+            canopy_enabled=row.canopy,
+            boussinesq=_boussinesq,
         )
 
-        mo.output.replace(mo.md(f"""
-        **Case generated:** `{case_dir}`
-        - Resolution: {resolution.value} m
-        - Domain: {domain_km.value}×{domain_km.value} km, context={context_cells.value}
-        - Cells (blockMesh): {geom['n_x']}×{geom['n_y']}×{geom['n_z']} = {geom['n_x']*geom['n_y']*geom['n_z']:,}
-        - Wind: {direction.value}° @ {speed.value} m/s ({stability.value})
-        """))
+        # Patch iterations
+        _patch_control_dict(case_dir, 2000, 200)
+
+        # Patch fvSchemes if accurate
+        if row.fvschemes == "accurate":
+            _patch_fvschemes_accurate(case_dir)
+
+        # Render run.pbs
+        _case = CampaignCase(
+            case_id=row.case_id, solver=row.solver,
+            direction_deg=row.direction_deg, speed_ms=row.speed_ms,
+            stability=row.stability, thermal=_thermal,
+            coriolis=row.coriolis, canopy=row.canopy,
+            resolution_m=row.resolution_m, domain_km=row.domain_km,
+            context_cells=CONTEXT_CELLS, n_refine_levels=2,
+            boussinesq=_boussinesq, fvschemes_variant=row.fvschemes,
+        )
+        _render_run_pbs(case_dir, _case)
+
+        generated.append(row.case_id)
+
+    mo.md(f"**{len(generated)} cases generated** in `{CASES_DIR}`")
+    return (generated,)
+
+
+@app.cell
+def _(CASES_DIR, SITE_CFG, generated, matrix, mo):
+    # --- Write campaign.yaml manifest ---
+    import yaml as _yaml
+
+    _cases_list = []
+    for row in matrix.itertuples():
+        if row.case_id in generated:
+            _cases_list.append({
+                "id": row.case_id,
+                "dir": row.case_id,
+                "script": "run.pbs",
+                "ncpus": 12,
+                "tags": {
+                    "solver": row.solver,
+                    "direction_deg": float(row.direction_deg),
+                    "speed_ms": float(row.speed_ms),
+                    "stability": row.stability,
+                    "resolution_m": int(row.resolution_m),
+                    "coriolis": bool(row.coriolis),
+                    "canopy": bool(row.canopy),
+                    "fvschemes": row.fvschemes,
+                },
+            })
+
+    # Remote dir: geohash 8 chars (≈±20 m precision)
+    from generate_campaign import _geohash_encode
+    _ghash = _geohash_encode(SITE_CFG["site"]["coordinates"]["latitude"],
+                              SITE_CFG["site"]["coordinates"]["longitude"], precision=8)
+    _remote_dir = f"/home/maitreje/campaigns/{_ghash}"
+
+    _manifest = {
+        "name": "perdigao_validation_factorial",
+        "hpc": {
+            "host": "aqua.qut.edu.au",
+            "username": "maitreje",
+            "remote_base_dir": _remote_dir,
+        },
+        "parser": "openfoam",
+        "inject_monitoring": True,
+        "monitoring_fields": ["U", "p", "k", "epsilon"],
+        "cases": _cases_list,
+    }
+
+    _manifest_path = CASES_DIR / "campaign.yaml"
+    with open(_manifest_path, "w") as _fh:
+        _yaml.dump(_manifest, _fh, default_flow_style=False, sort_keys=False)
+
+    mo.md(f"**campaign.yaml** written: `{_manifest_path}` ({len(_cases_list)} cases)")
     return
 
 
 @app.cell
-def _(CASES_DIR, ROOT, mo, yaml):
-    # --- Batch campaign generation ---
-    campaign_btn = mo.ui.run_button(label="Generate campaign from YAML")
-    campaign_btn
-
-    if campaign_btn.value:
-        sys_path_hack = __import__('sys')
-        sys_path_hack.path.insert(0, str(ROOT / 'services' / 'module2a-cfd'))
-
-        from generate_campaign import generate_campaign
-
-        config_path = ROOT / 'configs' / 'training' / 'cfd_grid.yaml'
-        site_path = ROOT / 'configs' / 'sites' / 'perdigao.yaml'
-        srtm = ROOT / 'data' / 'raw' / 'srtm_perdigao_30m.tif'
-
-        if config_path.exists():
-            cases = generate_campaign(
-                config_path=config_path,
-                output_base=CASES_DIR,
-                site_config_path=site_path,
-                prefix="prd",
-                srtm_tif=srtm if srtm.exists() else None,
-            )
-            mo.output.replace(mo.md(f"**Campaign generated:** {len(cases)} cases in `{CASES_DIR}`"))
-        else:
-            mo.output.replace(mo.md(f"Config not found: `{config_path}`"))
-    return
-
-
-@app.cell
-def _(CASES_DIR, mo, yaml):
-    # --- Display campaign.yaml ---
-    manifest = CASES_DIR / "campaign.yaml"
-    if manifest.exists():
-        with open(manifest) as f:
-            content = f.read()
-        # Show first 80 lines
-        lines = content.split('\n')
-        preview = '\n'.join(lines[:80])
-        if len(lines) > 80:
-            preview += f"\n\n... ({len(lines) - 80} more lines)"
-        mo.output.replace(mo.md(f"### campaign.yaml\n```yaml\n{preview}\n```"))
+def _(CASES_DIR, mo):
+    _manifest = CASES_DIR / "campaign.yaml"
+    if _manifest.exists():
+        _content = _manifest.read_text()
+        _lines = _content.split("\n")
+        _preview = "\n".join(_lines[:60])
+        if len(_lines) > 60:
+            _preview += f"\n\n... ({len(_lines) - 60} more lines)"
+        mo.md(f"### campaign.yaml preview\n```yaml\n{_preview}\n```")
     else:
-        mo.output.replace(mo.md("*No campaign.yaml yet — generate a campaign first.*"))
+        mo.md("*No campaign.yaml yet.*")
     return
 
 
@@ -185,18 +264,21 @@ def _(mo):
     ## Next steps
 
     ```bash
-    # 1. Smoke test (local Docker, 1 case)
-    kraken-sim smoke data/campaign/cases/campaign.yaml
+    # 1. Smoke test (1 case, local Docker OF2412)
+    kraken-sim smoke data/campaign/validation/campaign.yaml
 
-    # 2. Deploy on HPC
-    kraken-sim load data/campaign/cases/campaign.yaml
+    # 2. Deploy all 48 cases on HPC
+    kraken-sim load data/campaign/validation/campaign.yaml
 
-    # 3. Monitor
-    kraken-sim status data/campaign/cases/campaign.yaml
+    # 3. Monitor convergence
+    kraken-sim status data/campaign/validation/campaign.yaml
 
-    # 4. Download results
-    kraken-sim pull data/campaign/cases/campaign.yaml
+    # 4. Download results → Parquet
+    kraken-sim pull data/campaign/validation/campaign.yaml
     ```
+
+    After results are downloaded, use `compare_cfd_obs.py` to evaluate
+    each case against Perdigão observations and build the sensitivity table.
     """)
     return
 

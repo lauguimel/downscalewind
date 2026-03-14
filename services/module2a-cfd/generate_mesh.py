@@ -368,6 +368,8 @@ def generate_mesh(
     domain_km: float = DEFAULT_DOMAIN_KM,
     solver_name: str = "simpleFoam",
     thermal: bool = False,
+    coriolis: bool = True,
+    canopy_enabled: bool = False,
     **kwargs,
 ) -> dict:
     """Generate an OpenFOAM case directory with mesh and boundary condition files.
@@ -549,6 +551,7 @@ def generate_mesh(
             "T_ref_K":  float(inflow.get("T_ref", 300.0)),
             "p_ref_Pa": 0.0,
             "rho_ref":  1.225,
+            "coriolis": coriolis,
         },
         "solver": {
             "name":           solver_name,
@@ -559,7 +562,7 @@ def generate_mesh(
             "boussinesq":     kwargs.get("boussinesq", False),
         },
         "canopy": {
-            "enabled": False,  # Set to True after generate_lad_field.py
+            "enabled": canopy_enabled,
             "Cd": 0.2,
             "C4_eps": 0.9,
         },
