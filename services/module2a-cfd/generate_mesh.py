@@ -509,6 +509,29 @@ def generate_mesh(
         refine_level, refine_distances,
     )
 
+    # ---- tower positions in local coords (for sampleDict) -------------------------
+    towers = []
+    key_towers = (
+        site.get("terrain", {}).get("key_towers", [])
+        or site_cfg.get("measurement", {}).get("masts", {}).get("key_towers", [])
+    )
+    for tw in key_towers:
+        tw_lat = tw["lat"]
+        tw_lon = tw["lon"]
+        # Convert lat/lon to local (x, y) relative to site center
+        tw_x = (tw_lon - site_lon) * 111_000.0 * np.cos(np.radians(site_lat))
+        tw_y = (tw_lat - site_lat) * 111_000.0
+        tw_z = tw.get("elevation_m", 0.0)
+        towers.append({
+            "id": tw["id"],
+            "x": round(tw_x, 1),
+            "y": round(tw_y, 1),
+            "z_ground": round(tw_z, 1),
+        })
+    if towers:
+        logger.info("Tower positions (local coords): %s",
+                     ", ".join(f"{t['id']}=({t['x']},{t['y']},{t['z_ground']})" for t in towers))
+
     jinja_ctx = {
         "domain": {
             "total_x_m":   geom["total_x_m"],
@@ -547,6 +570,10 @@ def generate_mesh(
         "refine_distances": refine_distances,
         "n_layers":         N_SNAP_LAYERS,
         "inflow": inflow,
+        "site": {
+            "latitude":  site_lat,
+            "longitude": site_lon,
+        },
         "physics": {
             "T_ref_K":  float(inflow.get("T_ref", 300.0)),
             "p_ref_Pa": 0.0,
@@ -569,6 +596,7 @@ def generate_mesh(
         "parallel": {
             "n_cores": n_cores,
         },
+        "towers": towers,
     }
 
     # ---- render templates -------------------------------------------------------
@@ -594,6 +622,15 @@ def generate_mesh(
         if thermo.exists():
             thermo.unlink()
             logger.info("Removed thermophysicalProperties (not used by %s)", solver_name)
+
+    # ---- turbulenceProperties symlink for ESI v2412 compatibility ------------------
+    # ESI v2412 uses "momentumTransport" but some parallel decomposition paths
+    # still look for "turbulenceProperties". Create a symlink for safety.
+    mt_file = output_dir / "constant" / "momentumTransport"
+    tp_symlink = output_dir / "constant" / "turbulenceProperties"
+    if mt_file.exists() and not tp_symlink.exists():
+        tp_symlink.symlink_to("momentumTransport")
+        logger.info("Created turbulenceProperties -> momentumTransport symlink")
 
     # ---- create empty .foam file for ParaView -------------------------------------
     foam_file = output_dir / "case.foam"

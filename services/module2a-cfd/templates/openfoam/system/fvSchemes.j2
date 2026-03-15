@@ -78,8 +78,10 @@ divSchemes
 
     // Energy transport — buoyantSimpleFoam (heRhoThermo)
     // sensibleEnthalpy → h; sensibleInternalEnergy → e
-    div(phi,h)                          bounded Gauss linearUpwind default;
-    div(phi,e)                          bounded Gauss linearUpwind default;
+    // First-order upwind: unconditionally stable for rhoConst (energy is
+    // passive/decoupled); linearUpwind caused T divergence on first iterations.
+    div(phi,h)                          bounded Gauss upwind;
+    div(phi,e)                          bounded Gauss upwind;
     div(phi,K)                          bounded Gauss upwind;
     div(phi,Ekp)                        bounded Gauss upwind;
 {% endif %}

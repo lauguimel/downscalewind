@@ -8,19 +8,19 @@
 /*
  * thermophysicalProperties.j2 — Thermophysical model for ABL simulation
  *
- * Required by buoyantSimpleFoam.
- * NOT used by simpleFoam.
+ * Required by buoyantSimpleFoam.  NOT used by simpleFoam.
  *
- * Two modes controlled by solver.boussinesq (default: false):
- *   - Boussinesq: rhoConst + explicit buoyancy fvOption
- *     Replicates the old buoyantBoussinesqSimpleFoam behaviour.
- *     rhoConst avoids heRhoThermo Newton divergence; buoyancy enters
- *     only through a coded momentum source (Boussinesq approximation).
+ * Equation of state controlled by solver.boussinesq (default: true):
+ *   - Boussinesq (default): rho = rho0 * [1 - beta*(T - T0)]
+ *     Native ESI v2412 Boussinesq EoS — incompressible with linear
+ *     buoyancy coupling.  beta = 1/T_ref for ideal gas approximation.
  *   - Compressible: ideal gas rho = p/(R*T)
+ *     More realistic but harder to converge; requires tighter relaxation.
  *
  * Variables:
- *   physics.T_ref_K      — reference temperature [K] (default 300)
- *   solver.boussinesq    — if true, use rhoConst + buoyancy source (default: false)
+ *   physics.T_ref_K      — reference temperature [K] (default 288.15)
+ *   physics.rho_ref      — reference density [kg/m³] (default 1.225)
+ *   solver.boussinesq    — if true, use Boussinesq EoS (default: true)
  */
 FoamFile
 {
@@ -32,8 +32,11 @@ FoamFile
 }
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
-{%- set T_ref = physics.T_ref_K | default(300.0) %}
-{%- set boussinesq = solver.boussinesq | default(false) %}
+{%- set T_ref = physics.T_ref_K | default(288.15) %}
+{%- set rho_ref = physics.rho_ref | default(1.225) %}
+{%- set boussinesq = solver.boussinesq | default(true) %}
+{#- beta = 1/T_ref for ideal gas Boussinesq approximation -#}
+{%- set beta = 1.0 / T_ref %}
 
 thermoType
 {
@@ -42,9 +45,9 @@ thermoType
     transport       const;
     thermo          hConst;
 {%- if boussinesq %}
-    equationOfState rhoConst;          // constant density; buoyancy via fvOption
+    equationOfState Boussinesq;
 {%- else %}
-    equationOfState perfectGas;        // rho = p / (R * T)
+    equationOfState perfectGas;
 {%- endif %}
     specie          specie;
     energy          sensibleEnthalpy;
@@ -59,17 +62,19 @@ mixture
     thermodynamics
     {
         Cp          1005;       // Specific heat capacity [J/(kg.K)]
-        Hf          0;          // Heat of formation
+        Hf          0;          // Heat of formation [J/kg]
     }
     transport
     {
-        mu          1.81e-5;    // Dynamic viscosity [Pa.s] at ~300K
+        mu          1.81e-5;    // Dynamic viscosity [Pa.s] at ~288K
         Pr          0.71;       // Laminar Prandtl number
     }
 {%- if boussinesq %}
     equationOfState
     {
-        rho         1.225;      // Constant density [kg/m³]
+        rho0        {{ rho_ref }};       // Reference density [kg/m³]
+        T0          {{ T_ref }};         // Reference temperature [K]
+        beta        {{ "%.6e" | format(beta) }};  // Thermal expansion coeff [1/K] = 1/T_ref
     }
 {%- endif %}
 }

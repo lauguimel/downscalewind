@@ -1,0 +1,52 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | v2412
+    \\  /    A nd           | Web:     www.openfoam.com
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * sampleDict.j2 — Post-processing: vertical profiles at tower locations
+ *
+ * Extracts U, k, epsilon profiles at measurement tower positions for
+ * comparison with observations.  40 points from ground to ground+200m.
+ *
+ * Usage:
+ *   postProcess -func sampleDict -latestTime
+ *
+ * Variables:
+ *   towers — list of dicts with keys: id, x, y, z_ground
+ */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      sampleDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+type            sets;
+libs            (sampling);
+
+interpolationScheme cellPoint;
+setFormat       csv;
+
+fields          (U k epsilon);
+
+sets
+(
+{% for tower in towers %}
+    {{ tower.id }}
+    {
+        type    uniform;
+        axis    z;
+        start   ({{ "%.1f" | format(tower.x) }} {{ "%.1f" | format(tower.y) }} {{ tower.z_ground }});
+        end     ({{ "%.1f" | format(tower.x) }} {{ "%.1f" | format(tower.y) }} {{ tower.z_ground + 200 }});
+        nPoints 40;
+    }
+{% endfor %}
+);
+
+// ************************************************************************* //

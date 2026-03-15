@@ -61,9 +61,16 @@ if [ "$NPROCS" -gt 1 ]; then
     foamDictionary system/decomposeParDict -entry numberOfSubdomains -set $NPROCS
     runApplication decomposePar
     runParallel $SOLVER
+    check_log log.$SOLVER
     runApplication reconstructPar -latestTime
 else
     runApplication $SOLVER
+    check_log log.$SOLVER
+fi
+
+# ---- Post-processing: sample profiles at tower locations ----
+if [ -f system/sampleDict ]; then
+    runApplication postProcess -func sampleDict -latestTime
 fi
 
 echo "========================================"
