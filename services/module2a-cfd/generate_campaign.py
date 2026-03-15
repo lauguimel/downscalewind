@@ -410,16 +410,22 @@ def generate_case_dir(
     return case_dir
 
 
-def _patch_control_dict(case_dir: Path, n_iter: int, write_interval: int) -> None:
-    """Patch controlDict endTime and writeInterval after template rendering."""
+def _patch_control_dict(
+    case_dir: Path,
+    n_iter: int,
+    write_interval: int,
+    purge_write: int | None = None,
+) -> None:
+    """Patch controlDict endTime, writeInterval, and optionally purgeWrite."""
     cd_path = case_dir / "system" / "controlDict"
     if not cd_path.exists():
         return
-    text = cd_path.read_text()
-    # Replace endTime (rendered as 1000 by default)
     import re
+    text = cd_path.read_text()
     text = re.sub(r"endTime\s+\d+;", f"endTime         {n_iter};", text)
     text = re.sub(r"writeInterval\s+\d+;", f"writeInterval   {write_interval};", text)
+    if purge_write is not None:
+        text = re.sub(r"purgeWrite\s+\d+;", f"purgeWrite      {purge_write};", text)
     cd_path.write_text(text)
 
 
@@ -449,7 +455,7 @@ def _patch_fvschemes_accurate(case_dir: Path) -> None:
     logger.info("fvSchemes patched to 'accurate' (linearUpwind k/epsilon)")
 
 
-def _render_run_pbs(case_dir: Path, case: CampaignCase) -> None:
+def _render_run_pbs(case_dir: Path, case: CampaignCase, remote_case_dir: str) -> None:
     """Render run.pbs.j2 into the case directory."""
     from jinja2 import Environment, FileSystemLoader
 
@@ -461,6 +467,7 @@ def _render_run_pbs(case_dir: Path, case: CampaignCase) -> None:
         ncpus=case.ncpus,
         mem=case.mem,
         walltime=case.walltime,
+        remote_case_dir=remote_case_dir,
     )
     (case_dir / "run.pbs").write_text(content)
 
@@ -528,6 +535,12 @@ def generate_campaign(
 
     output_base.mkdir(parents=True, exist_ok=True)
 
+    # Build remote dir from site geohash (8 chars ≈ ±20 m precision)
+    site_lat = site_cfg["site"]["coordinates"]["latitude"]
+    site_lon = site_cfg["site"]["coordinates"]["longitude"]
+    ghash = _geohash_encode(site_lat, site_lon, precision=8)
+    remote_dir = f"/home/maitreje/campaigns/{ghash}/{prefix}"
+
     # Generate cases
     mesh_cache: dict[str, Path] = {}
     campaign_cases = []
@@ -540,13 +553,8 @@ def generate_campaign(
             mesh_cache=mesh_cache,
         )
         # Render run.pbs from template
-        _render_run_pbs(case_dir, case)
-
-    # Build remote dir from site geohash (8 chars ≈ ±20 m precision)
-    site_lat = site_cfg["site"]["coordinates"]["latitude"]
-    site_lon = site_cfg["site"]["coordinates"]["longitude"]
-    ghash = _geohash_encode(site_lat, site_lon, precision=8)
-    remote_dir = f"/home/maitreje/campaigns/{ghash}/{prefix}"
+        remote_case_dir = f"{remote_dir}/{case.case_id}"
+        _render_run_pbs(case_dir, case, remote_case_dir)
 
     # Write kraken-sim campaign.yaml via CampaignBuilder
     from kraken_sim.schema import CampaignBuilder
@@ -556,6 +564,7 @@ def generate_campaign(
         hpc_host="aqua.qut.edu.au",
         hpc_username="maitreje",
         hpc_remote_dir=remote_dir,
+        local_base_dir=str(output_base),
         monitoring_fields=["U", "p", "k", "epsilon"],
         auto_group=["solver", "stability"],
     )
