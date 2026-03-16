@@ -19,13 +19,11 @@
  * (nut = 0 initially; updated by the solver on the first iteration).
  *
  * Variables:
- *   (none required — alphat is always initialised to zero)
+ *   solver.name — solver name (simpleFoam, buoyantBoussinesqSimpleFoam)
  *
  * Wall BC:
- *   compressible::alphatWallFunction
- *   Computes alphat at the wall consistent with the turbulent wall function
- *   treatment.  Prt = 0.85 is standard for atmospheric boundary layers
- *   (slightly lower than free-stream 0.9 to account for roughness effects).
+ *   buoyantBoussinesqSimpleFoam: alphatJayatillekeWallFunction (incompressible)
+ *   buoyantSimpleFoam: compressible::alphatWallFunction (compressible)
  */
 FoamFile
 {
@@ -37,7 +35,11 @@ FoamFile
 }
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
+{%- if solver.name | default('simpleFoam') == 'buoyantBoussinesqSimpleFoam' %}
+dimensions      [0 2 -1 0 0 0 0];
+{%- else %}
 dimensions      [1 -1 -1 0 0 0 0];
+{%- endif %}
 
 // alphat initialised to zero — computed from nut by turbulence model
 internalField   uniform 0;
@@ -90,14 +92,22 @@ boundaryField
     // -----------------------------------------------------------------------
     terrain
     {
+{%- if solver.name | default('simpleFoam') == 'buoyantBoussinesqSimpleFoam' %}
+        type            alphatJayatillekeWallFunction;
+{%- else %}
         type            compressible::alphatWallFunction;
+{%- endif %}
         Prt             0.85;
         value           uniform 0;
     }
 
     bottom
     {
+{%- if solver.name | default('simpleFoam') == 'buoyantBoussinesqSimpleFoam' %}
+        type            alphatJayatillekeWallFunction;
+{%- else %}
         type            compressible::alphatWallFunction;
+{%- endif %}
         Prt             0.85;
         value           uniform 0;
     }

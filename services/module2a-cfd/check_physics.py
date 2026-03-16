@@ -160,8 +160,29 @@ def check_gravity(case_dir: Path) -> list[CheckResult]:
 
 
 def check_thermo(case_dir: Path) -> list[CheckResult]:
-    """Check thermophysical properties (buoyantSimpleFoam only)."""
+    """Check thermal properties (buoyantSimpleFoam or buoyantBoussinesqSimpleFoam)."""
     results = []
+
+    # buoyantBoussinesqSimpleFoam uses transportProperties with beta, TRef
+    tp_text = _read_of_dict(case_dir / "constant" / "transportProperties")
+    if tp_text:
+        beta_m = re.search(r'beta\s+\[.*?\]\s+([0-9.e+-]+)', tp_text)
+        tref_m = re.search(r'TRef\s+\[.*?\]\s+([0-9.e+-]+)', tp_text)
+        if beta_m and tref_m:
+            beta = float(beta_m.group(1))
+            TRef = float(tref_m.group(1))
+            beta_expected = 1.0 / TRef
+            rel_err = abs(beta - beta_expected) / beta_expected
+            results.append(CheckResult("thermo_mode", True,
+                           "buoyantBoussinesqSimpleFoam (T-equation, stable)"))
+            results.append(CheckResult("thermo_beta", rel_err < BETA_TOL,
+                           f"beta = {beta:.4e}, 1/TRef = {beta_expected:.4e} (err={rel_err:.1%})",
+                           beta, beta_expected))
+            ok_tref = T_REF_MIN <= TRef <= T_REF_MAX
+            results.append(CheckResult("thermo_tref", ok_tref,
+                           f"TRef = {TRef} K", TRef, f"[{T_REF_MIN}, {T_REF_MAX}]"))
+            return results
+
     thermo_text = _read_of_dict(case_dir / "constant" / "thermophysicalProperties")
     if not thermo_text:
         return [CheckResult("thermo", True, "No thermophysicalProperties (simpleFoam case)")]

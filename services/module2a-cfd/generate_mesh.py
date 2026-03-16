@@ -604,20 +604,10 @@ def generate_mesh(
     render_templates(template_dir, output_dir, jinja_ctx)
 
     # ---- Remove solver-incompatible constant files --------------------------------
-    # buoyantSimpleFoam uses thermophysicalProperties (Boussinesq or perfectGas).
-    # simpleFoam uses transportProperties (incompressible, nu only).
-    if solver_name == "buoyantSimpleFoam":
-        tp = output_dir / "constant" / "transportProperties"
-        if tp.exists():
-            tp.unlink()
-            logger.info("Removed transportProperties (not used by buoyantSimpleFoam)")
-    elif solver_name == "simpleFoam":
-        thermo = output_dir / "constant" / "thermophysicalProperties"
-        if thermo.exists():
-            thermo.unlink()
-            logger.info("Removed thermophysicalProperties (not used by simpleFoam)")
-    else:
-        # Legacy: buoyantBoussinesqSimpleFoam uses transportProperties
+    # simpleFoam: uses transportProperties (nu only, no thermal)
+    # buoyantBoussinesqSimpleFoam: uses transportProperties (nu + beta, TRef, Pr, Prt)
+    # buoyantSimpleFoam: uses thermophysicalProperties (DO NOT USE — h diverges on terrain)
+    if solver_name in ("simpleFoam", "buoyantBoussinesqSimpleFoam"):
         thermo = output_dir / "constant" / "thermophysicalProperties"
         if thermo.exists():
             thermo.unlink()

@@ -41,13 +41,15 @@ FoamFile
 // p_ref = {{ physics.p_ref_Pa | default(0) }} Pa (gauge)
 // rho_ref = {{ physics.rho_ref | default(1.225) }} kg/m³
 
+{%- if solver.name | default('simpleFoam') == 'buoyantBoussinesqSimpleFoam' %}
+// buoyantBoussinesqSimpleFoam: kinematic pressure (same as simpleFoam)
+dimensions      [0 2 -2 0 0 0 0];
+{%- else %}
+// buoyantSimpleFoam: dynamic pressure in Pa
 dimensions      [1 -1 -2 0 0 0 0];
+{%- endif %}
 
-{%- set boussinesq = solver.boussinesq | default(false) %}
-{%- set p_init = 0 if boussinesq else 101325 %}
-// Boussinesq: gauge pressure (rho independent of p, es=Cp*T is linear)
-// perfectGas: atmospheric (rho=p/(RT) needs realistic p to avoid negative T)
-internalField   uniform {{ p_init }};
+internalField   uniform 0;
 
 boundaryField
 {
