@@ -296,6 +296,108 @@ def dem_to_stl(
     return {"z_min": float(Z.min()), "z_max": float(Z.max())}
 
 
+def build_domain_fms(
+    terrain_stl: Path,
+    out_fms: Path,
+    x_min: float, x_max: float,
+    y_min: float, y_max: float,
+    z_min: float, z_max: float,
+) -> None:
+    """Build a closed FMS surface for cfMesh from terrain STL + bounding box.
+
+    Creates a closed surface by combining:
+    - The terrain STL (bottom surface, patch "terrain")
+    - 5 planar faces: xMin, xMax, yMin, yMax, zMax
+
+    Uses ASCII STL multi-solid format which cfMesh reads natively.
+    Each solid name becomes a patch in the mesh.
+
+    This replaces surfaceGenerateBoundingBox which has issues with negative
+    coordinates being parsed as flags by the OF argument parser.
+    """
+    try:
+        from stl import mesh as stl_mesh
+    except ImportError as exc:
+        raise ImportError("numpy-stl is required: pip install numpy-stl") from exc
+
+    # Read terrain STL
+    terrain = stl_mesh.Mesh.from_file(str(terrain_stl))
+
+    # Build 5 bounding box faces (2 triangles each)
+    # Normals point INWARD (towards domain interior) for cfMesh convention
+    box_faces = {
+        "xMin": [  # x = x_min, normal +x
+            [[x_min, y_min, z_min], [x_min, y_min, z_max], [x_min, y_max, z_max]],
+            [[x_min, y_min, z_min], [x_min, y_max, z_max], [x_min, y_max, z_min]],
+        ],
+        "xMax": [  # x = x_max, normal -x
+            [[x_max, y_min, z_min], [x_max, y_max, z_min], [x_max, y_max, z_max]],
+            [[x_max, y_min, z_min], [x_max, y_max, z_max], [x_max, y_min, z_max]],
+        ],
+        "yMin": [  # y = y_min, normal +y
+            [[x_min, y_min, z_min], [x_max, y_min, z_min], [x_max, y_min, z_max]],
+            [[x_min, y_min, z_min], [x_max, y_min, z_max], [x_min, y_min, z_max]],
+        ],
+        "yMax": [  # y = y_max, normal -y
+            [[x_min, y_max, z_min], [x_min, y_max, z_max], [x_max, y_max, z_max]],
+            [[x_min, y_max, z_min], [x_max, y_max, z_max], [x_max, y_max, z_min]],
+        ],
+        "zMax": [  # z = z_max, normal -z
+            [[x_min, y_min, z_max], [x_max, y_min, z_max], [x_max, y_max, z_max]],
+            [[x_min, y_min, z_max], [x_max, y_max, z_max], [x_min, y_max, z_max]],
+        ],
+    }
+
+    # Write combined ASCII STL with named solids
+    out_fms.parent.mkdir(parents=True, exist_ok=True)
+    n_box_tri = 0
+    with open(out_fms, "w") as f:
+        # Terrain solid
+        f.write("solid terrain\n")
+        for tri in terrain.vectors:
+            # Compute normal
+            v0, v1, v2 = tri
+            e1 = v1 - v0
+            e2 = v2 - v0
+            n = np.cross(e1, e2)
+            norm = np.linalg.norm(n)
+            if norm > 0:
+                n = n / norm
+            f.write(f"  facet normal {n[0]} {n[1]} {n[2]}\n")
+            f.write("    outer loop\n")
+            for v in tri:
+                f.write(f"      vertex {v[0]} {v[1]} {v[2]}\n")
+            f.write("    endloop\n")
+            f.write("  endfacet\n")
+        f.write("endsolid terrain\n")
+
+        # Box face solids
+        for solid_name, tris in box_faces.items():
+            f.write(f"solid {solid_name}\n")
+            for tri in tris:
+                v0, v1, v2 = np.array(tri[0]), np.array(tri[1]), np.array(tri[2])
+                e1 = v1 - v0
+                e2 = v2 - v0
+                n = np.cross(e1, e2)
+                norm = np.linalg.norm(n)
+                if norm > 0:
+                    n = n / norm
+                f.write(f"  facet normal {n[0]} {n[1]} {n[2]}\n")
+                f.write("    outer loop\n")
+                for v in tri:
+                    f.write(f"      vertex {v[0]} {v[1]} {v[2]}\n")
+                f.write("    endloop\n")
+                f.write("  endfacet\n")
+                n_box_tri += 1
+            f.write(f"endsolid {solid_name}\n")
+
+    n_total = len(terrain.vectors) + n_box_tri
+    logger.info(
+        "Domain FMS saved: %s (%d terrain + %d box = %d triangles, 6 patches)",
+        out_fms, len(terrain.vectors), n_box_tri, n_total,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Jinja2 template rendering
 # ---------------------------------------------------------------------------
@@ -450,6 +552,18 @@ def generate_mesh(
     logger.info("Terrain z_max=%.0fm → domain z_max=%.0fm (%.0fm above terrain)",
                 terrain_z_max, domain_z_max, DOMAIN_HEIGHT_M)
 
+    # ---- Build closed FMS surface for cfMesh --------------------------------
+    half_x = geom["total_x_m"] / 2
+    half_y = geom["total_y_m"] / 2
+    fms_path = trisurf_dir / "domain.stl"
+    build_domain_fms(
+        terrain_stl=stl_path,
+        out_fms=fms_path,
+        x_min=-half_x, x_max=half_x,
+        y_min=-half_y, y_max=half_y,
+        z_min=0.0, z_max=domain_z_max,
+    )
+
     # ---- cfMesh refinement zones -------------------------------------------
     cfmesh_refinements = compute_cfmesh_refinements(geom, terrain_z_max)
     logger.info(
@@ -512,8 +626,6 @@ def generate_mesh(
     # ---- Jinja2 context -------------------------------------------------------
     n_cores = 8
     central_m = geom["central_m"]
-    half_x = geom["total_x_m"] / 2
-    half_y = geom["total_y_m"] / 2
 
     # ---- tower positions in local coords (for sampleDict) -------------------------
     towers = []

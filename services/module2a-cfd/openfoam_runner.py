@@ -23,13 +23,13 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Container configuration
 # ---------------------------------------------------------------------------
-# ESI OpenFOAM v2406 — includes cfMesh (cartesianMesh), same version as HPC.
-OPENFOAM_IMAGE = "opencfd/openfoam:v2406"
+# microfluidica/openfoam — ESI OpenFOAM v2512 with cfMesh (cartesianMesh) included.
+# Contains all ESI solvers + cfMesh utilities (surfaceGenerateBoundingBox, cartesianMesh).
+OPENFOAM_IMAGE = "microfluidica/openfoam:latest"
 
-# Source command for ESI OpenFOAM v2406 path convention.
+# Source command for ESI OpenFOAM path convention.
 OPENFOAM_INIT = (
-    "source /usr/lib/openfoam/openfoam2406/etc/bashrc 2>/dev/null || "
-    "source /opt/OpenFOAM/OpenFOAM-v2406/etc/bashrc 2>/dev/null || "
+    "source /usr/lib/openfoam/openfoam2512/etc/bashrc 2>/dev/null || "
     "source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null"
 )
 
