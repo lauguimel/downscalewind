@@ -31,16 +31,20 @@ check_log() {
     fi
 }
 
-# ---- Mesh generation ----
-runApplication blockMesh
-check_log log.blockMesh
+# ---- Mesh generation (cfMesh cartesianMesh) ----
+# Step 1: Generate closed domain surface (FMS) from terrain STL + bounding box
+# surfaceGenerateBoundingBox creates: xMin, xMax, yMin, yMax, zMax + terrain patch
+echo "Generating bounding box FMS from terrain STL..."
+runApplication surfaceGenerateBoundingBox \
+    constant/triSurface/terrain.stl \
+    constant/triSurface/domain.fms \
+    {{ domain.x_min }} {{ domain.y_min }} {{ domain.z_min }} \
+    {{ domain.x_max }} {{ domain.y_max }} {{ domain.z_max }}
+check_log log.surfaceGenerateBoundingBox
 
-# surfaceFeatureExtract for ESI v2412
-runApplication surfaceFeatureExtract
-check_log log.surfaceFeatureExtract
-
-runApplication snappyHexMesh -overwrite
-check_log log.snappyHexMesh
+# Step 2: Generate octree mesh with cfMesh
+runApplication cartesianMesh
+check_log log.cartesianMesh
 
 runApplication checkMesh -latestTime
 

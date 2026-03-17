@@ -121,11 +121,8 @@ def _generate_level_case(
         output_dir=case_dir,
         srtm_tif=srtm_tif if srtm_tif.exists() else None,
         inflow_json=inflow_json,
-        of_version=of_version,
         solver_name=solver_name,
         thermal=thermal,
-        n_iter=n_iterations,
-        write_interval=write_interval,
     )
     logger.info("Case ready: %s", case_dir)
     return case_dir
@@ -143,9 +140,9 @@ def _mapfields_local(source_case: Path, target_case: Path) -> None:
         "--platform", "linux/amd64",
         "-v", f"{source_case}:/source",
         "-v", f"{target_case}:/target",
-        "openfoam/openfoam10-paraview510",
+        "opencfd/openfoam:v2406",
         "bash", "-c",
-        "source /opt/openfoam10/etc/bashrc && "
+        "source /usr/lib/openfoam/openfoam2406/etc/bashrc && "
         "mapFields /source -case /target -sourceTime latestTime -consistent -noFunctionObjects",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)

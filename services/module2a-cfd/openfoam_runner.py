@@ -1,12 +1,13 @@
 """
-openfoam_runner.py — Docker wrapper for buoyantFoam (ESI OpenCFD v2412)
+openfoam_runner.py — Docker wrapper for OpenFOAM ESI v2406
 
-Container: opencfd/openfoam-default:v2412
-  - ABL boundary conditions (atmBoundaryLayerInletVelocity, atmOmegaWallFunction, ...)
-  - source /opt/openfoam*/etc/bashrc  (ESI path convention)
+Container: opencfd/openfoam:v2406
+  - cfMesh cartesianMesh (octree mesher, 2:1 transitions)
+  - ABL boundary conditions (inletOutlet, epsilonWallFunction, kqRWallFunction, ...)
+  - k-epsilon turbulence model (validated at Perdigão: Letzgus et al. WES 2023)
   - macOS Apple Silicon: requires --platform linux/amd64 (Rosetta 2, ~3-4x slowdown)
 
-Reference: Neunaber et al. (WES 2023) used OpenFOAM v2012 (ESI branch) for Perdigão.
+Reference: Letzgus et al. (WES 2023) used OpenFOAM v2012 with k-epsilon for Perdigão.
 """
 
 from __future__ import annotations
@@ -22,22 +23,19 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Container configuration
 # ---------------------------------------------------------------------------
-# Foundation OpenFOAM v10 (openfoam.org) — publicly available on Docker Hub.
-# Supports all ABL BCs: atmBoundaryLayerInletVelocity, atmOmegaWallFunction, etc.
-# Note: original plan used ESI opencfd/openfoam-default:v2412 but it is not on Docker Hub.
-# Foundation v10 is equivalent for buoyantFoam + ABL BCs.
-OPENFOAM_IMAGE = "openfoam/openfoam10-paraview510"
+# ESI OpenFOAM v2406 — includes cfMesh (cartesianMesh), same version as HPC.
+OPENFOAM_IMAGE = "opencfd/openfoam:v2406"
 
-# Source command for Foundation OpenFOAM v10 path convention.
+# Source command for ESI OpenFOAM v2406 path convention.
 OPENFOAM_INIT = (
-    "source /opt/openfoam10/etc/bashrc 2>/dev/null || "
-    "source /opt/openfoam*/etc/bashrc 2>/dev/null || "
+    "source /usr/lib/openfoam/openfoam2406/etc/bashrc 2>/dev/null || "
+    "source /opt/OpenFOAM/OpenFOAM-v2406/etc/bashrc 2>/dev/null || "
     "source /usr/lib/openfoam/openfoam*/etc/bashrc 2>/dev/null"
 )
 
 # Quality thresholds for checkMesh
-MAX_NON_ORTHO = 70.0   # degrees
-MAX_SKEWNESS  = 10.0  # relaxed for complex terrain with addLayers
+MAX_NON_ORTHO = 50.0   # degrees — tightened for cfMesh octree
+MAX_SKEWNESS  = 4.0    # relaxed for complex terrain with boundary layers
 
 
 @dataclass
@@ -52,7 +50,7 @@ class MeshQuality:
 
 
 class OpenFOAMRunner:
-    """Run buoyantFoam steps inside the ESI OpenCFD Docker container.
+    """Run OpenFOAM steps inside the ESI v2406 Docker container.
 
     Parameters
     ----------
@@ -64,7 +62,7 @@ class OpenFOAMRunner:
         Docker --platform flag.  Use "linux/amd64" on macOS Apple Silicon
         (Rosetta 2 emulation).
     image:
-        Docker image to use (default: opencfd/openfoam-default:v2412).
+        Docker image to use (default: opencfd/openfoam:v2406).
     """
 
     def __init__(
@@ -130,25 +128,29 @@ class OpenFOAMRunner:
     # Individual mesh/solver steps
     # ------------------------------------------------------------------
 
-    def block_mesh(self) -> None:
-        """Generate the base Cartesian block mesh."""
-        logger.info("blockMesh — case: %s", self.case_dir)
-        self._docker_run("blockMesh 2>&1 | tee log.blockMesh")
+    def generate_bounding_box(self) -> None:
+        """Generate closed FMS domain surface from terrain STL + bounding box.
 
-    def surface_feature_extract(self) -> None:
-        """Extract feature edges from terrain STL (required by snappyHexMesh).
-
-        OF v10 uses 'surfaceFeatures' (replaces old 'surfaceFeatureExtract').
+        Uses cfMesh's surfaceGenerateBoundingBox utility.
+        Reads domain bounds from system/meshDict (not needed as args — cfMesh
+        infers them from the STL extent + the z_max from meshDict).
         """
-        logger.info("surfaceFeatures — case: %s", self.case_dir)
-        self._docker_run("surfaceFeatures 2>&1 | tee log.surfaceFeatures")
+        logger.info("surfaceGenerateBoundingBox — case: %s", self.case_dir)
+        # Read domain bounds from meshDict or use the Allrun script
+        self._docker_run(
+            "cd constant/triSurface && "
+            "surfaceGenerateBoundingBox terrain.stl domain.fms "
+            "2>&1 | tee ../../log.surfaceGenerateBoundingBox"
+        )
 
-    def snappy_hex_mesh(self, *, overwrite: bool = True) -> None:
-        """Run surfaceFeatureExtract + snappyHexMesh (terrain STL + refinement regions)."""
-        self.surface_feature_extract()
-        flag = "-overwrite" if overwrite else ""
-        logger.info("snappyHexMesh %s — case: %s", flag, self.case_dir)
-        self._docker_run(f"snappyHexMesh {flag} 2>&1 | tee log.snappyHexMesh")
+    def cartesian_mesh(self) -> None:
+        """Generate octree mesh using cfMesh cartesianMesh.
+
+        Reads configuration from system/meshDict.
+        Replaces the old blockMesh + snappyHexMesh pipeline.
+        """
+        logger.info("cartesianMesh — case: %s", self.case_dir)
+        self._docker_run("cartesianMesh 2>&1 | tee log.cartesianMesh")
 
     def check_mesh(self) -> MeshQuality:
         """Run checkMesh and parse quality metrics.
@@ -202,16 +204,7 @@ class OpenFOAMRunner:
         self._docker_run(f"reconstructPar {flag} 2>&1 | tee log.reconstructPar")
 
     def potential_foam(self, *, parallel: bool = True) -> None:
-        """Initialise U with divergence-free potential flow from boundary conditions.
-
-        potentialFoam solves Laplace(phi) = 0 with the U BCs mapped to Neumann
-        conditions on phi, then sets U = grad(phi).  The result satisfies:
-          - U·n matches specified inflow at lateral faces
-          - div(U) = 0 everywhere (divergence-free)
-          - U·n = 0 at walls (no-penetration)
-
-        This gives simpleFoam a physically consistent starting point.
-        """
+        """Initialise U with divergence-free potential flow from boundary conditions."""
         if parallel and self.n_cores > 1:
             cmd = (
                 f"mpirun --allow-run-as-root -np {self.n_cores} "
@@ -228,15 +221,7 @@ class OpenFOAMRunner:
         *,
         parallel: bool = True,
     ) -> None:
-        """Run the specified OpenFOAM solver.
-
-        Parameters
-        ----------
-        solver:
-            Solver binary name (default: simpleFoam).
-        parallel:
-            If True, run with mpirun using self.n_cores.
-        """
+        """Run the specified OpenFOAM solver."""
         if parallel:
             cmd = (
                 f"mpirun --allow-run-as-root -np {self.n_cores} "
@@ -266,28 +251,26 @@ class OpenFOAMRunner:
         self,
         solver: str = "simpleFoam",
         *,
-        skip_snappy: bool = False,
+        skip_mesh: bool = False,
         inflow_json: str | Path | None = None,
     ) -> MeshQuality:
         """Run the full OpenFOAM pipeline for one case.
 
         Steps
         -----
-        1. blockMesh
-        2. snappyHexMesh (unless skip_snappy=True)
-        3. checkMesh → raise if quality too low
-        4. writeCellCentres + init_from_era5 (if inflow_json provided)
-        5. decomposePar
-        6. <solver> -parallel
-        7. reconstructPar
+        1. cartesianMesh (cfMesh octree, unless skip_mesh=True)
+        2. checkMesh → raise if quality too low
+        3. writeCellCentres + init_from_era5 (if inflow_json provided)
+        4. decomposePar
+        5. <solver> -parallel
+        6. reconstructPar
 
         Parameters
         ----------
         solver:
             Solver binary (default: simpleFoam).
-        skip_snappy:
-            Skip snappyHexMesh (useful for pipeline test with 1×1 domain,
-            blockMesh-only).
+        skip_mesh:
+            Skip mesh generation (useful when mesh is already generated).
         inflow_json:
             Path to inflow profile JSON.  If provided, initialises fields
             from ERA5 interpolation (replaces potentialFoam).
@@ -299,10 +282,8 @@ class OpenFOAMRunner:
         """
         logger.info("=== run_case START: %s ===", self.case_dir.name)
 
-        self.block_mesh()
-
-        if not skip_snappy:
-            self.snappy_hex_mesh()
+        if not skip_mesh:
+            self.cartesian_mesh()
 
         quality = self.check_mesh()
 
@@ -371,13 +352,13 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     parser = argparse.ArgumentParser(
-        description="Run an OpenFOAM case via Docker (opencfd/openfoam-default:v2412)"
+        description="Run an OpenFOAM case via Docker (opencfd/openfoam:v2406)"
     )
     parser.add_argument("case_dir", help="Path to OpenFOAM case directory")
     parser.add_argument("--solver", default="simpleFoam")
     parser.add_argument("--n-cores", type=int, default=8)
-    parser.add_argument("--skip-snappy", action="store_true",
-                        help="Skip snappyHexMesh (blockMesh-only test)")
+    parser.add_argument("--skip-mesh", action="store_true",
+                        help="Skip mesh generation (mesh already exists)")
     parser.add_argument("--platform", default="linux/amd64")
     args = parser.parse_args()
 
@@ -386,6 +367,6 @@ if __name__ == "__main__":
         n_cores=args.n_cores,
         platform=args.platform,
     )
-    quality = runner.run_case(solver=args.solver, skip_snappy=args.skip_snappy)
+    quality = runner.run_case(solver=args.solver, skip_mesh=args.skip_mesh)
     print(f"cells={quality.n_cells}, maxNonOrtho={quality.max_non_ortho:.1f}°, "
           f"maxSkewness={quality.max_skewness:.2f}")

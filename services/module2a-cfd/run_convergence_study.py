@@ -1,344 +1,844 @@
 """
-run_convergence_study.py — Mesh convergence study for CFD pipeline
+run_convergence_study.py — Orchestrate convergence study on HPC via hpc_foam
 
-Tests multiple horizontal resolutions × context variants on the canonical
-validation case (Perdigão SW, neutral stability).
-
-Variants
---------
-  context_cells=1 : Variante 0 — 25×25 km pipeline test (<1 min, blockMesh only)
-  context_cells=3 : Variante A — 75×75 km (25 km buffer each side)
-  context_cells=5 : Variante B — 125×125 km (50 km buffer each side)
+Reads convergence_study.yaml + hpc/aqua.yaml and manages the full workflow:
+  generate → upload → submit → monitor → download
 
 Usage
 -----
-    python run_convergence_study.py \
-        --case-id 2017-05-15T12:00 \
-        --resolutions-m 10000 5000 1000 500 \
-        --context-cells 1 3 5 \
-        --vertical-variants 20 30 50 \
-        --era5 data/raw/era5_perdigao.zarr \
-        --srtm data/raw/srtm_perdigao_30m.tif \
-        --z0map data/raw/z0_perdigao.tif \
-        --output data/processed/convergence_study/ \
-        --n-cores 8
+    # Generate all Phase 1 cases locally
+    python run_convergence_study.py generate --phase mesh_convergence
+
+    # Upload to HPC and submit
+    python run_convergence_study.py submit --phase mesh_convergence
+
+    # Monitor running jobs
+    python run_convergence_study.py monitor
+
+    # Download results
+    python run_convergence_study.py download --phase mesh_convergence
+
+    # Generate + submit in one step
+    python run_convergence_study.py run --phase mesh_convergence
+
+    # List all cases in the manifest
+    python run_convergence_study.py list
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import logging
 import sys
-import time
+from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import yaml
 
-# Ensure local module directory is on the path (handles 'module2a-cfd' hyphen)
+# hpc_foam is installed from the IGNIS project
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / ".." / "IGNIS" / "rheotool"))
 sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parents[2]))
 
 logger = logging.getLogger(__name__)
 
-# Default resolutions to test (horizontal, metres)
-DEFAULT_RESOLUTIONS_M = [500, 250, 100]
-# Default context variants (start with 1×1 single ERA5 cell)
-DEFAULT_CONTEXT_CELLS = [1]
-# Default vertical layer counts (None = auto from resolution/AR)
-DEFAULT_VERTICAL_VARIANTS = [None]
+# Project root
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ---------------------------------------------------------------------------
-# Single run
+# Case specification
 # ---------------------------------------------------------------------------
 
-def run_single(
-    case_id: str,
-    resolution_m: float,
-    context_cells: int,
-    n_z: int,
-    era5_zarr: Path,
-    srtm_tif: Path | None,
-    z0_tif: Path | None,
-    site_cfg: dict,
-    output_root: Path,
-    n_cores: int = 8,
-) -> dict:
-    """Run one CFD case and return result metrics.
+@dataclass
+class CaseSpec:
+    """Specification for a single CFD case in the convergence study."""
+    case_id: str                 # e.g. "rheotool_001"
+    phase: str                   # e.g. "mesh_convergence"
+    resolution_m: float
+    domain_km: float
+    context_cells: int
+    direction_deg: float
+    solver_name: str = "simpleFoam"
+    thermal: bool = False
+    coriolis: bool = True
+    canopy: bool = False
+    precursor: bool = False
+    n_iterations: int = 2000
+    write_interval: int = 200
+    of_version: int = 9          # HPC default (OF9 Foundation)
+    stability: str = "neutral"
+    inlet_type: str = "idealized"
+    notes: str = ""
 
-    Steps
-    -----
-    1. prepare_inflow  — ERA5 → inlet profile JSON
-    2. generate_mesh   — SRTM → case directory + templates
-    3. openfoam_runner — blockMesh + snappyHexMesh + solver
-    4. export_cfd      — OpenFOAM results → Zarr + CSV
 
-    Returns
-    -------
-    dict with keys: case_label, resolution_m, context_cells, n_z,
-                    n_cells, max_non_ortho, max_skewness,
-                    cpu_time_s, ok, error
-    """
-    from prepare_inflow import prepare_inflow
-    from generate_mesh import generate_mesh
-    from openfoam_runner import OpenFOAMRunner
-    from export_cfd import export_cfd
+# ---------------------------------------------------------------------------
+# Study class
+# ---------------------------------------------------------------------------
 
-    safe_id    = case_id.replace(":", "_")  # colons break Docker volume mounts
-    nz_str = f"nz{n_z}" if n_z is not None else "nzauto"
-    case_label = f"{safe_id}_{int(resolution_m)}m_{context_cells}x{context_cells}_{nz_str}"
-    case_dir   = output_root / "cases" / case_label
+class ConvergenceStudy:
+    """Orchestrator for the CFD convergence study."""
 
-    site_lat = site_cfg["site"]["coordinates"]["latitude"]
-    site_lon = site_cfg["site"]["coordinates"]["longitude"]
+    def __init__(
+        self,
+        study_config_path: Path,
+        hpc_config_path: Path,
+    ):
+        with open(study_config_path) as f:
+            self.study_cfg = yaml.safe_load(f)
+        with open(hpc_config_path) as f:
+            self.hpc_cfg = yaml.safe_load(f)
 
-    result = {
-        "case_label":    case_label,
-        "resolution_m":  resolution_m,
-        "context_cells": context_cells,
-        "n_z":           n_z,
-        "n_cells":       0,
-        "max_non_ortho": None,
-        "max_skewness":  None,
-        "cpu_time_s":    None,
-        "ok":            False,
-        "error":         None,
-    }
+        self.site = self.study_cfg["study"]["site"]
+        self.prefix = self.study_cfg.get("case_prefix", "rheotool")
+        self.n_iter = self.study_cfg["study"]["n_iterations"]
+        self.write_interval = self.study_cfg["study"]["write_interval"]
+        self.of_version = self.hpc_cfg.get("container", {}).get("of_version", 9)
 
-    t0 = time.perf_counter()
+        # Case output directory
+        self.cases_dir = PROJECT_ROOT / "data" / "convergence" / "cases"
+        self.cases_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        # Step 1 — inflow profile
-        inflow_json = output_root / "inflow" / f"{case_id.replace(':', '_')}.json"
-        if not inflow_json.exists():
-            logger.info("[%s] Preparing inflow profile…", case_label)
+        # Manifest tracks case_id → conditions
+        self.manifest_path = self.cases_dir / "convergence_study_manifest.json"
+        self.manifest = self._load_manifest()
+
+        # Counter for case IDs
+        self._next_id = max(
+            (int(k.split("_")[-1]) for k in self.manifest if k.startswith(self.prefix)),
+            default=0,
+        ) + 1
+
+    def _load_manifest(self) -> dict:
+        if self.manifest_path.exists():
+            with open(self.manifest_path) as f:
+                return json.load(f)
+        return {}
+
+    def _save_manifest(self) -> None:
+        with open(self.manifest_path, "w") as f:
+            json.dump(self.manifest, f, indent=2, default=str)
+
+    def _next_case_id(self) -> str:
+        cid = f"{self.prefix}_{self._next_id:03d}"
+        self._next_id += 1
+        return cid
+
+    # -----------------------------------------------------------------
+    # Phase generators
+    # -----------------------------------------------------------------
+
+    def generate_phase_specs(self, phase_name: str) -> list[CaseSpec]:
+        """Generate CaseSpec list for a given phase.
+
+        Safe to call multiple times — resets the ID counter from manifest
+        each time so repeated calls produce the same IDs.
+        """
+        # Reset counter from manifest to avoid drift from repeated calls
+        self._next_id = max(
+            (int(k.split("_")[-1]) for k in self.manifest if k.startswith(self.prefix)),
+            default=0,
+        ) + 1
+
+        generators = {
+            "mesh_convergence": self._gen_mesh_convergence,
+            "domain_sensitivity": self._gen_domain_sensitivity,
+            "physics_comparison": self._gen_physics_comparison,
+            "precursor_stability": self._gen_precursor_stability,
+        }
+        if phase_name not in generators:
+            raise ValueError(f"Unknown phase: {phase_name}. Choose from {list(generators)}")
+        return generators[phase_name]()
+
+    def _gen_mesh_convergence(self) -> list[CaseSpec]:
+        cfg = self.study_cfg["mesh_convergence"]
+        specs = []
+        for res in cfg["resolutions_m"]:
+            for d in cfg["directions_deg"]:
+                specs.append(CaseSpec(
+                    case_id=self._next_case_id(),
+                    phase="mesh_convergence",
+                    resolution_m=res,
+                    domain_km=cfg["domain_km"],
+                    context_cells=cfg["context_cells"],
+
+                    direction_deg=d,
+                    coriolis=True,
+                    n_iterations=self.n_iter,
+                    write_interval=self.write_interval,
+                    of_version=self.of_version,
+                ))
+        return specs
+
+    def _gen_domain_sensitivity(self) -> list[CaseSpec]:
+        cfg = self.study_cfg["domain_sensitivity"]
+        specs = []
+        for dk in cfg["domain_sizes_km"]:
+            for d in cfg["directions_deg"]:
+                specs.append(CaseSpec(
+                    case_id=self._next_case_id(),
+                    phase="domain_sensitivity",
+                    resolution_m=cfg["resolution_m"],
+                    domain_km=dk,
+                    context_cells=cfg["context_cells"],
+
+                    direction_deg=d,
+                    coriolis=True,
+                    n_iterations=self.n_iter,
+                    write_interval=self.write_interval,
+                    of_version=self.of_version,
+                ))
+        return specs
+
+    def _gen_physics_comparison(self) -> list[CaseSpec]:
+        cfg = self.study_cfg["physics_comparison"]
+        specs = []
+        for config_name, pcfg in cfg["configs"].items():
+            for d in cfg["directions_deg"]:
+                specs.append(CaseSpec(
+                    case_id=self._next_case_id(),
+                    phase="physics_comparison",
+                    resolution_m=cfg["resolution_m"],
+                    domain_km=cfg["domain_km"],
+                    context_cells=cfg["context_cells"],
+
+                    direction_deg=d,
+                    solver_name=pcfg["solver"],
+                    thermal=pcfg.get("thermal", False),
+                    coriolis=pcfg.get("coriolis", True),
+                    canopy=pcfg.get("canopy", False),
+                    precursor=pcfg.get("precursor", False),
+                    n_iterations=self.n_iter,
+                    write_interval=self.write_interval,
+                    of_version=self.of_version,
+                    notes=f"config_{config_name}",
+                ))
+        return specs
+
+    def _gen_precursor_stability(self) -> list[CaseSpec]:
+        cfg = self.study_cfg["precursor_stability"]
+        specs = []
+        for stab_name in cfg["stabilities"]:
+            for inlet_type in cfg["inlets"]:
+                specs.append(CaseSpec(
+                    case_id=self._next_case_id(),
+                    phase="precursor_stability",
+                    resolution_m=cfg["resolution_m"],
+                    domain_km=cfg["domain_km"],
+                    context_cells=cfg["context_cells"],
+
+                    direction_deg=cfg["direction_deg"],
+                    solver_name="buoyantBoussinesqSimpleFoam",
+                    thermal=True,
+                    coriolis=True,
+                    canopy=True,
+                    stability=stab_name,
+                    inlet_type=inlet_type,
+                    n_iterations=self.n_iter,
+                    write_interval=self.write_interval,
+                    of_version=self.of_version,
+                    notes=f"stability_{stab_name}_{inlet_type}",
+                ))
+        return specs
+
+    # -----------------------------------------------------------------
+    # Case preparation (local)
+    # -----------------------------------------------------------------
+
+    def prepare_case(self, spec: CaseSpec) -> Path:
+        """Generate a complete OpenFOAM case directory for a CaseSpec.
+
+        Pipeline: prepare_inflow → generate_mesh → (generate_lad_field if canopy)
+
+        Returns the case directory path.
+        """
+        from generate_mesh import generate_mesh
+
+        case_dir = self.cases_dir / spec.case_id
+        if case_dir.exists():
+            logger.info("Case %s already exists, skipping", spec.case_id)
+            return case_dir
+
+        # Load site config
+        site_cfg_path = PROJECT_ROOT / "configs" / "sites" / f"{self.site}.yaml"
+        with open(site_cfg_path) as f:
+            site_cfg = yaml.safe_load(f)
+
+        logger.info(
+            "Preparing %s: res=%gm, domain=%gkm, dir=%g°, solver=%s",
+            spec.case_id, spec.resolution_m, spec.domain_km,
+            spec.direction_deg, spec.solver_name,
+        )
+
+        # 1. Prepare inflow profile
+        #    Generate base profile from ERA5 once, then override wind direction
+        #    for each case in the convergence matrix.
+        import math
+
+        inflow_dir = self.cases_dir / "inflow_profiles"
+        inflow_dir.mkdir(exist_ok=True)
+
+        site = site_cfg["site"]
+        site_lat = site["coordinates"]["latitude"]
+        site_lon = site["coordinates"]["longitude"]
+
+        # Base profile (ERA5 direction, shared across all cases at this timestamp)
+        base_inflow_json = inflow_dir / "inflow_base.json"
+        if not base_inflow_json.exists():
+            from prepare_inflow import prepare_inflow
+
+            era5_zarr = PROJECT_ROOT / "data" / "raw" / f"era5_{self.site}.zarr"
+            z0_tif = PROJECT_ROOT / "data" / "raw" / f"landcover_{self.site}.tif"
+
             prepare_inflow(
                 era5_zarr=era5_zarr,
-                timestamp=case_id,
+                timestamp=self.study_cfg["study"]["timestamp"],
                 site_lat=site_lat,
                 site_lon=site_lon,
-                z0_tif=z0_tif,
-                output_json=inflow_json,
+                z0_tif=z0_tif if z0_tif.exists() else None,
+                output_json=base_inflow_json,
             )
-        else:
-            logger.info("[%s] Inflow profile already exists, reusing.", case_label)
 
-        # Step 2 — generate mesh + case templates
-        logger.info("[%s] Generating mesh…", case_label)
-        geom = generate_mesh(
+        # Per-direction profile: override flowDir and wind_dir from base
+        inflow_json = inflow_dir / f"inflow_{spec.direction_deg:.0f}deg.json"
+        if not inflow_json.exists():
+            with open(base_inflow_json) as f:
+                inflow_data = json.load(f)
+
+            # Convert met direction (wind FROM, clockwise from N)
+            # to flow unit vector (direction wind blows TOWARD)
+            wind_toward_deg = (spec.direction_deg + 180.0) % 360.0
+            wind_toward_rad = math.radians(wind_toward_deg)
+            # Met convention: 0°=N, 90°=E → x=sin(θ), y=cos(θ)
+            inflow_data["flowDir_x"] = math.sin(wind_toward_rad)
+            inflow_data["flowDir_y"] = math.cos(wind_toward_rad)
+            inflow_data["wind_dir"] = spec.direction_deg
+
+            with open(inflow_json, "w") as f:
+                json.dump(inflow_data, f, indent=2)
+            logger.info("Inflow profile for %.0f°: %s", spec.direction_deg, inflow_json)
+
+        # 2. Generate mesh + render templates
+        srtm_path = PROJECT_ROOT / "data" / "raw" / f"srtm_{self.site}_30m.tif"
+        if not srtm_path.exists():
+            srtm_path = None
+
+        generate_mesh(
             site_cfg=site_cfg,
-            resolution_m=resolution_m,
-            context_cells=context_cells,
+            resolution_m=spec.resolution_m,
+            context_cells=spec.context_cells,
             output_dir=case_dir,
-            srtm_tif=srtm_tif,
+            srtm_tif=srtm_path,
             inflow_json=inflow_json,
-            n_z=n_z,
-        )
-        result["n_cells"] = geom["n_x"] * geom["n_y"] * geom["n_z"]
-
-        # Step 3 — OpenFOAM
-        logger.info("[%s] Running OpenFOAM…", case_label)
-        runner = OpenFOAMRunner(case_dir, n_cores=n_cores)
-        # Always run snappyHexMesh: it provides distance-based refinement
-        # (fine resolution near terrain, coarse aloft)
-        quality = runner.run_case(
-            solver="simpleFoam",
-            skip_snappy=False,
-            inflow_json=inflow_json,
-        )
-        result["n_cells"]       = quality.n_cells if quality.n_cells > 0 else result["n_cells"]
-        result["max_non_ortho"] = quality.max_non_ortho
-        result["max_skewness"]  = quality.max_skewness
-
-        # Step 4 — export
-        logger.info("[%s] Exporting results…", case_label)
-        towers_yaml = Path(__file__).parents[2] / "configs" / "sites" / "perdigao_towers.yaml"
-        export_cfd(
-            case_dir=case_dir,
-            towers_yaml=towers_yaml,
-            site_cfg=site_cfg,
-            case_id=case_label,
-            output_dir=output_root / "results",
-            metadata={
-                "resolution_m":  resolution_m,
-                "context_cells": context_cells,
-                "n_z":           n_z,
-                "era5_case_id":  case_id,
-            },
+            domain_km=spec.domain_km,
+            solver_name=spec.solver_name,
+            thermal=spec.thermal,
         )
 
-        result["cpu_time_s"] = time.perf_counter() - t0
-        result["ok"]         = True
-        logger.info("[%s] Done in %.0f s", case_label, result["cpu_time_s"])
+        # 3. If canopy, generate LAD field
+        if spec.canopy:
+            from generate_lad_field import generate_lad_field
+            landcover_tif = PROJECT_ROOT / "data" / "raw" / f"landcover_{self.site}.tif"
+            if landcover_tif.exists():
+                site = site_cfg["site"]
+                generate_lad_field(
+                    case_dir=case_dir,
+                    landcover_tif=landcover_tif,
+                    site_lat=site["coordinates"]["latitude"],
+                    site_lon=site["coordinates"]["longitude"],
+                )
+            else:
+                logger.warning("Land cover raster not found: %s — skipping canopy", landcover_tif)
 
-    except Exception as exc:
-        result["cpu_time_s"] = time.perf_counter() - t0
-        result["error"]      = str(exc)
-        logger.error("[%s] FAILED after %.0f s: %s", case_label, result["cpu_time_s"], exc)
+        # 4. Save to manifest
+        self.manifest[spec.case_id] = {
+            "phase": spec.phase,
+            "resolution_m": spec.resolution_m,
+            "domain_km": spec.domain_km,
+            "direction_deg": spec.direction_deg,
+            "solver": spec.solver_name,
+            "thermal": spec.thermal,
+            "coriolis": spec.coriolis,
+            "canopy": spec.canopy,
+            "precursor": spec.precursor,
+            "stability": spec.stability,
+            "inlet_type": spec.inlet_type,
+            "notes": spec.notes,
+        }
+        self._save_manifest()
 
-    return result
+        logger.info("Case %s ready: %s", spec.case_id, case_dir)
+        return case_dir
 
+    def prepare_phase(self, phase_name: str) -> list[Path]:
+        """Generate all cases for a phase."""
+        specs = self.generate_phase_specs(phase_name)
+        logger.info("Generating %d cases for phase '%s'", len(specs), phase_name)
+        case_dirs = []
+        for spec in specs:
+            case_dirs.append(self.prepare_case(spec))
+        self._save_manifest()
+        return case_dirs
 
-# ---------------------------------------------------------------------------
-# Convergence study loop
-# ---------------------------------------------------------------------------
+    # -----------------------------------------------------------------
+    # HPC operations
+    # -----------------------------------------------------------------
 
-def run_convergence_study(
-    case_id: str,
-    resolutions_m: list[float],
-    context_cells_list: list[int],
-    vertical_variants: list[int | None],
-    era5_zarr: Path,
-    srtm_tif: Path | None,
-    z0_tif: Path | None,
-    site_cfg: dict,
-    output_root: Path,
-    n_cores: int = 8,
-) -> list[dict]:
-    """Run the full convergence study matrix.
+    def _get_hpc_config(self):
+        """Create hpc_foam.HPCConfig from aqua.yaml."""
+        from hpc_foam import HPCConfig
 
-    Loops over resolutions_m × context_cells_list.
-    n_z is auto-computed from resolution and AR target (None = auto).
+        conn = self.hpc_cfg["connection"]
+        res = self.hpc_cfg["resources"]
+        container = self.hpc_cfg.get("container", {})
 
-    Returns
-    -------
-    List of result dicts from run_single().
-    """
-    results = []
+        return HPCConfig(
+            hpc_host=conn["hpc_host"],
+            username=conn["username"],
+            remote_base_dir=Path(conn["remote_base_dir"]),
+            local_base_dir=self.cases_dir,
+            solver=self.hpc_cfg.get("solver", {}).get("name", "simpleFoam"),
+            default_ncpus=res["default_ncpus"],
+            default_mem=res["default_mem"],
+            default_walltime=res["default_walltime"],
+            apptainer_wrapper=container.get("apptainer_wrapper", ""),
+            parallel=self.hpc_cfg.get("solver", {}).get("parallel", True),
+        )
 
-    logger.info("=== Horizontal convergence study ===")
-    for res_m in resolutions_m:
-        for ctx in context_cells_list:
-            r = run_single(
-                case_id=case_id,
-                resolution_m=res_m,
-                context_cells=ctx,
-                n_z=None,  # auto from resolution / AR target
-                era5_zarr=era5_zarr,
-                srtm_tif=srtm_tif,
-                z0_tif=z0_tif,
-                site_cfg=site_cfg,
-                output_root=output_root,
-                n_cores=n_cores,
+    def upload_phase(self, phase_name: str) -> dict:
+        """Upload all cases for a phase to HPC."""
+        from hpc_foam import CaseTransferManager
+
+        config = self._get_hpc_config()
+        transfer = CaseTransferManager(config)
+
+        case_names = [
+            cid for cid, info in self.manifest.items()
+            if info["phase"] == phase_name
+        ]
+        if not case_names:
+            logger.warning("No cases found for phase '%s'", phase_name)
+            return {}
+
+        logger.info("Uploading %d cases for phase '%s'", len(case_names), phase_name)
+        return transfer.upload_all_cases(case_names)
+
+    # -----------------------------------------------------------------
+    # Cleanup
+    # -----------------------------------------------------------------
+
+    def clean_phase(self, phase_name: str, remote: bool = True) -> dict:
+        """Clean everything for a phase: cancel jobs, delete local+remote dirs.
+
+        Returns summary dict with counts.
+        """
+        import shutil
+
+        summary = {"cancelled": 0, "local_deleted": 0, "remote_cleaned": False}
+
+        # 1. Cancel running jobs
+        summary["cancelled"] = self.cancel_phase(phase_name)
+
+        # 2. Find case names for this phase
+        case_names = [
+            cid for cid, info in self.manifest.items()
+            if info["phase"] == phase_name
+        ]
+
+        # 3. Delete local case directories
+        for cname in case_names:
+            case_dir = self.cases_dir / cname
+            if case_dir.exists():
+                shutil.rmtree(case_dir)
+                summary["local_deleted"] += 1
+
+        # 4. Remove from manifest
+        for cname in case_names:
+            self.manifest.pop(cname, None)
+        self._save_manifest()
+
+        # Reset ID counter
+        self._next_id = max(
+            (int(k.split("_")[-1]) for k in self.manifest if k.startswith(self.prefix)),
+            default=0,
+        ) + 1
+
+        # 5. Clean remote directories
+        if remote and case_names:
+            try:
+                from hpc_foam.ssh_executor import SSHExecutor
+                config = self._get_hpc_config()
+                ssh = SSHExecutor.from_config(config)
+                remote_base = Path(self.hpc_cfg["connection"]["remote_base_dir"])
+                rm_cmds = [f"rm -rf {remote_base / cn}" for cn in case_names]
+                ssh.run(" && ".join(rm_cmds), timeout=60)
+                summary["remote_cleaned"] = True
+            except Exception as e:
+                logger.warning("Remote cleanup failed: %s", e)
+                summary["remote_cleaned"] = False
+
+        # 6. Remove inflow profiles (they get regenerated)
+        inflow_dir = self.cases_dir / "inflow_profiles"
+        if inflow_dir.exists():
+            shutil.rmtree(inflow_dir)
+
+        logger.info("Cleaned phase '%s': %s", phase_name, summary)
+        return summary
+
+    def clean_all(self, remote: bool = True) -> dict:
+        """Clean everything: all phases, all jobs, all local+remote dirs."""
+        import shutil
+
+        # Cancel all jobs first
+        n_cancelled = self.cancel_all()
+
+        # Delete all case directories
+        case_names = list(self.manifest.keys())
+        n_local = 0
+        for cname in case_names:
+            case_dir = self.cases_dir / cname
+            if case_dir.exists():
+                shutil.rmtree(case_dir)
+                n_local += 1
+
+        # Clear manifest
+        self.manifest.clear()
+        self._save_manifest()
+        self._next_id = 1
+
+        # Clean remote
+        remote_cleaned = False
+        if remote and case_names:
+            try:
+                from hpc_foam.ssh_executor import SSHExecutor
+                config = self._get_hpc_config()
+                ssh = SSHExecutor.from_config(config)
+                remote_base = self.hpc_cfg["connection"]["remote_base_dir"]
+                ssh.run(f"rm -rf {remote_base}/*", timeout=60)
+                remote_cleaned = True
+            except Exception as e:
+                logger.warning("Remote cleanup failed: %s", e)
+
+        # Remove inflow profiles
+        inflow_dir = self.cases_dir / "inflow_profiles"
+        if inflow_dir.exists():
+            shutil.rmtree(inflow_dir)
+
+        # Remove job status files
+        for f in self.cases_dir.glob("*.json"):
+            if f.name != "convergence_study_manifest.json":
+                f.unlink()
+
+        summary = {
+            "cancelled": n_cancelled,
+            "local_deleted": n_local,
+            "remote_cleaned": remote_cleaned,
+            "cases": len(case_names),
+        }
+        logger.info("Cleaned all: %s", summary)
+        return summary
+
+    def cancel_phase(self, phase_name: str) -> int:
+        """Cancel all submitted jobs for a phase via qdel.
+
+        Returns the number of jobs cancelled.
+        """
+        from hpc_foam.ssh_executor import SSHExecutor
+
+        config = self._get_hpc_config()
+        ssh = SSHExecutor.from_config(config)
+
+        jobs_file = self.cases_dir / f"submitted_jobs_{phase_name}.json"
+        if not jobs_file.exists():
+            logger.info("No submitted jobs file for phase '%s'", phase_name)
+            return 0
+
+        with open(jobs_file) as f:
+            data = json.load(f)
+
+        job_ids = [j["job_id"] for j in data.get("jobs", [])]
+        if not job_ids:
+            return 0
+
+        # Cancel all jobs in one SSH call (qdel ignores already-finished jobs)
+        qdel_cmd = "qdel " + " ".join(job_ids) + " 2>/dev/null; echo done"
+        result = ssh.run(qdel_cmd, timeout=30)
+        logger.info("Cancelled %d jobs for phase '%s': %s",
+                     len(job_ids), phase_name, result.stdout.strip())
+
+        # Remove the jobs file so submit_phase starts fresh
+        jobs_file.unlink()
+        return len(job_ids)
+
+    def cancel_all(self) -> int:
+        """Cancel ALL submitted jobs across all phases."""
+        from hpc_foam.ssh_executor import SSHExecutor
+
+        config = self._get_hpc_config()
+        ssh = SSHExecutor.from_config(config)
+
+        all_ids = []
+        for jf in sorted(self.cases_dir.glob("submitted_jobs_*.json")):
+            with open(jf) as f:
+                data = json.load(f)
+            for j in data.get("jobs", []):
+                all_ids.append(j["job_id"])
+
+        if not all_ids:
+            logger.info("No submitted jobs to cancel")
+            return 0
+
+        qdel_cmd = "qdel " + " ".join(all_ids) + " 2>/dev/null; echo done"
+        result = ssh.run(qdel_cmd, timeout=30)
+        logger.info("Cancelled %d jobs: %s", len(all_ids), result.stdout.strip())
+
+        # Remove all job files
+        for jf in self.cases_dir.glob("submitted_jobs_*.json"):
+            jf.unlink()
+
+        return len(all_ids)
+
+    def submit_phase(self, phase_name: str) -> list:
+        """Submit all cases for a phase to HPC PBS queue.
+
+        Uses Allrun-based PBS scripts so that the full pipeline
+        (cartesianMesh → checkMesh → decomposePar → solver → reconstructPar)
+        runs on the HPC node.
+
+        If jobs already exist for this phase, they are cancelled first (qdel).
+        """
+        from hpc_foam.pbs_templates import generate_allrun_pbs_script
+        from hpc_foam.ssh_executor import SSHExecutor
+        from hpc_foam.pbs_manager import PBSJob
+
+        config = self._get_hpc_config()
+        ssh = SSHExecutor.from_config(config)
+
+        # Cancel any existing jobs for this phase before resubmitting
+        jobs_file = self.cases_dir / f"submitted_jobs_{phase_name}.json"
+        if jobs_file.exists():
+            n_cancelled = self.cancel_phase(phase_name)
+            if n_cancelled:
+                logger.info("Cancelled %d old jobs before resubmitting", n_cancelled)
+
+        case_names = [
+            cid for cid, info in self.manifest.items()
+            if info["phase"] == phase_name
+        ]
+        if not case_names:
+            logger.warning("No cases found for phase '%s'", phase_name)
+            return []
+
+        remote_base = Path(self.hpc_cfg["connection"]["remote_base_dir"])
+        res = self.hpc_cfg["resources"]
+        container = self.hpc_cfg.get("container", {})
+        wrapper = container.get("apptainer_wrapper", "")
+        ncpus = res["default_ncpus"]
+        walltime = res["default_walltime"]
+        mem = res["default_mem"]
+
+        # 1. Generate Allrun-based PBS scripts locally
+        local_scripts = []
+        for cname in case_names:
+            remote_case = remote_base / cname
+            script_content = generate_allrun_pbs_script(
+                case_dir=str(remote_case),
+                job_name=cname,
+                ncpus=ncpus,
+                mem=mem,
+                walltime=walltime,
+                wrapper=wrapper,
             )
-            results.append(r)
+            local_pbs = self.cases_dir / cname / "run.pbs"
+            local_pbs.write_text(script_content)
+            local_pbs.chmod(0o755)
+            local_scripts.append((cname, local_pbs))
+            logger.debug("Generated PBS script for %s", cname)
 
-    return results
+        # 2. Upload all PBS scripts in one rsync
+        import tempfile
+        import shutil
 
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            for cname, local_pbs in local_scripts:
+                dest = tmpdir / cname
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(local_pbs, dest / "run.pbs")
 
-# ---------------------------------------------------------------------------
-# Write results summary
-# ---------------------------------------------------------------------------
+            import subprocess
+            rsync_cmd = [
+                "rsync", "-avz", "-e", ssh.rsync_transport,
+                "--include=*/", "--include=run.pbs", "--exclude=*",
+                f"{tmpdir}/",
+                f"{ssh.target}:{remote_base}/",
+            ]
+            subprocess.run(rsync_cmd, check=True, capture_output=True, text=True)
+        logger.info("Uploaded %d PBS scripts", len(local_scripts))
 
-def write_results(results: list[dict], output_root: Path) -> None:
-    """Write convergence study results to CSV and JSON."""
-    output_root.mkdir(parents=True, exist_ok=True)
+        # 3. Submit all jobs via single SSH session
+        submit_cmds = []
+        for cname in case_names:
+            remote_case = remote_base / cname
+            submit_cmds.append(f"cd {remote_case} && qsub run.pbs")
 
-    # CSV
-    csv_path = output_root / "convergence_results.csv"
-    if results:
-        with open(csv_path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(results[0].keys()))
-            writer.writeheader()
-            writer.writerows(results)
-    logger.info("Results CSV: %s", csv_path)
+        all_commands = " && echo '---' && ".join(submit_cmds)
+        result = ssh.run(all_commands, timeout=120)
 
-    # JSON (full detail)
-    json_path = output_root / "convergence_results.json"
-    with open(json_path, "w") as f:
-        json.dump(results, f, indent=2, default=str)
-    logger.info("Results JSON: %s", json_path)
+        if result.returncode != 0:
+            logger.error("Submit failed: %s", result.stderr)
+            raise RuntimeError(f"PBS submission failed: {result.stderr}")
 
-    # Summary to stdout
-    _print_summary(results)
+        # 4. Parse job IDs from qsub output
+        import re
+        jobs = []
+        raw_ids = result.stdout.strip().split("---")
+        for cname, raw_id in zip(case_names, raw_ids):
+            job_id = raw_id.strip()
+            # qsub returns e.g. "12345.pbs" — extract the numeric part
+            m = re.match(r"(\d+\S*)", job_id)
+            if m:
+                job_id = m.group(1)
+            jobs.append(PBSJob(job_id=job_id, name=cname))
+            logger.info("Submitted %s → %s", cname, job_id)
 
+        # 5. Save job IDs
+        job_data = {
+            "phase": phase_name,
+            "jobs": [{"job_id": j.job_id, "case_name": j.name} for j in jobs],
+        }
+        jobs_file = self.cases_dir / f"submitted_jobs_{phase_name}.json"
+        with open(jobs_file, "w") as f:
+            json.dump(job_data, f, indent=2)
 
-def _print_summary(results: list[dict]) -> None:
-    ok     = [r for r in results if r["ok"]]
-    failed = [r for r in results if not r["ok"]]
+        logger.info("Submitted %d jobs → %s", len(jobs), jobs_file)
+        return jobs
 
-    print(f"\n{'=' * 60}")
-    print(f"Convergence study: {len(ok)} OK, {len(failed)} FAILED")
-    print(f"{'=' * 60}")
-    print(f"{'Label':<40} {'Res[m]':>8} {'Ctx':>4} {'nZ':>4} "
-          f"{'Cells':>10} {'NonOrtho':>10} {'CPU[s]':>8} {'OK':>4}")
-    print("-" * 90)
-    for r in results:
-        flag = "OK" if r["ok"] else "FAIL"
-        no   = f"{r['max_non_ortho']:.1f}" if r["max_non_ortho"] is not None else "—"
-        cpu  = f"{r['cpu_time_s']:.0f}" if r["cpu_time_s"] is not None else "—"
-        print(f"{r['case_label'][:40]:<40} "
-              f"{r['resolution_m']:>8.0f} "
-              f"{r['context_cells']:>4d} "
-              f"{str(r['n_z'] or 'auto'):>4} "
-              f"{r['n_cells']:>10,d} "
-              f"{no:>10} "
-              f"{cpu:>8} "
-              f"{flag:>4}")
+    def monitor(self, phase_name: str | None = None) -> dict:
+        """Check status of all submitted jobs."""
+        from hpc_foam import check_all_jobs_and_save_status
+
+        config = self._get_hpc_config()
+
+        # Collect all job files and build {job_id: case_name} dict
+        jobs_dict: dict[str, str] = {}
+        for jf in sorted(self.cases_dir.glob("submitted_jobs_*.json")):
+            with open(jf) as f:
+                data = json.load(f)
+            if phase_name and data.get("phase") != phase_name:
+                continue
+            for j in data["jobs"]:
+                jobs_dict[j["job_id"]] = j["case_name"]
+
+        if not jobs_dict:
+            logger.warning("No submitted jobs found")
+            return {}
+
+        status = check_all_jobs_and_save_status(
+            config=config,
+            submitted_jobs=jobs_dict,
+            output_file=self.cases_dir / "job_status.json",
+        )
+
+        summary = status.get("summary", {})
+        logger.info(
+            "Job status: %d total — %d running, %d completed, %d failed",
+            summary.get("total", len(jobs_dict)),
+            summary.get("running", 0),
+            summary.get("completed", 0),
+            summary.get("to_restart", 0),
+        )
+        return status
+
+    def download_phase(self, phase_name: str) -> dict:
+        """Download results for completed cases in a phase."""
+        from hpc_foam import CaseTransferManager
+
+        config = self._get_hpc_config()
+        transfer = CaseTransferManager(config)
+
+        case_names = [
+            cid for cid, info in self.manifest.items()
+            if info["phase"] == phase_name
+        ]
+        if not case_names:
+            logger.warning("No cases for phase '%s'", phase_name)
+            return {}
+
+        logger.info("Downloading %d cases for phase '%s'", len(case_names), phase_name)
+        return transfer.download_results_batch(case_names)
+
+    # -----------------------------------------------------------------
+    # All-in-one
+    # -----------------------------------------------------------------
+
+    def run_phase(self, phase_name: str) -> None:
+        """Generate, upload, and submit a full phase."""
+        self.prepare_phase(phase_name)
+        self.upload_phase(phase_name)
+        self.submit_phase(phase_name)
+        logger.info("Phase '%s' submitted. Use 'monitor' to track progress.", phase_name)
 
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    parser = argparse.ArgumentParser(
-        description="Run mesh convergence study for Module 2A CFD pipeline"
+    parser = argparse.ArgumentParser(description="Convergence study orchestrator")
+    parser.add_argument(
+        "action",
+        choices=["generate", "upload", "submit", "monitor", "download", "run", "list"],
+        help="Action to perform",
     )
-    parser.add_argument("--case-id",    required=True,
-                        help="Canonical case timestamp (e.g. 2017-05-15T12:00)")
-    parser.add_argument("--resolutions-m", nargs="+", type=float,
-                        default=DEFAULT_RESOLUTIONS_M)
-    parser.add_argument("--context-cells", nargs="+", type=int,
-                        default=DEFAULT_CONTEXT_CELLS, choices=[1, 3, 5])
-    parser.add_argument("--vertical-variants", nargs="+", type=int,
-                        default=DEFAULT_VERTICAL_VARIANTS)
-    parser.add_argument("--era5",    required=True,
-                        help="ERA5 zarr store")
-    parser.add_argument("--srtm",    default=None,
-                        help="SRTM GeoTIFF (default: data/raw/srtm_perdigao_30m.tif)")
-    parser.add_argument("--z0map",   default=None,
-                        help="z0 raster (GeoTIFF)")
-    parser.add_argument("--site",    default="perdigao")
-    parser.add_argument("--output",  required=True,
-                        help="Output directory for cases + results")
-    parser.add_argument("--n-cores", type=int, default=8)
+    parser.add_argument("--phase", default=None,
+                        help="Phase name (mesh_convergence, domain_sensitivity, etc.)")
+    parser.add_argument("--study-config",
+                        default=str(PROJECT_ROOT / "configs" / "convergence_study.yaml"),
+                        help="Study config YAML")
+    parser.add_argument("--hpc-config",
+                        default=str(PROJECT_ROOT / "configs" / "hpc" / "aqua.yaml"),
+                        help="HPC config YAML")
     args = parser.parse_args()
 
-    cfg_path = (
-        Path(__file__).parents[2]
-        / "configs" / "sites" / f"{args.site}.yaml"
-    )
-    with open(cfg_path) as f:
-        site_cfg = yaml.safe_load(f)
-
-    srtm_tif = args.srtm
-    if srtm_tif is None:
-        candidate = (
-            Path(__file__).parents[2]
-            / "data" / "raw" / f"srtm_{args.site}_30m.tif"
-        )
-        srtm_tif = candidate if candidate.exists() else None
-
-    results = run_convergence_study(
-        case_id=args.case_id,
-        resolutions_m=args.resolutions_m,
-        context_cells_list=args.context_cells,
-        vertical_variants=args.vertical_variants,
-        era5_zarr=Path(args.era5),
-        srtm_tif=Path(srtm_tif) if srtm_tif else None,
-        z0_tif=Path(args.z0map) if args.z0map else None,
-        site_cfg=site_cfg,
-        output_root=Path(args.output),
-        n_cores=args.n_cores,
+    study = ConvergenceStudy(
+        study_config_path=Path(args.study_config),
+        hpc_config_path=Path(args.hpc_config),
     )
 
-    write_results(results, Path(args.output))
+    if args.action == "list":
+        print(f"Manifest: {len(study.manifest)} cases")
+        for cid, info in sorted(study.manifest.items()):
+            print(f"  {cid}: {info['phase']} | {info['resolution_m']}m "
+                  f"{info['domain_km']}km {info['direction_deg']}° "
+                  f"({info['solver']})")
+        return
+
+    if args.action in ("generate", "upload", "submit", "download", "run"):
+        if not args.phase:
+            parser.error(f"--phase is required for action '{args.action}'")
+
+    if args.action == "generate":
+        case_dirs = study.prepare_phase(args.phase)
+        print(f"Generated {len(case_dirs)} cases")
+    elif args.action == "upload":
+        results = study.upload_phase(args.phase)
+        ok = sum(v for v in results.values())
+        print(f"Uploaded {ok}/{len(results)} cases")
+    elif args.action == "submit":
+        jobs = study.submit_phase(args.phase)
+        print(f"Submitted {len(jobs)} jobs")
+    elif args.action == "monitor":
+        study.monitor(args.phase)
+    elif args.action == "download":
+        results = study.download_phase(args.phase)
+        ok = sum(v for v in results.values())
+        print(f"Downloaded {ok}/{len(results)} cases")
+    elif args.action == "run":
+        study.run_phase(args.phase)
+
+
+if __name__ == "__main__":
+    main()

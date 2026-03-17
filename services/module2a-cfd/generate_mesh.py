@@ -1,14 +1,17 @@
 """
-generate_mesh.py — SRTM DEM → OpenFOAM mesh (blockMesh + snappyHexMesh)
+generate_mesh.py — SRTM DEM → OpenFOAM mesh (cfMesh cartesianMesh)
 
 Architecture: nested domain with a refined central zone
 -------------------------------------------------------
-  context_cells=1 : single domain, 25×25 km (pipeline test, blockMesh only)
+  context_cells=1 : single domain, 25×25 km (pipeline test)
   context_cells=3 : 3×3 super-mailles, total 75×75 km (Perdigão + 25 km buffer)
   context_cells=5 : 5×5 super-mailles, total 125×125 km (larger context)
 
 Only the central 25×25 km zone is refined to the target resolution.
-Outer zones remain coarse (~super-maille width) to absorb boundary effects.
+Outer zones remain coarse (2-4× resolution) to absorb boundary effects.
+
+Meshing: cfMesh cartesianMesh (octree, 2:1 transitions guaranteed).
+Replaces the previous blockMesh + snappyHexMesh pipeline.
 
 Usage
 -----
@@ -20,9 +23,10 @@ Usage
 
     python generate_mesh.py \
         --site perdigao \
-        --resolution-m 1000 \
+        --resolution-m 500 \
         --context-cells 1 \
-        --output data/cases/perdigao_1000m_pipeline_test/
+        --domain-km 10 \
+        --output data/cases/perdigao_500m_test/
 
 References
 ----------
@@ -46,17 +50,20 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 DEFAULT_DOMAIN_KM  = 25.0       # km — default width of the refined central zone
-DOMAIN_HEIGHT_M    = 3000.0     # reduced from 7 km — sufficient for ABL
-AR_TARGET          = 5.0        # target aspect ratio (dx/dz at ground)
+DOMAIN_HEIGHT_M    = 3000.0     # m above highest terrain point
 STL_FILENAME       = "terrain.stl"
 
-# snappyHexMesh defaults
-N_SNAP_LAYERS      = 3
-DEFAULT_REFINE_LEVELS = 2       # blockMesh is 2^N coarser than target; snappy refines near terrain
+# cfMesh boundary layer defaults
+N_BOUNDARY_LAYERS      = 3
+BL_EXPANSION_RATIO     = 1.2
+BL_FIRST_LAYER_M       = 10.0   # max first layer thickness [m]
 
-# ABL distance thresholds for snappyHexMesh distance refinement [m]
-ABL_SURFACE_M      = 500.0     # top of surface layer — finest refinement
-ABL_MIXING_M       = 1500.0    # top of mixing layer  — intermediate refinement
+# cfMesh terrain surface refinement
+TERRAIN_REFINE_LEVELS  = 2       # additional octree levels on terrain surface
+TERRAIN_REFINE_THICKNESS_M = 500.0  # distance from terrain to refine [m]
+
+# Near-terrain refinement zone height [m]
+NEAR_TERRAIN_HEIGHT_M  = 1000.0  # fine box covering surface layer
 
 
 # ---------------------------------------------------------------------------
@@ -66,15 +73,12 @@ ABL_MIXING_M       = 1500.0    # top of mixing layer  — intermediate refinemen
 def compute_domain_geometry(
     resolution_m: float,
     context_cells: int,
-    n_z: int | None = None,
-    n_refine_levels: int = DEFAULT_REFINE_LEVELS,
     domain_km: float = DEFAULT_DOMAIN_KM,
 ) -> dict:
-    """Compute all domain dimensions and cell counts.
+    """Compute domain dimensions and cfMesh cell sizes.
 
-    The blockMesh creates a **coarse** base mesh; snappyHexMesh then refines
-    near the terrain surface using distance-based refinement.  This gives
-    fine horizontal resolution near the ground and coarse resolution aloft.
+    cfMesh uses maxCellSize (outer zone) + objectRefinements (boxes with
+    explicit cellSize) to control resolution.  No blockMesh or grading needed.
 
     Parameters
     ----------
@@ -82,114 +86,108 @@ def compute_domain_geometry(
         Target horizontal resolution in the central zone [m].
     context_cells:
         Number of super-mailles on each side (1 = central only, 3 = 3×3, 5 = 5×5).
-    n_z:
-        Number of vertical cells.  If None, computed adaptively.
-    n_refine_levels:
-        Number of snappyHexMesh refinement levels.  blockMesh base cell =
-        resolution_m * 2^n_refine_levels.
     domain_km:
         Width of the central (refined) zone in km (default 25).
 
     Returns
     -------
-    dict with geometry parameters ready to be passed to Jinja2 templates.
+    dict with geometry parameters for Jinja2 templates.
     """
-    central_m  = domain_km * 1000.0
-    total_m    = context_cells * domain_km * 1000.0
+    central_m = domain_km * 1000.0
+    total_m   = context_cells * domain_km * 1000.0
 
-    # Base cell size for blockMesh (coarse); snappy refines to resolution_m
-    base_cell_m = resolution_m * (2 ** n_refine_levels)
-
-    # Cells in the central zone (at base resolution)
-    n_central  = max(1, int(round(central_m / base_cell_m)))
-
+    # cfMesh cell sizes
     if context_cells == 1:
-        n_x = n_central
-        n_y = n_central
-        grading_x = "1"
-        grading_y = "1"
+        # Single zone: maxCellSize = target resolution
+        max_cell_size = resolution_m
     else:
-        # The outer zone (half the buffer on each side)
-        outer_km   = (context_cells - 1) / 2.0 * domain_km
-        outer_m    = outer_km * 1000.0
-        # Outer cells are 2× coarser than base (already coarse)
-        n_outer_cells = max(3, int(round(outer_m / (base_cell_m * 2))))
+        # Outer zone is coarser: 2-4× resolution depending on context
+        max_cell_size = resolution_m * min(4.0, context_cells)
 
-        total_xy_cells = 2 * n_outer_cells + n_central
-        n_x = total_xy_cells
-        n_y = total_xy_cells
-
-        coarse_cell_m = outer_m / n_outer_cells
-        g_ratio       = coarse_cell_m / base_cell_m
-
-        left_frac  = outer_m / total_m
-        mid_frac   = central_m / total_m
-        right_frac = left_frac
-
-        grading_x = (
-            f"( ({left_frac:.6f} {n_outer_cells} {g_ratio:.4f}) "
-            f"  ({mid_frac:.6f} {n_central}     1           ) "
-            f"  ({right_frac:.6f} {n_outer_cells} {1/g_ratio:.4f}) )"
-        )
-        grading_y = grading_x
-
-    # Adaptive vertical sizing based on base cell
-    # After snappy refinement near terrain, effective dz_ground = dz_base / 2^n_refine
-    dz_ground_base = base_cell_m / AR_TARGET
-    G_TARGET = AR_TARGET  # grading ratio: dz_top / dz_ground
-    if n_z is None:
-        # Linear approximation: H ≈ n * dz_ground * (1 + G) / 2
-        n_z = max(10, int(round(2.0 * DOMAIN_HEIGHT_M / (dz_ground_base * (1.0 + G_TARGET)))))
-
-    # Compute actual grading from H, n_z, dz_ground
-    grading_z = max(1.0, 2.0 * DOMAIN_HEIGHT_M / (n_z * dz_ground_base) - 1.0)
-    grading_z = min(grading_z, 20.0)  # clamp
-
-    # Effective resolution near terrain after snappy refinement
-    dz_ground_eff = dz_ground_base / (2 ** n_refine_levels)
+    target_cell_size = resolution_m
+    # Near-terrain: half the target resolution for better terrain conformity
+    fine_cell_size = resolution_m / 2.0
 
     logger.info(
-        "blockMesh: base_cell=%.0fm, %d×%d×%d cells | "
-        "snappy: %d refine levels → %.0fm target near terrain (dz_eff=%.0fm)",
-        base_cell_m, n_x, n_y, n_z,
-        n_refine_levels, resolution_m, dz_ground_eff,
+        "cfMesh: max_cell=%.0fm, target=%.0fm, fine=%.0fm | "
+        "domain=%.0f×%.0f km, context=%d×%d",
+        max_cell_size, target_cell_size, fine_cell_size,
+        total_m / 1000, total_m / 1000,
+        context_cells, context_cells,
     )
 
     return {
-        "total_x_m":        total_m,
-        "total_y_m":        total_m,
-        "total_z_m":        DOMAIN_HEIGHT_M,
-        "n_x":              n_x,
-        "n_y":              n_y,
-        "n_z":              n_z,
-        "grading_x":        grading_x,
-        "grading_y":        grading_y,
-        "grading_z":        f"{grading_z:.4f}",
-        "central_m":        central_m,
-        "resolution_m":     resolution_m,
-        "base_cell_m":      base_cell_m,
-        "n_refine_levels":  n_refine_levels,
-        "context_cells":    context_cells,
+        "total_x_m":         total_m,
+        "total_y_m":         total_m,
+        "total_z_m":         DOMAIN_HEIGHT_M,
+        "central_m":         central_m,
+        "resolution_m":      resolution_m,
+        "max_cell_size":     max_cell_size,
+        "target_cell_size":  target_cell_size,
+        "fine_cell_size":    fine_cell_size,
+        "context_cells":     context_cells,
     }
 
 
-def compute_refine_distances(n_refine_levels: int) -> list[tuple[float, int]]:
-    """Compute snappyHexMesh distance-based refinement levels.
+def compute_cfmesh_refinements(
+    geom: dict,
+    terrain_z_max: float,
+) -> list[dict]:
+    """Compute objectRefinement boxes for cfMesh.
 
-    Returns a list of (distance_m, level) tuples for the terrain surface,
-    ordered from innermost (highest level) to outermost (lowest level).
+    Creates two refinement zones:
+    1. centralZone: covers the central domain at target resolution
+    2. nearTerrain: covers the lowest ~1000m at half target resolution
+
+    For context_cells=1, only nearTerrain is needed (whole domain is already
+    at target resolution via maxCellSize).
+
+    Parameters
+    ----------
+    geom:
+        Output of compute_domain_geometry().
+    terrain_z_max:
+        Maximum terrain elevation [m].
+
+    Returns
+    -------
+    List of objectRefinement dicts for the meshDict.j2 template.
     """
-    if n_refine_levels <= 0:
-        return []
-    if n_refine_levels == 1:
-        return [(ABL_MIXING_M, 1)]
-    if n_refine_levels == 2:
-        return [(ABL_SURFACE_M, 2), (ABL_MIXING_M, 1)]
-    # n_refine_levels >= 3: add an inner shell at 200m
-    distances = [(200.0, n_refine_levels)]
-    distances.append((ABL_SURFACE_M, n_refine_levels - 1))
-    distances.append((ABL_MIXING_M, max(1, n_refine_levels - 2)))
-    return distances
+    refinements = []
+    central_m = geom["central_m"]
+    domain_z_max = geom["total_z_m"]
+
+    # Central zone box: target resolution across the central domain
+    if geom["context_cells"] > 1:
+        refinements.append({
+            "name": "centralZone",
+            "cell_size": geom["target_cell_size"],
+            "cx": 0.0,
+            "cy": 0.0,
+            "cz": domain_z_max / 2.0,
+            "lx": central_m,
+            "ly": central_m,
+            "lz": domain_z_max,
+        })
+
+    # Near-terrain box: fine resolution in the surface layer
+    near_terrain_top = min(
+        terrain_z_max + NEAR_TERRAIN_HEIGHT_M,
+        domain_z_max,
+    )
+    near_terrain_cz = near_terrain_top / 2.0
+    refinements.append({
+        "name": "nearTerrain",
+        "cell_size": geom["fine_cell_size"],
+        "cx": 0.0,
+        "cy": 0.0,
+        "cz": near_terrain_cz,
+        "lx": central_m,
+        "ly": central_m,
+        "lz": near_terrain_top,
+    })
+
+    return refinements
 
 
 # ---------------------------------------------------------------------------
@@ -363,8 +361,6 @@ def generate_mesh(
     srtm_tif: Path | None = None,
     template_dir: Path | None = None,
     inflow_json: Path | None = None,
-    n_z: int | None = None,
-    n_refine_levels: int = DEFAULT_REFINE_LEVELS,
     domain_km: float = DEFAULT_DOMAIN_KM,
     solver_name: str = "simpleFoam",
     thermal: bool = False,
@@ -372,7 +368,7 @@ def generate_mesh(
     canopy_enabled: bool = False,
     **kwargs,
 ) -> dict:
-    """Generate an OpenFOAM case directory with mesh and boundary condition files.
+    """Generate an OpenFOAM case directory with cfMesh mesh and BC files.
 
     Parameters
     ----------
@@ -392,10 +388,6 @@ def generate_mesh(
     inflow_json:
         Optional path to inflow profile JSON (from prepare_inflow.py).
         Provides u_hub, u_star, z0_eff, flowDir_x, flowDir_y for BC templates.
-    n_z:
-        Number of vertical layers.
-    n_refine_levels:
-        Number of snappyHexMesh refinement levels (default 2).
     domain_km:
         Width of the central (refined) zone in km (default 25).
 
@@ -411,14 +403,12 @@ def generate_mesh(
     site_lon = site["coordinates"]["longitude"]
 
     # ---- geometry -------------------------------------------------------
-    geom = compute_domain_geometry(resolution_m, context_cells, n_z, n_refine_levels, domain_km)
+    geom = compute_domain_geometry(resolution_m, context_cells, domain_km)
     logger.info(
-        "Domain: %.0f×%.0f km, base=%.0fm → target=%.0fm, context=%d×%d, "
-        "blockMesh=%d×%d×%d cells",
+        "Domain: %.0f×%.0f km, target=%.0fm, context=%d×%d",
         geom["total_x_m"] / 1000, geom["total_y_m"] / 1000,
-        geom["base_cell_m"], resolution_m,
+        resolution_m,
         context_cells, context_cells,
-        geom["n_x"], geom["n_y"], geom["n_z"],
     )
 
     # ---- STL terrain -------------------------------------------------------
@@ -457,16 +447,15 @@ def generate_mesh(
     domain_z_max = terrain_z_max + DOMAIN_HEIGHT_M
     geom["total_z_m"] = domain_z_max
 
-    # Recalculate vertical grading for the actual domain height
-    base_cell_m = geom["base_cell_m"]
-    dz_ground_base = base_cell_m / AR_TARGET
-    actual_n_z = geom["n_z"]
-    actual_grading = max(1.0, 2.0 * domain_z_max / (actual_n_z * dz_ground_base) - 1.0)
-    actual_grading = min(actual_grading, 20.0)
-    geom["grading_z"] = f"{actual_grading:.4f}"
+    logger.info("Terrain z_max=%.0fm → domain z_max=%.0fm (%.0fm above terrain)",
+                terrain_z_max, domain_z_max, DOMAIN_HEIGHT_M)
 
-    logger.info("Terrain z_max=%.0fm → domain z_max=%.0fm (%.0fm above terrain), grading_z=%.2f",
-                terrain_z_max, domain_z_max, DOMAIN_HEIGHT_M, actual_grading)
+    # ---- cfMesh refinement zones -------------------------------------------
+    cfmesh_refinements = compute_cfmesh_refinements(geom, terrain_z_max)
+    logger.info(
+        "cfMesh refinements: %s",
+        ", ".join(f"{r['name']}={r['cell_size']:.0f}m" for r in cfmesh_refinements),
+    )
 
     # ---- inflow params -------------------------------------------------------
     inflow = {
@@ -488,7 +477,6 @@ def generate_mesh(
             inflow.update(json.load(f))
 
     # ---- Fit T(z) polynomial from inflow T_profile (for setExpressionFields) ---
-    # Uses the actual profile from ERA5 / parametric inflow, not a hardcoded lapse rate.
     domain_top = geom["total_z_m"]
     T_poly_coeffs = None
     if "T_profile" in inflow and "z_levels" in inflow:
@@ -499,8 +487,7 @@ def generate_mesh(
             z_ext = np.linspace(_z[-1], domain_top, 10)
             _z = np.concatenate([_z, z_ext[1:]])
             _T = np.concatenate([_T, np.full(len(z_ext) - 1, _T[-1])])
-        # 3rd-order polynomial fit: T(z) = c0 + c1*z + c2*z² + c3*z³
-        T_poly_coeffs = np.polyfit(_z, _T, 3)[::-1].tolist()  # [c0, c1, c2, c3]
+        T_poly_coeffs = np.polyfit(_z, _T, 3)[::-1].tolist()
         logger.info("T(z) polynomial fit: T(0)=%.2f K, dT/dz=%.2f K/km",
                      T_poly_coeffs[0], T_poly_coeffs[1] * 1000)
 
@@ -509,38 +496,24 @@ def generate_mesh(
     if "u_profile" in inflow and "z_levels" in inflow:
         _z = np.array(inflow["z_levels"])
         _u = np.array(inflow["u_profile"])
-        # Extend profile to domain top with constant value (avoid poly extrapolation)
         if _z[-1] < domain_top:
             z_ext = np.linspace(_z[-1], domain_top, 10)
             _z = np.concatenate([_z, z_ext[1:]])
             _u = np.concatenate([_u, np.full(len(z_ext) - 1, _u[-1])])
-        # 5th-order polynomial fit: speed(z) = c0 + c1*z + ... + c5*z⁵
-        U_poly_coeffs = np.polyfit(_z, _u, 5)[::-1].tolist()  # [c0..c5]
+        U_poly_coeffs = np.polyfit(_z, _u, 5)[::-1].tolist()
         logger.info("U(z) polynomial fit: U(10m)=%.2f m/s, U(100m)=%.2f m/s",
                      np.polyval(np.polyfit(_z, _u, 5), 10),
                      np.polyval(np.polyfit(_z, _u, 5), 100))
 
     # ---- Robin BC: inletOutlet on all lateral faces ----------------------------
-    # All lateral faces use inletOutlet (auto inlet/outlet per cell face based on
-    # flux direction). No manual inlet/outlet assignment needed.
-    # Reference: Venkatraman et al. (WES 2023) — Robin BC for ABL at Perdigão.
     wind_dir = float(inflow.get("wind_dir", 270.0))
     logger.info("Wind dir %.1f° — Robin BC on all lateral faces", wind_dir)
 
     # ---- Jinja2 context -------------------------------------------------------
-    n_cores = 8  # default parallel decomposition
+    n_cores = 8
     central_m = geom["central_m"]
     half_x = geom["total_x_m"] / 2
     half_y = geom["total_y_m"] / 2
-
-    # snappyHexMesh: distance-based refinement near terrain
-    refine_level = geom["n_refine_levels"]
-    refine_distances = compute_refine_distances(refine_level)
-
-    logger.info(
-        "snappy refinement: level=%d, distances=%s",
-        refine_level, refine_distances,
-    )
 
     # ---- tower positions in local coords (for sampleDict) -------------------------
     towers = []
@@ -551,7 +524,6 @@ def generate_mesh(
     for tw in key_towers:
         tw_lat = tw["lat"]
         tw_lon = tw["lon"]
-        # Convert lat/lon to local (x, y) relative to site center
         tw_x = (tw_lon - site_lon) * 111_000.0 * np.cos(np.radians(site_lat))
         tw_y = (tw_lat - site_lat) * 111_000.0
         tw_z = tw.get("elevation_m", 0.0)
@@ -570,14 +542,6 @@ def generate_mesh(
             "total_x_m":   geom["total_x_m"],
             "total_y_m":   geom["total_y_m"],
             "total_z_m":   geom["total_z_m"],
-            "n_x":         geom["n_x"],
-            "n_y":         geom["n_y"],
-            "n_z":         geom["n_z"],
-            "grading_x":   geom["grading_x"],
-            "grading_y":   geom["grading_y"],
-            "grading_z":   geom["grading_z"],
-            "half_x":      0.0,
-            "half_y":      0.0,
             "x_min":       -half_x,
             "x_max":       half_x,
             "y_min":       -half_y,
@@ -586,22 +550,21 @@ def generate_mesh(
             "z_max":       geom["total_z_m"],
         },
         "mesh": {
-            "nx":        geom["n_x"],
-            "ny":        geom["n_y"],
-            "nz":        geom["n_z"],
-            "x_grading": geom["grading_x"],
-            "y_grading": geom["grading_y"],
-            "z_grading": geom["grading_z"],
+            "max_cell_size":          geom["max_cell_size"],
+            "target_cell_size":       geom["target_cell_size"],
+            "fine_cell_size":         geom["fine_cell_size"],
+            "terrain_refine_levels":  TERRAIN_REFINE_LEVELS,
+            "terrain_refine_thickness": TERRAIN_REFINE_THICKNESS_M,
+            "n_boundary_layers":      N_BOUNDARY_LAYERS,
+            "bl_expansion":           BL_EXPANSION_RATIO,
+            "bl_first_layer":         BL_FIRST_LAYER_M,
         },
+        "cfmesh_refinements": cfmesh_refinements,
         "terrain": {
             "stl_file":       STL_FILENAME,
             "central_m":      central_m,
             "resolution_m":   resolution_m,
-            "n_snap_layers":  N_SNAP_LAYERS,
         },
-        "refine_level":     refine_level,
-        "refine_distances": refine_distances,
-        "n_layers":         N_SNAP_LAYERS,
         "inflow": inflow,
         "site": {
             "latitude":  site_lat,
@@ -639,19 +602,13 @@ def generate_mesh(
     render_templates(template_dir, output_dir, jinja_ctx)
 
     # ---- Remove solver-incompatible constant files --------------------------------
-    # simpleFoam: uses transportProperties (nu only, no thermal)
-    # buoyantBoussinesqSimpleFoam: uses transportProperties (nu + beta, TRef, Pr, Prt)
-    # buoyantSimpleFoam: uses thermophysicalProperties (DO NOT USE — h diverges on terrain)
     if solver_name in ("simpleFoam", "buoyantBoussinesqSimpleFoam"):
         thermo = output_dir / "constant" / "thermophysicalProperties"
         if thermo.exists():
             thermo.unlink()
             logger.info("Removed thermophysicalProperties (not used by %s)", solver_name)
 
-    # ---- turbulenceProperties copy for ESI v2412 compatibility ---------------------
-    # ESI v2412 uses "momentumTransport" but decomposePar and some parallel paths
-    # still look for "turbulenceProperties". Copy (not symlink) — symlinks do not
-    # survive decomposePar.
+    # ---- turbulenceProperties copy for ESI v2406 compatibility ---------------------
     mt_file = output_dir / "constant" / "momentumTransport"
     tp_copy = output_dir / "constant" / "turbulenceProperties"
     if mt_file.exists() and not tp_copy.exists():
@@ -713,7 +670,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     parser = argparse.ArgumentParser(
-        description="Generate OpenFOAM case directory from SRTM DEM"
+        description="Generate OpenFOAM case directory from SRTM DEM (cfMesh)"
     )
     parser.add_argument("--site",           default="perdigao",
                         help="Site name (configs/sites/<site>.yaml)")
@@ -721,10 +678,6 @@ if __name__ == "__main__":
                         help="Target horizontal resolution [m] in central zone")
     parser.add_argument("--context-cells",  type=int, default=3, choices=[1, 3, 5],
                         help="Super-maille context: 1=pipeline test, 3=75km, 5=125km")
-    parser.add_argument("--n-z",            type=int, default=None,
-                        help="Number of vertical layers (auto if not set)")
-    parser.add_argument("--n-refine-levels", type=int, default=DEFAULT_REFINE_LEVELS,
-                        help=f"snappyHexMesh refinement levels (default {DEFAULT_REFINE_LEVELS})")
     parser.add_argument("--domain-km",      type=float, default=DEFAULT_DOMAIN_KM,
                         help=f"Central zone width in km (default {DEFAULT_DOMAIN_KM})")
     parser.add_argument("--srtm",           default=None,
@@ -765,8 +718,6 @@ if __name__ == "__main__":
         output_dir=Path(args.output),
         srtm_tif=srtm_tif,
         inflow_json=args.inflow_json,
-        n_z=args.n_z,
-        n_refine_levels=args.n_refine_levels,
         domain_km=args.domain_km,
         solver_name=args.solver,
         thermal=args.thermal,
@@ -774,8 +725,7 @@ if __name__ == "__main__":
 
     print(f"Case generated: {args.output}")
     print(f"  target res  : {args.resolution_m:.0f} m")
-    print(f"  base cell   : {geom['base_cell_m']:.0f} m (blockMesh)")
-    print(f"  refine      : {geom['n_refine_levels']} levels (snappyHexMesh distance)")
+    print(f"  max cell    : {geom['max_cell_size']:.0f} m (cfMesh outer)")
+    print(f"  fine cell   : {geom['fine_cell_size']:.0f} m (near terrain)")
     print(f"  context     : {args.context_cells}×{args.context_cells} super-mailles")
     print(f"  domain      : {geom['total_x_m']/1000:.0f}×{geom['total_y_m']/1000:.0f}×{geom['total_z_m']/1000:.0f} km")
-    print(f"  blockMesh   : {geom['n_x']}×{geom['n_y']}×{geom['n_z']} = {geom['n_x']*geom['n_y']*geom['n_z']:,} cells")

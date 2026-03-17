@@ -232,7 +232,6 @@ class CampaignCase:
     resolution_m: float
     domain_km: float
     context_cells: int
-    n_refine_levels: int
     boussinesq: bool = False
     fvschemes_variant: str = "robust"  # "robust" (upwind k/eps) or "accurate" (linearUpwind k/eps)
     n_iterations: int = 2000
@@ -313,7 +312,6 @@ def expand_cases(
             resolution_m=mesh.get("resolution_m", 100),
             domain_km=mesh.get("domain_km", 10),
             context_cells=mesh.get("context_cells", 1),
-            n_refine_levels=mesh.get("n_refine_levels", 2),
             boussinesq=boussinesq,
         ))
 
@@ -387,7 +385,6 @@ def generate_case_dir(
         output_dir=case_dir,
         srtm_tif=srtm_tif,
         inflow_json=inflow_json,
-        n_refine_levels=case.n_refine_levels,
         domain_km=case.domain_km,
         solver_name=case.solver,
         thermal=case.thermal,

@@ -129,11 +129,11 @@ def _run_case_worker(args: tuple) -> dict:
     """
     case_params, common = args
 
-    from services.module2a_cfd.prepare_inflow import prepare_inflow
-    from services.module2a_cfd.generate_mesh import generate_mesh
-    from services.module2a_cfd.openfoam_runner import OpenFOAMRunner
-    from services.module2a_cfd.export_cfd import export_cfd
-    from services.module2a_cfd.check_coherence import check_coherence, update_qc_report
+    from prepare_inflow import prepare_inflow
+    from generate_mesh import generate_mesh
+    from openfoam_runner import OpenFOAMRunner
+    from export_cfd import export_cfd
+    from check_coherence import check_coherence, update_qc_report
 
     case_id   = case_params["case_id"]
     output    = Path(common["output"])
@@ -173,7 +173,7 @@ def _run_case_worker(args: tuple) -> dict:
 
         # 3 — solver
         runner = OpenFOAMRunner(case_dir, n_cores=n_cores)
-        runner.run_case(skip_snappy=(ctx == 1))
+        runner.run_case(inflow_json=inflow_json)
 
         # 4 — export
         towers_yaml = (
