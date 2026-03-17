@@ -6,28 +6,21 @@
      \\/     M anipulation  |
 \*---------------------------------------------------------------------------*/
 /*
- * 0/p_rgh.j2 — Jinja2 template
- * Initial and boundary conditions for modified pressure p_rgh [Pa]
+ * 0/p_rgh.j2 — Modified pressure boundary conditions
  *
- * p_rgh = p - rho * g * h
- *   where h is the height above a reference datum.
- * buoyantBoussinesqSimpleFoam solves for p_rgh rather than p to decouple
- * the hydrostatic pressure gradient from the dynamic pressure.
- * For simpleFoam (neutral), p_rgh ≡ p (no buoyancy correction).
+ * p_rgh = p - rho * g * h   (buoyantBoussinesqSimpleFoam)
+ * p_rgh ≡ p/rho             (simpleFoam, kinematic)
  *
- * Variables:
- *   physics.p_ref_Pa   — reference gauge pressure [Pa] (usually 0)
- *   physics.rho_ref    — reference density [kg/m³] (1.225)
+ * BC strategy (dual of U):
+ *   Lateral faces:  outletInlet — Dirichlet p(z) on OUTLET faces (where U
+ *                   is zeroGradient), zeroGradient on INLET faces (where U
+ *                   is prescribed). This avoids over-constraining: we never
+ *                   impose both U and p on the same face.
+ *   Top:           fixedFluxPressure (consistent with inletOutlet U)
+ *   Terrain/bottom: fixedFluxPressure (no-penetration wall)
  *
- * Boundary condition choices:
- *   Inlet faces:     fixedFluxPressure
- *     Adjusts the pressure gradient at the boundary to be consistent with
- *     the specified velocity flux.  Prevents spurious reflections.
- *   Outlet / top:   totalPressure with p0 = 0
- *     Fixes total pressure; allows flow to leave without reflecting.
- *   Terrain / wall:  fixedFluxPressure
- *     No-penetration at wall is enforced via U; pressure gradient is
- *     adjusted to match the zero normal flux constraint.
+ * After mesh generation, init_from_era5.py patches outletValue/value to
+ * nonuniform p_rgh(z) = p(z) - rho0*g*z from ERA5 pressure levels.
  */
 FoamFile
 {
@@ -38,108 +31,42 @@ FoamFile
     object      p_rgh;
 }
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
-// p_ref = {{ physics.p_ref_Pa | default(0) }} Pa (gauge)
-// rho_ref = {{ physics.rho_ref | default(1.225) }} kg/m³
+// NOTE: outletValue/value are placeholders — patched to nonuniform by init_from_era5.py
 
-{%- if solver.name | default('simpleFoam') == 'buoyantBoussinesqSimpleFoam' %}
-// buoyantBoussinesqSimpleFoam: kinematic pressure (same as simpleFoam)
 dimensions      [0 2 -2 0 0 0 0];
-{%- else %}
-// buoyantSimpleFoam: dynamic pressure in Pa
-dimensions      [1 -1 -2 0 0 0 0];
-{%- endif %}
 
 internalField   uniform 0;
 
 boundaryField
 {
-    // -----------------------------------------------------------------------
-    // Lateral faces:
-    //   simpleFoam / buoyantBoussinesqSimpleFoam (incompressible):
-    //     fixedValue 0 — zero kinematic gauge pressure, Dirichlet constraint.
-    //   buoyantSimpleFoam (compressible, p in Pa):
-    //     fixedFluxPressure — adjusts gradient to be consistent with inletOutlet
-    //     velocity flux on lateral faces. Prevents singularity in compressible
-    //     pressure Poisson when combined with non-trivial hydrostatic field.
-    //
-    // Top: fixedValue 0 for all solvers (clean Dirichlet at domain ceiling).
-    // -----------------------------------------------------------------------
-{% if solver.name | default("simpleFoam") == "buoyantSimpleFoam" %}
-    west
+{% for face in ['west', 'east', 'south', 'north'] %}
+    {{ face }}
     {
-        type            fixedFluxPressure;
-        gradient        uniform 0;
-        value           uniform {{ p_init }};
-    }
-
-    east
-    {
-        type            fixedFluxPressure;
-        gradient        uniform 0;
-        value           uniform {{ p_init }};
-    }
-
-    south
-    {
-        type            fixedFluxPressure;
-        gradient        uniform 0;
-        value           uniform {{ p_init }};
-    }
-
-    north
-    {
-        type            fixedFluxPressure;
-        gradient        uniform 0;
-        value           uniform {{ p_init }};
-    }
-{% else %}
-    west
-    {
-        type            fixedValue;
+        type            outletInlet;
+        outletValue     uniform 0;
         value           uniform 0;
     }
 
-    east
-    {
-        type            fixedValue;
-        value           uniform 0;
-    }
-
-    south
-    {
-        type            fixedValue;
-        value           uniform 0;
-    }
-
-    north
-    {
-        type            fixedValue;
-        value           uniform 0;
-    }
-{% endif %}
-
+{% endfor %}
     top
     {
-        type            fixedValue;
-        value           uniform {{ p_init }};
+        type            fixedFluxPressure;
+        gradient        uniform 0;
+        value           uniform 0;
     }
 
-    // -----------------------------------------------------------------------
-    // Terrain wall: fixedFluxPressure
-    //   No normal flow at wall; pressure gradient adjusted accordingly.
-    // -----------------------------------------------------------------------
     terrain
     {
         type            fixedFluxPressure;
         gradient        uniform 0;
-        value           uniform {{ p_init }};
+        value           uniform 0;
     }
 
     bottom
     {
         type            fixedFluxPressure;
         gradient        uniform 0;
-        value           uniform {{ p_init }};
+        value           uniform 0;
     }
 }
 

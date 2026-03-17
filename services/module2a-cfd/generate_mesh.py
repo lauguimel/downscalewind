@@ -487,6 +487,39 @@ def generate_mesh(
         with open(inflow_json) as f:
             inflow.update(json.load(f))
 
+    # ---- Fit T(z) polynomial from inflow T_profile (for setExpressionFields) ---
+    # Uses the actual profile from ERA5 / parametric inflow, not a hardcoded lapse rate.
+    domain_top = geom["total_z_m"]
+    T_poly_coeffs = None
+    if "T_profile" in inflow and "z_levels" in inflow:
+        _z = np.array(inflow["z_levels"])
+        _T = np.array(inflow["T_profile"])
+        # Extend profile to domain top with constant value (avoid poly extrapolation)
+        if _z[-1] < domain_top:
+            z_ext = np.linspace(_z[-1], domain_top, 10)
+            _z = np.concatenate([_z, z_ext[1:]])
+            _T = np.concatenate([_T, np.full(len(z_ext) - 1, _T[-1])])
+        # 3rd-order polynomial fit: T(z) = c0 + c1*z + c2*z² + c3*z³
+        T_poly_coeffs = np.polyfit(_z, _T, 3)[::-1].tolist()  # [c0, c1, c2, c3]
+        logger.info("T(z) polynomial fit: T(0)=%.2f K, dT/dz=%.2f K/km",
+                     T_poly_coeffs[0], T_poly_coeffs[1] * 1000)
+
+    # ---- Fit U(z) polynomial from inflow u_profile (for setExpressionFields) ---
+    U_poly_coeffs = None
+    if "u_profile" in inflow and "z_levels" in inflow:
+        _z = np.array(inflow["z_levels"])
+        _u = np.array(inflow["u_profile"])
+        # Extend profile to domain top with constant value (avoid poly extrapolation)
+        if _z[-1] < domain_top:
+            z_ext = np.linspace(_z[-1], domain_top, 10)
+            _z = np.concatenate([_z, z_ext[1:]])
+            _u = np.concatenate([_u, np.full(len(z_ext) - 1, _u[-1])])
+        # 5th-order polynomial fit: speed(z) = c0 + c1*z + ... + c5*z⁵
+        U_poly_coeffs = np.polyfit(_z, _u, 5)[::-1].tolist()  # [c0..c5]
+        logger.info("U(z) polynomial fit: U(10m)=%.2f m/s, U(100m)=%.2f m/s",
+                     np.polyval(np.polyfit(_z, _u, 5), 10),
+                     np.polyval(np.polyfit(_z, _u, 5), 100))
+
     # ---- Robin BC: inletOutlet on all lateral faces ----------------------------
     # All lateral faces use inletOutlet (auto inlet/outlet per cell face based on
     # flux direction). No manual inlet/outlet assignment needed.
@@ -579,6 +612,8 @@ def generate_mesh(
             "p_ref_Pa": 0.0,
             "rho_ref":  1.225,
             "coriolis": coriolis,
+            "T_poly_coeffs": T_poly_coeffs,
+            "U_poly_coeffs": U_poly_coeffs,
         },
         "solver": {
             "name":           solver_name,
@@ -613,14 +648,15 @@ def generate_mesh(
             thermo.unlink()
             logger.info("Removed thermophysicalProperties (not used by %s)", solver_name)
 
-    # ---- turbulenceProperties symlink for ESI v2412 compatibility ------------------
-    # ESI v2412 uses "momentumTransport" but some parallel decomposition paths
-    # still look for "turbulenceProperties". Create a symlink for safety.
+    # ---- turbulenceProperties copy for ESI v2412 compatibility ---------------------
+    # ESI v2412 uses "momentumTransport" but decomposePar and some parallel paths
+    # still look for "turbulenceProperties". Copy (not symlink) — symlinks do not
+    # survive decomposePar.
     mt_file = output_dir / "constant" / "momentumTransport"
-    tp_symlink = output_dir / "constant" / "turbulenceProperties"
-    if mt_file.exists() and not tp_symlink.exists():
-        tp_symlink.symlink_to("momentumTransport")
-        logger.info("Created turbulenceProperties -> momentumTransport symlink")
+    tp_copy = output_dir / "constant" / "turbulenceProperties"
+    if mt_file.exists() and not tp_copy.exists():
+        shutil.copy2(mt_file, tp_copy)
+        logger.info("Copied momentumTransport -> turbulenceProperties (decomposePar compat)")
 
     # ---- create empty .foam file for ParaView -------------------------------------
     foam_file = output_dir / "case.foam"

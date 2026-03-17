@@ -1,20 +1,22 @@
 """
 init_from_era5.py — Initialise OpenFOAM fields from ERA5 interpolation
 
-Replaces potentialFoam: interpolates ERA5 wind (u, v), k, and omega to
-every cell centre in the mesh for a much better initial condition.
+Replaces potentialFoam: interpolates ERA5 wind (u, v), k, epsilon, and
+temperature T to every cell centre AND boundary face centre in the mesh.
 
 Pipeline position:
     blockMesh → [snappyHexMesh] → checkMesh → **init_from_era5** → simpleFoam
 
 The script:
-  1. Reads cell centres from the OpenFOAM case (constant/polyMesh/C or via
-     postProcess -func writeCellCentres)
-  2. For each cell (x, y, z):
-     - Converts (x, y) → (lat, lon) via local projection
-     - Interpolates ERA5 u, v vertically (log-law 0–100m, spline above)
-     - Computes k(z) = u*²/√Cmu  and  ω(z) = u*/(κ·z)
-  3. Writes 0/U, 0/k, 0/omega with `internalField nonuniform List<...>`
+  1. Reads cell centres from the OpenFOAM case
+  2. Reads boundary face centres from constant/polyMesh/{points,faces,boundary}
+  3. For each cell/face at height z:
+     - Interpolates ERA5 speed, T vertically (linear on z_levels/u_profile)
+     - Computes U = speed × (flowDir_x, flowDir_y, 0)
+     - Computes k = u*²/√Cmu  and  ε(z) = Cmu^0.75·k^1.5/(κ·max(z, 2·z0))
+  4. Writes internalField as nonuniform List
+  5. Patches boundaryField: inletValue + value → nonuniform List
+     (for inletOutlet patches only — wall functions are left unchanged)
 
 Usage
 -----
@@ -37,6 +39,14 @@ logger = logging.getLogger(__name__)
 KAPPA = 0.41
 CMU   = 0.09
 
+# Patch types whose inletValue/outletValue/value should be patched.
+# Wall functions, noSlip, zeroGradient, fixedFluxPressure etc. are left unchanged.
+PATCHABLE_BC_TYPES = {"inletOutlet", "outletInlet"}
+
+# Reference values for p_rgh computation
+G_ACC  = 9.81    # m/s²
+RHO0   = 1.225   # kg/m³ (reference density for Boussinesq)
+
 
 # ---------------------------------------------------------------------------
 # Read OpenFOAM cell centres
@@ -46,14 +56,13 @@ def read_cell_centres(case_dir: Path) -> np.ndarray:
     """Read cell centre coordinates from an OpenFOAM case.
 
     Tries (in order):
-      1. Parse constant/polyMesh/C (if it exists after writeCellCentres)
-      2. Parse 0/C{x,y,z} written by `postProcess -func writeCellCentres`
+      1. Parse 0/C{x,y,z} written by `postProcess -func writeCellCentres`
+      2. Parse constant/polyMesh/C (if it exists)
 
     Returns
     -------
     centres : (N, 3) array of (x, y, z) cell centre coordinates [m].
     """
-    # Option 1: 0/Cx, 0/Cy, 0/Cz
     cx_path = case_dir / "0" / "Cx"
     cy_path = case_dir / "0" / "Cy"
     cz_path = case_dir / "0" / "Cz"
@@ -63,7 +72,6 @@ def read_cell_centres(case_dir: Path) -> np.ndarray:
         cz = _parse_of_scalar_field(cz_path)
         return np.column_stack([cx, cy, cz])
 
-    # Option 2: constant/polyMesh/C (vector field)
     c_path = case_dir / "constant" / "polyMesh" / "C"
     if c_path.exists():
         return _parse_of_vector_field(c_path)
@@ -74,10 +82,114 @@ def read_cell_centres(case_dir: Path) -> np.ndarray:
     )
 
 
+# ---------------------------------------------------------------------------
+# Read OpenFOAM boundary face centres from mesh files
+# ---------------------------------------------------------------------------
+
+def read_boundary_info(case_dir: Path) -> dict[str, dict]:
+    """Parse constant/polyMesh/boundary to get patch names, start faces, nFaces.
+
+    Returns
+    -------
+    dict mapping patch_name → {"nFaces": int, "startFace": int}
+    """
+    boundary_path = case_dir / "constant" / "polyMesh" / "boundary"
+    if not boundary_path.exists():
+        raise FileNotFoundError(f"Cannot find {boundary_path}")
+
+    text = boundary_path.read_text()
+
+    # Find the top-level list: N ( ... )
+    match = re.search(r'^\s*(\d+)\s*\(', text, re.MULTILINE)
+    if not match:
+        raise ValueError(f"Cannot parse boundary file: {boundary_path}")
+
+    block = text[match.end():]
+
+    patches = {}
+    # Match each patch entry: name { ... nFaces N; startFace M; ... }
+    for m in re.finditer(
+        r'(\w+)\s*\{([^}]+)\}', block
+    ):
+        name = m.group(1)
+        body = m.group(2)
+        nf = re.search(r'nFaces\s+(\d+)', body)
+        sf = re.search(r'startFace\s+(\d+)', body)
+        if nf and sf:
+            patches[name] = {
+                "nFaces": int(nf.group(1)),
+                "startFace": int(sf.group(1)),
+            }
+
+    return patches
+
+
+def read_boundary_face_centres(case_dir: Path) -> dict[str, np.ndarray]:
+    """Compute face centres for each boundary patch from the mesh.
+
+    Reads constant/polyMesh/{points, faces, boundary} and computes
+    face centres as the mean of vertex coordinates for each face.
+
+    Returns
+    -------
+    dict mapping patch_name → (nFaces, 3) array of face centre coordinates [m].
+    """
+    poly = case_dir / "constant" / "polyMesh"
+
+    # --- Read points ---
+    points_text = (poly / "points").read_text()
+    match = re.search(r'^\s*(\d+)\s*\(', points_text, re.MULTILINE)
+    if not match:
+        raise ValueError("Cannot parse points file")
+    n_points = int(match.group(1))
+    block = points_text[match.end():]
+    coords = re.findall(
+        r'\(\s*([\d.eE+\-]+)\s+([\d.eE+\-]+)\s+([\d.eE+\-]+)\s*\)', block
+    )
+    points = np.array([[float(x), float(y), float(z)] for x, y, z in coords[:n_points]])
+
+    # --- Read faces ---
+    faces_text = (poly / "faces").read_text()
+    match = re.search(r'^\s*(\d+)\s*\(', faces_text, re.MULTILINE)
+    if not match:
+        raise ValueError("Cannot parse faces file")
+    n_faces = int(match.group(1))
+    block = faces_text[match.end():]
+    # Each face: N(v0 v1 v2 ...) — parse all
+    face_entries = re.findall(r'\d+\(([^)]+)\)', block)
+    faces = []
+    for entry in face_entries[:n_faces]:
+        verts = [int(v) for v in entry.split()]
+        faces.append(verts)
+
+    # --- Read boundary patches ---
+    patches = read_boundary_info(case_dir)
+
+    # --- Compute face centres for each boundary patch ---
+    result = {}
+    for patch_name, info in patches.items():
+        start = info["startFace"]
+        n = info["nFaces"]
+        centres = np.zeros((n, 3))
+        for i in range(n):
+            face_idx = start + i
+            if face_idx < len(faces):
+                verts = faces[face_idx]
+                centres[i] = points[verts].mean(axis=0)
+        result[patch_name] = centres
+        logger.debug("Patch %s: %d faces, z range [%.1f, %.1f] m",
+                     patch_name, n, centres[:, 2].min(), centres[:, 2].max())
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Parse OpenFOAM fields
+# ---------------------------------------------------------------------------
+
 def _parse_of_scalar_field(filepath: Path) -> np.ndarray:
     """Parse an OpenFOAM volScalarField into a 1-D numpy array."""
     text = filepath.read_text()
-    # Find the internalField block: N\n(\nval\nval\n...\n)
     match = re.search(r'internalField\s+nonuniform\s+List<scalar>\s*\n(\d+)\s*\n\(', text)
     if match:
         n = int(match.group(1))
@@ -86,7 +198,6 @@ def _parse_of_scalar_field(filepath: Path) -> np.ndarray:
         values = text[start:end].split()
         return np.array([float(v) for v in values[:n]])
 
-    # Uniform field
     match = re.search(r'internalField\s+uniform\s+([\d.eE+\-]+)', text)
     if match:
         logger.warning("Scalar field %s is uniform — cannot determine N", filepath)
@@ -105,7 +216,6 @@ def _parse_of_vector_field(filepath: Path) -> np.ndarray:
     n = int(match.group(1))
     start = match.end()
     end = text.index(')', start)
-    # Each line: (vx vy vz)
     vectors = re.findall(r'\(\s*([\d.eE+\-]+)\s+([\d.eE+\-]+)\s+([\d.eE+\-]+)\s*\)',
                          text[start:end])
     arr = np.array([[float(x), float(y), float(z)] for x, y, z in vectors[:n]])
@@ -113,155 +223,233 @@ def _parse_of_vector_field(filepath: Path) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Write OpenFOAM nonuniform fields
+# ERA5 profile interpolation
 # ---------------------------------------------------------------------------
 
-def _write_of_vector_field(
-    filepath: Path,
-    field_name: str,
-    data: np.ndarray,
-    dimensions: str = "[0 1 -1 0 0 0 0]",
-) -> None:
-    """Write an OpenFOAM volVectorField with nonuniform internalField."""
-    n = len(data)
-    lines = [
-        '/*--------------------------------*- C++ -*----------------------------------*\\',
-        '  =========                 |',
-        '  \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox',
-        '   \\\\    /   O peration     | Version: 10',
-        '    \\\\  /    A nd           | Web:     www.openfoam.org',
-        '     \\\\/     M anipulation  |',
-        '\\*---------------------------------------------------------------------------*/',
-        'FoamFile',
-        '{',
-        '    version     2.0;',
-        '    format      ascii;',
-        '    class       volVectorField;',
-        '    location    "0";',
-        f'    object      {field_name};',
-        '}',
-        '// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //',
-        '',
-        f'dimensions      {dimensions};',
-        '',
-        f'internalField   nonuniform List<vector>',
-        f'{n}',
-        '(',
-    ]
-    for i in range(n):
-        lines.append(f'({data[i, 0]:.6f} {data[i, 1]:.6f} {data[i, 2]:.6f})')
-    lines.append(')')
-    lines.append(';')
-    lines.append('')
+def _build_interpolators(inflow: dict):
+    """Build speed, temperature, and pressure interpolators from inflow JSON.
 
-    filepath.write_text('\n'.join(lines))
-
-
-def _write_of_scalar_field(
-    filepath: Path,
-    field_name: str,
-    data: np.ndarray,
-    dimensions: str = "[0 2 -2 0 0 0 0]",
-) -> None:
-    """Write an OpenFOAM volScalarField with nonuniform internalField."""
-    n = len(data)
-    lines = [
-        '/*--------------------------------*- C++ -*----------------------------------*\\',
-        '  =========                 |',
-        '  \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox',
-        '   \\\\    /   O peration     | Version: 10',
-        '    \\\\  /    A nd           | Web:     www.openfoam.org',
-        '     \\\\/     M anipulation  |',
-        '\\*---------------------------------------------------------------------------*/',
-        'FoamFile',
-        '{',
-        '    version     2.0;',
-        '    format      ascii;',
-        '    class       volScalarField;',
-        '    location    "0";',
-        f'    object      {field_name};',
-        '}',
-        '// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //',
-        '',
-        f'dimensions      {dimensions};',
-        '',
-        f'internalField   nonuniform List<scalar>',
-        f'{n}',
-        '(',
-    ]
-    for i in range(n):
-        lines.append(f'{data[i]:.6e}')
-    lines.append(')')
-    lines.append(';')
-    lines.append('')
-
-    filepath.write_text('\n'.join(lines))
-
-
-# ---------------------------------------------------------------------------
-# ERA5 profile interpolation to cell centres
-# ---------------------------------------------------------------------------
-
-def interpolate_era5_to_cells(
-    centres: np.ndarray,
-    inflow: dict,
-) -> dict[str, np.ndarray]:
-    """Interpolate ERA5-derived profiles to cell centres.
-
-    Parameters
-    ----------
-    centres : (N, 3) cell centre coordinates [m].
-    inflow  : Inflow profile dict (from prepare_inflow.py output JSON).
-
-    Returns
-    -------
-    dict with keys 'U' (N,3), 'k' (N,), 'omega' (N,).
+    Returns (speed_interp, T_interp_or_None, p_interp_or_None, fd_x, fd_y, u_star, z0).
     """
     from scipy.interpolate import interp1d
 
-    n = len(centres)
-    z = centres[:, 2]  # height above datum [m]
-    z = np.maximum(z, 0.1)  # avoid log(0)
-
-    fd_x = float(inflow["flowDir_x"])
-    fd_y = float(inflow["flowDir_y"])
-    u_star = float(inflow["u_star"])
-    z0 = float(inflow.get("z0", inflow.get("z0_eff", 0.05)))
-
-    # Build speed profile interpolator from inflow JSON
     z_levels = np.array(inflow["z_levels"])
     u_profile = np.array(inflow["u_profile"])
 
-    # Interpolator (linear, with extrapolation for cells above/below)
     speed_interp = interp1d(
         z_levels, u_profile,
         kind="linear", bounds_error=False,
         fill_value=(u_profile[0], u_profile[-1]),
     )
 
-    # Interpolate speed at each cell height
-    speed = speed_interp(z)
-    speed = np.maximum(speed, 0.0)
+    T_interp = None
+    T_profile = inflow.get("T_profile")
+    if T_profile is not None and len(T_profile) == len(z_levels):
+        T_profile = np.array(T_profile)
+        T_interp = interp1d(
+            z_levels, T_profile,
+            kind="linear", bounds_error=False,
+            fill_value=(T_profile[0], T_profile[-1]),
+        )
 
-    # Velocity components
+    p_interp = None
+    p_profile = inflow.get("p_profile")
+    if p_profile is not None and len(p_profile) == len(z_levels):
+        p_profile = np.array(p_profile)
+        p_interp = interp1d(
+            z_levels, p_profile,
+            kind="linear", bounds_error=False,
+            fill_value=(p_profile[0], p_profile[-1]),
+        )
+
+    fd_x = float(inflow["flowDir_x"])
+    fd_y = float(inflow["flowDir_y"])
+    u_star = float(inflow["u_star"])
+    z0 = float(inflow.get("z0", inflow.get("z0_eff", 0.05)))
+
+    return speed_interp, T_interp, p_interp, fd_x, fd_y, u_star, z0
+
+
+def interpolate_profiles_at_z(
+    z: np.ndarray,
+    speed_interp,
+    T_interp,
+    p_interp,
+    fd_x: float,
+    fd_y: float,
+    u_star: float,
+    z0: float,
+    T_ref: float = 300.0,
+) -> dict[str, np.ndarray]:
+    """Compute U, k, epsilon, T, p_rgh at given heights z.
+
+    Parameters
+    ----------
+    z : (N,) heights above datum [m].
+
+    Returns
+    -------
+    dict with 'U' (N,3), 'k' (N,), 'epsilon' (N,), 'T' (N,), 'p_rgh' (N,).
+    """
+    n = len(z)
+    z = np.maximum(z, 0.1)
+
+    speed = np.maximum(speed_interp(z), 0.0)
+
     U = np.zeros((n, 3))
     U[:, 0] = speed * fd_x
     U[:, 1] = speed * fd_y
-    U[:, 2] = 0.0
 
-    # k(z) = u_star² / sqrt(Cmu) — uniform for Phase 1
     k = np.full(n, u_star**2 / CMU**0.5)
+    epsilon = CMU**0.75 * k**1.5 / (KAPPA * np.maximum(z, z0 * 2.0))
 
-    # omega(z) = u_star / (kappa * max(z, z0))
-    omega = u_star / (KAPPA * np.maximum(z, z0 * 2.0))
+    if T_interp is not None:
+        T = T_interp(z)
+    else:
+        T = np.full(n, T_ref)
 
-    logger.info(
-        "ERA5 init: %d cells, speed range [%.1f, %.1f] m/s, "
-        "k=%.4f m²/s², omega range [%.3f, %.3f] s⁻¹",
-        n, speed.min(), speed.max(), k[0], omega.min(), omega.max(),
+    # p_rgh = p(z) - rho0 * g * z   (kinematic: divide by rho0 → p/rho0 - g*z)
+    # For simpleFoam: p_rgh = p/rho (kinematic), dimensions [0 2 -2 0 0 0 0]
+    # For BBSF: p_rgh = p - rho0*g*z, dimensions [1 -1 -2 0 0 0 0]
+    # We use kinematic form (consistent with simpleFoam p dimensions)
+    if p_interp is not None:
+        p_abs = p_interp(z)  # Pa
+        p_rgh = p_abs / RHO0 - G_ACC * z  # kinematic p_rgh [m²/s²]
+    else:
+        p_rgh = np.zeros(n)
+
+    return {"U": U, "k": k, "epsilon": epsilon, "T": T, "p_rgh": p_rgh}
+
+
+# ---------------------------------------------------------------------------
+# Patch internalField (existing logic, improved regex)
+# ---------------------------------------------------------------------------
+
+def _patch_internal_field_vector(filepath: Path, data: np.ndarray) -> None:
+    """Replace internalField in an existing OF volVectorField with nonuniform data."""
+    text = filepath.read_text()
+    n = len(data)
+
+    values = '\n'.join(f'({data[i, 0]:.6f} {data[i, 1]:.6f} {data[i, 2]:.6f})'
+                       for i in range(n))
+    replacement = f'internalField   nonuniform List<vector>\n{n}\n(\n{values}\n)\n;'
+
+    text = re.sub(
+        r'internalField\s+(?:uniform\s+\([^)]+\)|nonuniform\s+List<vector>\s*\n\d+\s*\n\(.*?\)\n)\s*;',
+        replacement, text, count=1, flags=re.DOTALL,
     )
+    filepath.write_text(text)
+    logger.info("Patched internalField %s: %d cells", filepath.name, n)
 
-    return {"U": U, "k": k, "omega": omega}
+
+def _patch_internal_field_scalar(filepath: Path, data: np.ndarray) -> None:
+    """Replace internalField in an existing OF volScalarField with nonuniform data."""
+    text = filepath.read_text()
+    n = len(data)
+
+    values = '\n'.join(f'{data[i]:.6e}' for i in range(n))
+    replacement = f'internalField   nonuniform List<scalar>\n{n}\n(\n{values}\n)\n;'
+
+    text = re.sub(
+        r'internalField\s+(?:uniform\s+[\d.eE+\-]+|nonuniform\s+List<scalar>\s*\n\d+\s*\n\(.*?\)\n)\s*;',
+        replacement, text, count=1, flags=re.DOTALL,
+    )
+    filepath.write_text(text)
+    logger.info("Patched internalField %s: %d cells", filepath.name, n)
+
+
+# ---------------------------------------------------------------------------
+# Patch boundaryField (inletValue + value → nonuniform)
+# ---------------------------------------------------------------------------
+
+def _format_nonuniform_vector(data: np.ndarray) -> str:
+    """Format a nonuniform List<vector> string."""
+    n = len(data)
+    values = '\n'.join(f'({data[i, 0]:.6f} {data[i, 1]:.6f} {data[i, 2]:.6f})'
+                       for i in range(n))
+    return f'nonuniform List<vector>\n{n}\n(\n{values}\n)'
+
+
+def _format_nonuniform_scalar(data: np.ndarray) -> str:
+    """Format a nonuniform List<scalar> string."""
+    n = len(data)
+    values = '\n'.join(f'{data[i]:.6e}' for i in range(n))
+    return f'nonuniform List<scalar>\n{n}\n(\n{values}\n)'
+
+
+def _patch_boundary_values(
+    filepath: Path,
+    patch_data: dict[str, np.ndarray],
+    field_type: str,
+) -> None:
+    """Patch inletValue and value in boundaryField for inletOutlet patches.
+
+    Parameters
+    ----------
+    filepath : Path to the OF field file (e.g. 0/U).
+    patch_data : dict mapping patch_name → array of per-face values.
+    field_type : "vector" or "scalar".
+    """
+    text = filepath.read_text()
+    format_fn = _format_nonuniform_vector if field_type == "vector" else _format_nonuniform_scalar
+
+    patched_count = 0
+    for patch_name, data in patch_data.items():
+        # Find the patch block in boundaryField
+        # Pattern: patch_name { ... type inletOutlet; ... inletValue uniform ...; ... value uniform ...; }
+        patch_pattern = re.compile(
+            rf'(\b{re.escape(patch_name)}\s*\{{)(.*?)(\}})',
+            re.DOTALL,
+        )
+        match = patch_pattern.search(text)
+        if not match:
+            logger.debug("Patch %s not found in %s — skipping", patch_name, filepath.name)
+            continue
+
+        block = match.group(2)
+
+        # Check BC type — only patch inletOutlet / outletInlet
+        type_match = re.search(r'type\s+(\w+)', block)
+        if not type_match or type_match.group(1) not in PATCHABLE_BC_TYPES:
+            logger.debug("Patch %s has type %s — skipping",
+                        patch_name, type_match.group(1) if type_match else "unknown")
+            continue
+
+        bc_type = type_match.group(1)
+        nonuniform_str = format_fn(data)
+
+        # Determine the keyword: inletValue for inletOutlet, outletValue for outletInlet
+        val_keyword = "outletValue" if bc_type == "outletInlet" else "inletValue"
+
+        # Patch inletValue/outletValue + value
+        if field_type == "vector":
+            block = re.sub(
+                rf'{val_keyword}\s+uniform\s+\([^)]+\)',
+                f'{val_keyword}      {nonuniform_str}',
+                block, count=1,
+            )
+            block = re.sub(
+                r'(\n\s+value)\s+uniform\s+\([^)]+\)',
+                rf'\1           {nonuniform_str}',
+                block, count=1,
+            )
+        else:
+            block = re.sub(
+                rf'{val_keyword}\s+uniform\s+[\d.eE+\-]+',
+                f'{val_keyword}      {nonuniform_str}',
+                block, count=1,
+            )
+            block = re.sub(
+                r'(\n\s+value)\s+uniform\s+[\d.eE+\-]+',
+                rf'\1           {nonuniform_str}',
+                block, count=1,
+            )
+
+        text = text[:match.start(2)] + block + text[match.end(2):]
+        patched_count += 1
+
+    filepath.write_text(text)
+    logger.info("Patched boundaryField %s: %d patches", filepath.name, patched_count)
 
 
 # ---------------------------------------------------------------------------
@@ -274,8 +462,9 @@ def init_from_era5(
 ) -> None:
     """Initialise OpenFOAM fields from ERA5 interpolation.
 
-    Overwrites 0/U, 0/k, 0/omega internalField with nonuniform data.
-    Preserves boundaryField from the Jinja2-rendered templates.
+    Overwrites 0/U, 0/k, 0/epsilon, 0/T:
+      - internalField → nonuniform (per-cell interpolation)
+      - boundaryField inletValue/value → nonuniform (per-face interpolation)
 
     Parameters
     ----------
@@ -287,60 +476,68 @@ def init_from_era5(
     with open(inflow_json) as f:
         inflow = json.load(f)
 
-    # Read cell centres
+    T_ref = float(inflow.get("T_ref", 300.0))
+
+    # Build interpolators once
+    speed_interp, T_interp, p_interp, fd_x, fd_y, u_star, z0 = _build_interpolators(inflow)
+
+    # ---- Internal field (cell centres) ----
     logger.info("Reading cell centres from %s", case_dir)
     centres = read_cell_centres(case_dir)
     logger.info("Found %d cell centres", len(centres))
 
-    # Interpolate ERA5 to cells
-    fields = interpolate_era5_to_cells(centres, inflow)
+    cell_fields = interpolate_profiles_at_z(
+        centres[:, 2], speed_interp, T_interp, p_interp,
+        fd_x, fd_y, u_star, z0, T_ref,
+    )
 
-    # Read existing template-rendered files to preserve boundaryField
     u_path = case_dir / "0" / "U"
     k_path = case_dir / "0" / "k"
-    omega_path = case_dir / "0" / "omega"
+    epsilon_path = case_dir / "0" / "epsilon"
+    t_path = case_dir / "0" / "T"
+    p_path = case_dir / "0" / "p_rgh"
 
-    # Rewrite with nonuniform internalField, preserving boundaryField
-    _patch_internal_field_vector(u_path, fields["U"])
-    _patch_internal_field_scalar(k_path, fields["k"])
-    _patch_internal_field_scalar(omega_path, fields["omega"])
+    _patch_internal_field_vector(u_path, cell_fields["U"])
+    _patch_internal_field_scalar(k_path, cell_fields["k"])
+    _patch_internal_field_scalar(epsilon_path, cell_fields["epsilon"])
+    if t_path.exists():
+        _patch_internal_field_scalar(t_path, cell_fields["T"])
+    if p_path.exists():
+        _patch_internal_field_scalar(p_path, cell_fields["p_rgh"])
 
-    logger.info("ERA5 initialisation complete for %s", case_dir)
+    # ---- Boundary field (face centres) ----
+    logger.info("Reading boundary face centres from %s", case_dir)
+    boundary_faces = read_boundary_face_centres(case_dir)
 
+    # Compute profiles at each patch's face centres
+    u_patch_data = {}
+    k_patch_data = {}
+    eps_patch_data = {}
+    t_patch_data = {}
+    p_patch_data = {}
 
-def _patch_internal_field_vector(filepath: Path, data: np.ndarray) -> None:
-    """Replace internalField in an existing OF volVectorField with nonuniform data."""
-    text = filepath.read_text()
-    n = len(data)
+    for patch_name, face_centres in boundary_faces.items():
+        if len(face_centres) == 0:
+            continue
+        pf = interpolate_profiles_at_z(
+            face_centres[:, 2], speed_interp, T_interp, p_interp,
+            fd_x, fd_y, u_star, z0, T_ref,
+        )
+        u_patch_data[patch_name] = pf["U"]
+        k_patch_data[patch_name] = pf["k"]
+        eps_patch_data[patch_name] = pf["epsilon"]
+        t_patch_data[patch_name] = pf["T"]
+        p_patch_data[patch_name] = pf["p_rgh"]
 
-    # Build replacement
-    values = '\n'.join(f'({data[i, 0]:.6f} {data[i, 1]:.6f} {data[i, 2]:.6f})'
-                       for i in range(n))
-    replacement = f'internalField   nonuniform List<vector>\n{n}\n(\n{values}\n)\n;'
+    _patch_boundary_values(u_path, u_patch_data, "vector")
+    _patch_boundary_values(k_path, k_patch_data, "scalar")
+    _patch_boundary_values(epsilon_path, eps_patch_data, "scalar")
+    if t_path.exists():
+        _patch_boundary_values(t_path, t_patch_data, "scalar")
+    if p_path.exists():
+        _patch_boundary_values(p_path, p_patch_data, "scalar")
 
-    # Replace the internalField line (handles both uniform and nonuniform)
-    text = re.sub(
-        r'internalField\s+uniform\s+\([^)]+\)\s*;',
-        replacement, text, count=1,
-    )
-    filepath.write_text(text)
-    logger.info("Patched %s: %d cells (vector)", filepath.name, n)
-
-
-def _patch_internal_field_scalar(filepath: Path, data: np.ndarray) -> None:
-    """Replace internalField in an existing OF volScalarField with nonuniform data."""
-    text = filepath.read_text()
-    n = len(data)
-
-    values = '\n'.join(f'{data[i]:.6e}' for i in range(n))
-    replacement = f'internalField   nonuniform List<scalar>\n{n}\n(\n{values}\n)\n;'
-
-    text = re.sub(
-        r'internalField\s+uniform\s+[\d.eE+\-]+\s*;',
-        replacement, text, count=1,
-    )
-    filepath.write_text(text)
-    logger.info("Patched %s: %d cells (scalar)", filepath.name, n)
+    logger.info("ERA5 initialisation complete for %s (internal + boundary)", case_dir)
 
 
 # ---------------------------------------------------------------------------

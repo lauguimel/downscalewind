@@ -52,9 +52,32 @@ if [ "$MESH_ONLY" = true ]; then
     exit 0
 fi
 
-# ---- Divergence-free velocity initialisation ----
-runApplication potentialFoam -writePhi
-check_log log.potentialFoam
+# ---- Field initialisation from ERA5/parametric profiles ----
+# Patches both internalField (cell centres) and boundaryField (face centres)
+# with height-varying U(z), k, epsilon(z), T(z) from the inflow profile.
+# Requires Python (numpy + scipy) — available via module load on HPC.
+
+INFLOW_JSON="{{ inflow_json_path | default('inflow.json') }}"
+
+if [ -f "$INFLOW_JSON" ] && command -v python3 > /dev/null 2>&1; then
+    echo "Initialising fields from $INFLOW_JSON (init_from_era5.py)"
+    # Write cell centres (needed by init_from_era5.py)
+    postProcess -func writeCellCentres -time 0 > log.writeCellCentres 2>&1 || true
+    python3 init_from_era5.py --case-dir . --inflow "$INFLOW_JSON" \
+        > log.init_from_era5 2>&1
+    if [ $? -ne 0 ]; then
+        echo "WARNING: init_from_era5.py failed — falling back to potentialFoam" >&2
+        cat log.init_from_era5 >&2
+        runApplication potentialFoam -writePhi
+        check_log log.potentialFoam
+    else
+        echo "Fields initialised: U(z), k, epsilon(z), T(z)"
+    fi
+else
+    echo "WARNING: Python or inflow JSON not found — using potentialFoam" >&2
+    runApplication potentialFoam -writePhi
+    check_log log.potentialFoam
+fi
 
 # ---- Main solve ----
 if [ "$NPROCS" -gt 1 ]; then
@@ -69,8 +92,9 @@ else
 fi
 
 # ---- Post-processing: sample profiles at tower locations ----
+# Non-fatal: postProcess may fail on some OF versions without affecting results
 if [ -f system/sampleDict ]; then
-    runApplication postProcess -func sampleDict -latestTime
+    postProcess -func sampleDict -latestTime > log.postProcess 2>&1 || true
 fi
 
 echo "========================================"

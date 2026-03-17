@@ -11,8 +11,11 @@
  * BC strategy (Robin / inletOutlet on all lateral faces):
  *   All lateral:  inletOutlet — Dirichlet (inflow) or Neumann (outflow)
  *                 determined per-face by sign of flux · face normal
- *   Top:          slip (Venkatraman et al. WES 2023)
+ *   Top:          inletOutlet (allows gravity wave propagation)
  *   Terrain:      noSlip
+ *
+ * After mesh generation, init_from_era5.py patches inletValue/value to
+ * nonuniform height-varying profiles. The uniform values below are placeholders.
  *
  * Reference: Venkatraman et al. (WES 2023) — cylindrical domain with Robin BC
  */
@@ -30,7 +33,7 @@ FoamFile
 // Wind direction: {{ inflow.wind_dir }}° FROM North
 // Flow direction (CFD): ({{ "%.4f" | format(fd_x) }}, {{ "%.4f" | format(fd_y) }}, 0)
 // u_hub = {{ inflow.u_hub }} m/s
-// Robin BC: inletOutlet on all lateral faces (auto inlet/outlet per cell face)
+// NOTE: inletValue/value are placeholders — patched to nonuniform by init_from_era5.py
 
 dimensions      [0 1 -1 0 0 0 0];
 
@@ -49,7 +52,9 @@ boundaryField
 {% endfor %}
     top
     {
-        type            slip;
+        type            inletOutlet;
+        inletValue      uniform ( {{ "%.6f" | format(inflow.u_hub * fd_x) }} {{ "%.6f" | format(inflow.u_hub * fd_y) }} 0 );
+        value           uniform ( {{ "%.6f" | format(inflow.u_hub * fd_x) }} {{ "%.6f" | format(inflow.u_hub * fd_y) }} 0 );
     }
 
     terrain

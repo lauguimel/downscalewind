@@ -1,5 +1,5 @@
 """
-prepare_inflow.py — ERA5 → 3-layer ABL inlet profile for buoyantSimpleFoam
+prepare_inflow.py — ERA5 → 3-layer ABL inlet profile for simpleFoam
 
 Reconstructs a physically consistent vertical wind profile from ERA5 reanalysis
 data to use as the inlet boundary condition for the CFD simulation.
@@ -12,7 +12,7 @@ Three-layer reconstruction
   > 2 km    : ERA5 values directly
 
 The resulting profile is written as a JSON file consumed by the Jinja2
-templates (U.j2, k.j2, omega.j2) to set `atmBoundaryLayerInletVelocity`
+templates (U.j2, k.j2, epsilon.j2, T.j2) to set `inletOutlet` boundary conditions
 parameters.
 
 Usage (CLI)
@@ -531,6 +531,14 @@ def reconstruct_inlet_profile(
     else:
         T_out = np.full_like(z_output, T_ref)
 
+    # Pressure profile (cubic spline through ERA5 levels → Pa)
+    p_hPa = era5_profile["pressure_hPa"]
+    if len(z_era5) >= 2:
+        cs_p = CubicSpline(z_era5, p_hPa * 100.0, extrapolate=True)  # hPa → Pa
+        p_out = cs_p(z_output)
+    else:
+        p_out = np.full_like(z_output, P0)
+
     # Combine all layers
     speed_out = np.concatenate([spd1, spd2, spd3])
     u_out     = speed_out * flow_dir_x
@@ -549,6 +557,7 @@ def reconstruct_inlet_profile(
         "v_ms":       v_out.tolist(),
         "speed_ms":   speed_out.tolist(),
         "T_K":        T_out.tolist(),
+        "p_Pa":       p_out.tolist(),
         "u_hub":      u_hub,
         "u_star":     float(u_star),
         "z0_eff":     float(z0_eff),
@@ -673,6 +682,7 @@ def prepare_inflow(
     result["z_levels"] = result.pop("z_m")
     result["u_profile"] = result.pop("speed_ms")
     result["T_profile"] = result.pop("T_K")
+    result["p_profile"] = result.pop("p_Pa")
 
     # Fields expected by Jinja2 templates (aliased / derived)
     result["z0"]       = float(z0_eff)                         # alias of z0_eff
@@ -709,7 +719,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     parser = argparse.ArgumentParser(
-        description="Reconstruct ERA5 → ABL inlet profile for buoyantSimpleFoam"
+        description="Reconstruct ERA5 → ABL inlet profile for simpleFoam"
     )
     parser.add_argument("--era5",    required=True, help="ERA5 zarr store")
     parser.add_argument("--z0map",   default=None,  help="z0 raster (GeoTIFF)")

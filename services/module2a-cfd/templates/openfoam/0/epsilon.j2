@@ -8,13 +8,16 @@
 /*
  * 0/epsilon.j2 — Turbulent dissipation rate [m²/s³]
  *
- * epsilon_init = Cmu^0.75 * k^1.5 / (kappa * z_ref)
- *   ABL equilibrium at reference height (Richards & Hoxey 1993)
+ * epsilon(z) = Cmu^0.75 * k^1.5 / (kappa * max(z, 2*z0))
+ *   ABL equilibrium profile (Richards & Hoxey 1993)
  *
- * BC strategy (Robin / inletOutlet on all lateral faces):
- *   All lateral:  inletOutlet — Dirichlet (inflow) or Neumann (outflow)
- *   Top:          zeroGradient
- *   Terrain:      epsilonWallFunction
+ * BC strategy:
+ *   Lateral:  inletOutlet (inlet: epsilon(z) profile, outlet: zeroGradient)
+ *   Top:      zeroGradient
+ *   Terrain:  epsilonWallFunction
+ *
+ * After mesh generation, init_from_era5.py patches inletValue/value to
+ * nonuniform height-varying epsilon(z) profiles.
  */
 {%- set Cmu = 0.09 %}
 {%- set k_init = inflow.u_star ** 2 / Cmu ** 0.5 %}
@@ -29,7 +32,6 @@ FoamFile
 }
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 // epsilon_init = Cmu^0.75 * k^1.5 / (kappa * z_ref)
-//             = {{ "%.4e" | format(Cmu ** 0.75) }} * {{ "%.4f" | format(k_init) }}^1.5 / ({{ inflow.kappa }} * {{ inflow.z_ref }})
 //             = {{ "%.6e" | format(epsilon_init) }} m²/s³
 
 dimensions      [0 2 -3 0 0 0 0];

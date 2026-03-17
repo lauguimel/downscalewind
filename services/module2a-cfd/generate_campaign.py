@@ -186,6 +186,13 @@ def build_parametric_inflow(
     gamma_d = 0.0098  # K/m
     T_profile = T_ref - gamma_d * z_levels + T_grad * z_levels
 
+    # Pressure profile (ISA hydrostatic)
+    P0 = 101325.0  # Pa
+    RD = 287.05     # J/(kg·K)
+    g  = 9.81       # m/s²
+    T_mean = np.maximum(T_profile, 200.0)  # avoid division issues
+    p_profile = P0 * np.exp(-g * z_levels / (RD * T_mean))
+
     return {
         "u_hub": float(speed_ms),
         "u_star": float(u_star),
@@ -203,6 +210,7 @@ def build_parametric_inflow(
         "z_levels": z_levels.tolist(),
         "u_profile": u_profile.tolist(),
         "T_profile": T_profile.tolist(),
+        "p_profile": p_profile.tolist(),
     }
 
 
@@ -288,12 +296,10 @@ def expand_cases(
         itertools.product(solvers, directions, speeds, stabilities)
     ):
         case_id = f"{prefix}_{i:04d}"
-        # In OF9, buoyantBoussinesqSimpleFoam is merged into buoyantSimpleFoam
-        # with Boussinesq equation of state. Map solver name accordingly.
+        # ESI v2412: buoyantBoussinesqSimpleFoam is a separate solver
         actual_solver = solver
         boussinesq = physics.get("boussinesq", False)
         if solver == "buoyantBoussinesqSimpleFoam":
-            actual_solver = "buoyantSimpleFoam"
             boussinesq = True
         cases.append(CampaignCase(
             case_id=case_id,
@@ -389,6 +395,13 @@ def generate_case_dir(
         canopy_enabled=case.canopy,
         boussinesq=case.boussinesq,
     )
+
+    # Copy inflow JSON + init_from_era5.py into case dir (for Allrun on HPC)
+    dst_inflow = case_dir / "inflow.json"
+    shutil.copy2(inflow_json, dst_inflow)
+    init_script = Path(__file__).parent / "init_from_era5.py"
+    if init_script.exists():
+        shutil.copy2(init_script, case_dir / "init_from_era5.py")
 
     # Patch fvSchemes if "accurate" variant requested
     if case.fvschemes_variant == "accurate":

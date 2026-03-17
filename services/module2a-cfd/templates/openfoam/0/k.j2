@@ -8,12 +8,15 @@
 /*
  * 0/k.j2 — Turbulent kinetic energy [m²/s²]
  *
- * k_init = u_star² / sqrt(Cmu) — ABL equilibrium value
+ * k = u_star² / sqrt(Cmu) — ABL equilibrium value (constant in neutral SL)
  *
- * BC strategy (Robin / inletOutlet on all lateral faces):
- *   All lateral:  inletOutlet — Dirichlet (inflow) or Neumann (outflow)
- *   Top:          zeroGradient
- *   Terrain:      kqRWallFunction
+ * BC strategy:
+ *   Lateral:  inletOutlet (inlet: k profile, outlet: zeroGradient)
+ *   Top:      zeroGradient
+ *   Terrain:  kqRWallFunction
+ *
+ * After mesh generation, init_from_era5.py patches inletValue/value to
+ * nonuniform values (currently constant k, but ready for height-varying).
  */
 {%- set Cmu = 0.09 %}
 {%- set k_init = inflow.u_star ** 2 / Cmu ** 0.5 %}
