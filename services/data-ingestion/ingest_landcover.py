@@ -1,31 +1,54 @@
 """
-ingest_landcover.py — Carte de rugosité z₀ depuis Copernicus Land Cover (CGLS-LC100).
+ingest_landcover.py — Land cover → roughness z₀, displacement height d, LAD
 
-Télécharge CGLS-LC100 v3 (100m, 2018) via CDS API et produit une carte de
-rugosité dynamique z₀ [m] sur le domaine du site.
+Data sources (10 m resolution, free):
+  1. ESA WorldCover 2021 — land cover classification (Sentinel-1 + Sentinel-2)
+     https://esa-worldcover.org/en/data-access
+  2. ETH Global Canopy Height 2020 — tree height from Sentinel-2 + GEDI LiDAR
+     https://langnico.github.io/globalcanopyheight/
 
-Usage :
+Output: multi-band GeoTIFF with 3 bands:
+  Band 1: z₀ [m]  — aerodynamic roughness length
+  Band 2: d  [m]  — displacement height
+  Band 3: LAD [1/m] — leaf area density (column-average)
+
+z₀ lookup table from Global Wind Atlas v4 (DTU):
+  Tree cover / Shrubland: z₀ = 0.1 × h_canopy, d = 2/3 × h_canopy
+  Other classes: fixed z₀ from GWA4 standard table
+
+Usage:
+    # Auto-download from Google Earth Engine:
+    python ingest_landcover.py --site perdigao --download \\
+        --output ../../data/raw/landcover_perdigao.tif
+
+    # With pre-downloaded data:
     python ingest_landcover.py --site perdigao \\
-                               --output ../../data/raw/z0_perdigao.tif
+        --worldcover /path/to/ESA_WorldCover_10m.tif \\
+        --canopy-height /path/to/ETH_GlobalCanopyHeight_10m.tif \\
+        --output ../../data/raw/landcover_perdigao.tif
 
-Fallback :
-    Si CDS API non disponible, utilise une carte z₀ uniforme (0.05 m)
-    avec un avertissement. Le pipeline CFD reste fonctionnel mais
-    les résultats seront moins précis sur les zones forestières.
+    # Fallback (no data available):
+    python ingest_landcover.py --site perdigao \\
+        --output ../../data/raw/landcover_perdigao.tif
 
-Référence table z₀ : Wieringa (1992) + Davenport et al. (2000)
+References:
+    Zanaga et al. (2022) ESA WorldCover 10m 2021 v200
+    Lang et al. (2023) A high-resolution canopy height model of the Earth. Nature E&E.
+    Global Wind Atlas v4 (DTU) — roughness length conversion table
 """
 
 from __future__ import annotations
 
+import io
 import sys
-import tempfile
+import zipfile
 from pathlib import Path
 
 import click
 import numpy as np
 import rasterio
 from rasterio.transform import from_bounds
+from rasterio.warp import reproject, Resampling
 import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -34,272 +57,324 @@ from shared.data_io import sha256_file
 
 log = get_logger("ingest_landcover")
 
-# ── Table de correspondance CGLS-LC100 → z₀ ──────────────────────────────────
-# Source : Wieringa (1992), Davenport et al. (2000), Stull (1988)
-# Classes CGLS-LC100 v3 (Copernicus Global Land Service)
+# ── ESA WorldCover 2021 class → z₀ table (GWA4 / DTU standard) ──────────────
+# Classes 10 (tree cover) and 20 (shrubland) use canopy height: z₀ = 0.1 × h
+# Other classes: fixed z₀ from GWA4
 
-LC100_Z0_TABLE: dict[int, float] = {
-    0:   0.001,   # pas de données / mer
-    20:  1.00,    # forêt à feuilles larges toujours verte
-    30:  1.00,    # forêt à feuilles larges caduque
-    40:  0.80,    # forêt de conifères toujours verte
-    50:  0.80,    # forêt de conifères caduque
-    60:  0.80,    # forêt de conifères sempervirente
-    70:  0.80,    # forêt mixte
-    80:  0.80,    # forêt mixte - autre
-    90:  0.10,    # arbustes
-    100: 0.10,    # arbustes tropicaux
-    111: 0.10,    # herbes fermées
-    112: 0.05,    # herbes ouvertes
-    113: 0.05,    # prairies
-    114: 0.05,    # prairies + cultures mixtes
-    115: 0.05,    # cultures + prairies mixtes
-    116: 0.03,    # cultures herbacées
-    121: 0.30,    # zones urbaines denses
-    122: 0.50,    # zones urbaines très denses
-    123: 0.10,    # zones périurbaines
-    124: 0.05,    # zones périurbaines ouvertes
-    200: 0.0002,  # eau douce (lacs, rivières)
-    201: 0.0002,  # eau salée (mer)
-    202: 0.001,   # zones inondables saisonnières
-    # Classes simplifiées (entiers ronds = classes CGLS-LC100)
-    10:  1.00,    # forêt dense (classe générique 10)
-    255: 0.05,    # données manquantes → z₀ moyen cultures
+WORLDCOVER_Z0: dict[int, float] = {
+    10:  None,     # Tree cover      — z₀ from canopy height
+    20:  None,     # Shrubland        — z₀ from canopy height
+    30:  0.03,     # Grassland
+    40:  0.10,     # Cropland
+    50:  0.50,     # Built-up
+    60:  0.005,    # Bare / sparse vegetation
+    70:  0.001,    # Snow and Ice
+    80:  0.0002,   # Permanent water bodies
+    90:  0.03,     # Herbaceous wetland
+    95:  None,     # Mangroves         — z₀ from canopy height
+    100: 0.01,     # Moss and lichen
 }
 
-# Classes CGLS-LC100 v3 entiers ronds (mappings simplifiés)
-# Note : les codes réels peuvent varier selon la version du produit
-LC100_Z0_SIMPLE: dict[int, float] = {
-    10: 1.00,    # forêt dense
-    20: 0.10,    # arbustes
-    30: 0.03,    # herbacé / prairie
-    40: 0.05,    # cultures
-    50: 0.50,    # urbain
-    60: 0.01,    # sol nu / rochers
-    70: 0.001,   # neige / glace
-    80: 0.0002,  # eau
-    90: 0.03,    # zones humides
-    95: 0.10,    # mangroves
-    100: 0.03,   # mousse / lichens
-    # Valeur par défaut pour classes inconnues
-    255: 0.05,
+# Default z₀ for unknown classes
+Z0_DEFAULT = 0.05
+
+# Typical LAI values by land cover (used to estimate LAD = LAI / h_canopy)
+# Source: various remote sensing reviews for Mediterranean/Iberian vegetation
+WORLDCOVER_LAI: dict[int, float] = {
+    10:  2.5,      # Tree cover (eucalyptus plantation at Perdigão)
+    20:  1.5,      # Shrubland
+    30:  1.0,      # Grassland
+    40:  2.0,      # Cropland
+    95:  3.0,      # Mangroves
 }
 
-# z₀ par défaut si classe non trouvée dans la table
-Z0_DEFAULT = 0.05  # cultures / terrain ouvert
 
+def compute_z0_d_lad(
+    lc: np.ndarray,
+    canopy_h: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Convert land cover + canopy height to z₀, d, and LAD arrays.
 
-# ── Fonctions principales ─────────────────────────────────────────────────────
+    Parameters
+    ----------
+    lc : 2-D array of ESA WorldCover class codes (uint8).
+    canopy_h : 2-D array of canopy height [m] (float32), or None.
 
-def _map_lc_to_z0(lc_array: np.ndarray) -> np.ndarray:
+    Returns
+    -------
+    z0  : roughness length [m]
+    d   : displacement height [m]
+    lad : leaf area density [1/m] (column-average)
     """
-    Convertit un array de classes LC100 en un array de z₀ [m].
+    z0  = np.full(lc.shape, Z0_DEFAULT, dtype=np.float32)
+    d   = np.zeros(lc.shape, dtype=np.float32)
+    lad = np.zeros(lc.shape, dtype=np.float32)
 
-    Args:
-        lc_array: Array de classes entières (CGLS-LC100)
+    # Fixed z₀ classes
+    for cls, z0_val in WORLDCOVER_Z0.items():
+        if z0_val is not None:
+            mask = lc == cls
+            z0[mask] = z0_val
 
-    Returns:
-        Array de rugosité z₀ [m], même shape que lc_array
+    # Canopy-height-dependent classes (10, 20, 95)
+    if canopy_h is not None:
+        h = np.maximum(canopy_h, 0.0)  # clip negatives
+        for cls in (10, 20, 95):
+            mask = lc == cls
+            if not np.any(mask):
+                continue
+            h_cls = h[mask]
+            # z₀ = 0.1 × h (ORA model, Wieringa 1992)
+            z0[mask] = np.maximum(0.1 * h_cls, 0.01)
+            # d = 2/3 × h (displacement height)
+            d[mask] = (2.0 / 3.0) * h_cls
+            # LAD = LAI / h  (column-average leaf area density)
+            lai = WORLDCOVER_LAI.get(cls, 2.0)
+            lad[mask] = np.where(h_cls > 0.5, lai / h_cls, 0.0)
+    else:
+        # No canopy height: use fixed z₀ for tree/shrub classes
+        log.warning("No canopy height data — using fixed z₀ for tree/shrub classes")
+        for cls in (10, 20, 95):
+            mask = lc == cls
+            z0[mask] = 1.0   # conservative estimate
+            d[mask]  = 6.0   # ~2/3 × 9 m (typical Perdigão eucalyptus)
+            lad[mask] = 0.3  # LAI~2.5 / 9m
+
+    return z0, d, lad
+
+
+# ── Google Earth Engine download ──────────────────────────────────────────────
+
+def download_from_gee(
+    bbox: tuple[float, float, float, float],
+    output_dir: Path,
+    site: str,
+    scale: int = 10,
+) -> tuple[Path, Path]:
+    """Download WorldCover + Canopy Height from GEE for a bounding box.
+
+    Parameters
+    ----------
+    bbox : (west, south, east, north) in degrees.
+    output_dir : Directory for downloaded GeoTIFFs.
+    site : Site name (used in filenames).
+    scale : Download resolution in metres (default 10).
+
+    Returns
+    -------
+    (worldcover_path, canopy_height_path) : Paths to downloaded GeoTIFFs.
     """
-    z0 = np.full(lc_array.shape, Z0_DEFAULT, dtype=np.float32)
-    for lc_class, z0_val in LC100_Z0_SIMPLE.items():
-        z0[lc_array == lc_class] = z0_val
-    return z0
+    import os
+    import ee
+    import requests
+
+    project = os.environ.get("EARTHENGINE_PROJECT", "ee-guillaumemaitrejean")
+    ee.Initialize(project=project)
+    log.info("GEE initialized", extra={"project": ee.data.getAssetRoots()})
+
+    west, south, east, north = bbox
+    region = ee.Geometry.Rectangle([west, south, east, north])
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    wc_path = output_dir / f"worldcover_{site}.tif"
+    ch_path = output_dir / f"canopy_height_{site}.tif"
+
+    # Estimate download size and auto-coarsen if needed (GEE limit: ~50 MB)
+    # GEE uses ~2 bytes/pixel (int16 or overhead), so budget 24M pixels max
+    deg_span_x = east - west
+    deg_span_y = north - south
+    n_pixels = (deg_span_x * 111_000 / scale) * (deg_span_y * 111_000 / scale)
+    max_pixels = 24_000_000  # ~48 MB at 2 bytes/pixel
+    effective_scale = scale
+    if n_pixels > max_pixels:
+        effective_scale = int(scale * (n_pixels / max_pixels) ** 0.5) + 1
+        log.info("Auto-coarsening download", extra={
+            "original_scale": scale, "effective_scale": effective_scale,
+            "reason": f"{n_pixels/1e6:.1f}M pixels > {max_pixels/1e6:.0f}M limit",
+        })
+
+    # ── ESA WorldCover 2021 ───────────────────────────────────────────────
+    if not wc_path.exists():
+        log.info("Downloading ESA WorldCover 2021 from GEE",
+                 extra={"scale_m": effective_scale})
+        wc = ee.ImageCollection("ESA/WorldCover/v200").first().clip(region)
+        url = wc.getDownloadURL({
+            "scale": effective_scale,
+            "crs": "EPSG:4326",
+            "region": region,
+            "format": "GEO_TIFF",
+        })
+        _download_geotiff(url, wc_path)
+        log.info("WorldCover downloaded", extra={"path": str(wc_path)})
+    else:
+        log.info("WorldCover already exists, skipping", extra={"path": str(wc_path)})
+
+    # ── ETH Global Canopy Height 2020 ─────────────────────────────────────
+    if not ch_path.exists():
+        log.info("Downloading ETH Canopy Height 2020 from GEE",
+                 extra={"scale_m": effective_scale})
+        ch = ee.Image("users/nlang/ETH_GlobalCanopyHeight_2020_10m_v1").clip(region)
+        url = ch.getDownloadURL({
+            "scale": effective_scale,
+            "crs": "EPSG:4326",
+            "region": region,
+            "format": "GEO_TIFF",
+        })
+        _download_geotiff(url, ch_path)
+        log.info("Canopy height downloaded", extra={"path": str(ch_path)})
+    else:
+        log.info("Canopy height already exists, skipping", extra={"path": str(ch_path)})
+
+    return wc_path, ch_path
 
 
-def _create_uniform_z0(
-    north: float, west: float, south: float, east: float,
-    z0_value: float = 0.05,
-    resolution_deg: float = 0.001,
-) -> tuple[np.ndarray, rasterio.transform.Affine]:
+def _download_geotiff(url: str, output_path: Path) -> None:
+    """Download a GeoTIFF from a GEE download URL (handles zip or raw tiff)."""
+    import requests
+
+    resp = requests.get(url, timeout=300)
+    resp.raise_for_status()
+
+    content_type = resp.headers.get("Content-Type", "")
+    if "zip" in content_type or output_path.suffix != ".zip" and resp.content[:2] == b"PK":
+        # GEE returns a zip file containing the GeoTIFF
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            tif_names = [n for n in zf.namelist() if n.endswith(".tif")]
+            if not tif_names:
+                raise ValueError(f"No .tif found in zip from {url}")
+            with zf.open(tif_names[0]) as src, open(output_path, "wb") as dst:
+                dst.write(src.read())
+    else:
+        output_path.write_bytes(resp.content)
+
+    size_mb = output_path.stat().st_size / 1024 / 1024
+    log.info("Downloaded", extra={"path": str(output_path), "size_mb": f"{size_mb:.1f}"})
+
+
+def _clip_raster(
+    src_path: Path,
+    bbox: tuple[float, float, float, float],
+    band: int = 1,
+) -> tuple[np.ndarray, rasterio.transform.Affine, rasterio.crs.CRS]:
+    """Read and clip a raster to a bounding box (west, south, east, north).
+
+    Returns (data, transform, crs).
     """
-    Crée une carte z₀ uniforme pour le domaine (fallback si LC non disponible).
+    west, south, east, north = bbox
+    with rasterio.open(str(src_path)) as src:
+        from rasterio.windows import from_bounds as win_from_bounds
+        window = win_from_bounds(west, south, east, north, src.transform)
+        data = src.read(band, window=window)
+        transform = src.window_transform(window)
+        return data, transform, src.crs
 
-    Args:
-        north, west, south, east: Limites du domaine (°)
-        z0_value: Valeur de z₀ uniforme (m)
-        resolution_deg: Résolution en degrés (~100m en latitude)
-
-    Returns:
-        (z0_array, transform) pour export GeoTIFF
-    """
-    nrows = max(1, int((north - south) / resolution_deg))
-    ncols = max(1, int((east  - west)  / resolution_deg))
-    z0 = np.full((nrows, ncols), z0_value, dtype=np.float32)
-    transform = from_bounds(west, south, east, north, ncols, nrows)
-    return z0, transform
-
-
-def _download_cgls_lc100(
-    north: float, west: float, south: float, east: float,
-    year: int = 2018,
-) -> np.ndarray | None:
-    """
-    Télécharge CGLS-LC100 depuis CDS API (Copernicus Land Service).
-
-    Requiert ~/.cdsapirc configuré.
-
-    Returns:
-        Array numpy de classes LC100, ou None si CDS non disponible
-    """
-    try:
-        import cdsapi
-    except ImportError:
-        log.warning("cdsapi non disponible — fallback z₀ uniforme")
-        return None
-
-    try:
-        client = cdsapi.Client(quiet=True)
-    except Exception as e:
-        log.warning("CDS non configuré — fallback z₀ uniforme", extra={"error": str(e)})
-        return None
-
-    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-
-    try:
-        client.retrieve(
-            "satellite-land-cover",
-            {
-                "variable": "all",
-                "format": "zip",
-                "year": str(year),
-                "version": "v3.0.1",
-            },
-            str(tmp_path),
-        )
-        log.info("CGLS-LC100 téléchargé", extra={"year": year})
-        # TODO : parser le ZIP → extraire NetCDF → lire avec rasterio
-        # Pour l'instant retourner None (à compléter avec parsing NetCDF)
-        log.warning("Parsing CGLS-LC100 non encore implémenté — fallback z₀ uniforme")
-        return None
-    except Exception as e:
-        log.warning("Téléchargement CGLS-LC100 échoué — fallback z₀ uniforme",
-                    extra={"error": str(e)})
-        return None
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink()
-
-
-# ── Commande principale ───────────────────────────────────────────────────────
 
 @click.command()
-@click.option("--site",       required=True, help="Identifiant du site (ex: perdigao)")
-@click.option("--output",     required=True, help="GeoTIFF z₀ de sortie")
+@click.option("--site", required=True, help="Site identifier (e.g. perdigao)")
+@click.option("--output", required=True, help="Output GeoTIFF path (3 bands: z0, d, LAD)")
 @click.option("--config-dir",
               default=str(Path(__file__).resolve().parents[2] / "configs" / "sites"),
-              help="Répertoire des configurations de sites")
-@click.option("--lc-file",    default=None,
-              help="Fichier LC100 GeoTIFF déjà téléchargé (optionnel)")
-@click.option("--year",       default=2018, show_default=True,
-              help="Année du produit CGLS-LC100 (2016–2020 disponibles)")
-@click.option("--resolution-m", default=100, show_default=True,
-              help="Résolution de sortie en mètres (100m = résolution native)")
-def main(site, output, config_dir, lc_file, year, resolution_m):
-    """
-    Génère une carte de rugosité z₀ depuis CGLS-LC100 pour un site donné.
+              help="Site config directory")
+@click.option("--worldcover", default=None, type=click.Path(exists=True),
+              help="ESA WorldCover 2021 GeoTIFF (10 m)")
+@click.option("--canopy-height", default=None, type=click.Path(exists=True),
+              help="ETH Global Canopy Height 2020 GeoTIFF (10 m)")
+@click.option("--download", is_flag=True, default=False,
+              help="Auto-download from Google Earth Engine (requires earthengine-api)")
+@click.option("--resolution-m", default=10, show_default=True,
+              help="Output resolution in metres")
+def main(site, output, config_dir, worldcover, canopy_height, download, resolution_m):
+    """Generate z₀/d/LAD raster from ESA WorldCover + ETH Canopy Height."""
+    log.info("Starting land cover ingestion", extra={"site": site})
 
-    Si CGLS-LC100 n'est pas disponible (CDS non configuré, pas de fichier fourni),
-    crée une carte z₀ uniforme (0.05 m) avec avertissement.
-
-    Pour utiliser un fichier CGLS-LC100 déjà téléchargé :
-        python ingest_landcover.py --site perdigao --lc-file /path/to/lc100.tif \\
-                                   --output data/raw/z0_perdigao.tif
-    """
-    log.info("Démarrage ingestion land cover", extra={"site": site, "output": output})
-
-    # ── Configuration du site ─────────────────────────────────────────────────
+    # Load site config
     config_path = Path(config_dir) / f"{site}.yaml"
     if not config_path.exists():
-        log.error("Configuration introuvable", extra={"path": str(config_path)})
+        log.error("Site config not found", extra={"path": str(config_path)})
         sys.exit(1)
 
     with open(config_path) as f:
         site_cfg = yaml.safe_load(f)
 
     domain = site_cfg["era5_domain"]
-    north = domain["north"]
-    west  = domain["west"]
-    south = domain["south"]
-    east  = domain["east"]
-
-    # Marge de ~0.1° pour éviter les effets de bord
-    margin = 0.1
-    bbox = (west - margin, south - margin, east + margin, north + margin)
+    margin = 0.05  # ~5 km margin
+    bbox = (
+        domain["west"]  - margin,
+        domain["south"] - margin,
+        domain["east"]  + margin,
+        domain["north"] + margin,
+    )
 
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    z0_array: np.ndarray | None = None
+    # ── Auto-download from GEE if requested ──────────────────────────────────
+    if download and not worldcover and not canopy_height:
+        raw_dir = output_path.parent
+        wc_path, ch_path = download_from_gee(bbox, raw_dir, site, scale=resolution_m)
+        worldcover = str(wc_path)
+        canopy_height = str(ch_path)
+
+    lc_data = None
+    ch_data = None
     transform = None
     source_label = "uniform_fallback"
 
-    # ── Cas 1 : fichier LC fourni directement ─────────────────────────────────
-    if lc_file:
-        lc_path = Path(lc_file)
-        if not lc_path.exists():
-            log.error("Fichier LC introuvable", extra={"path": str(lc_path)})
-            sys.exit(1)
-
-        log.info("Lecture fichier LC fourni", extra={"path": str(lc_path)})
-        with rasterio.open(str(lc_path)) as src:
-            # Clip au domaine avec une marge
-            from rasterio.windows import from_bounds as window_from_bounds
-            window = window_from_bounds(*bbox, src.transform)
-            lc_data = src.read(1, window=window)
-            transform = src.window_transform(window)
-
-        z0_array = _map_lc_to_z0(lc_data)
-        source_label = f"CGLS-LC100 v3 {year} (from file)"
-
-    # ── Cas 2 : tentative téléchargement CDS ──────────────────────────────────
-    if z0_array is None:
-        lc_data = _download_cgls_lc100(
-            north + margin, west - margin, south - margin, east + margin, year=year,
-        )
-        if lc_data is not None:
-            z0_array = _map_lc_to_z0(lc_data)
-            source_label = f"CGLS-LC100 v3 {year} (CDS)"
-
-    # ── Cas 3 : fallback z₀ uniforme ──────────────────────────────────────────
-    if z0_array is None:
+    # ── Read WorldCover ──────────────────────────────────────────────────────
+    if worldcover:
+        log.info("Reading WorldCover", extra={"path": worldcover})
+        lc_data, transform, _ = _clip_raster(Path(worldcover), bbox)
+        source_label = "ESA_WorldCover_2021"
+    else:
         log.warning(
-            "Fallback z₀ uniforme activé. "
-            "Pour une meilleure précision, téléchargez CGLS-LC100 depuis "
-            "https://lcviewer.vito.be/download et relancez avec --lc-file."
+            "No WorldCover data. Use --download or provide --worldcover path"
         )
-        z0_array, transform = _create_uniform_z0(
-            north + margin, west - margin, south - margin, east + margin,
-            z0_value=0.05,
+
+    # ── Read ETH Canopy Height ───────────────────────────────────────────────
+    if canopy_height:
+        log.info("Reading ETH canopy height", extra={"path": canopy_height})
+        ch_data, ch_transform, _ = _clip_raster(Path(canopy_height), bbox)
+        ch_data = ch_data.astype(np.float32)
+        ch_data[ch_data > 100] = 0  # mask nodata (255 = no data in ETH product)
+        ch_data[ch_data < 0] = 0
+
+        # Resample canopy height to match WorldCover grid if needed
+        if lc_data is not None and ch_data.shape != lc_data.shape:
+            log.info("Resampling canopy height to WorldCover grid")
+            ch_resampled = np.zeros(lc_data.shape, dtype=np.float32)
+            reproject(
+                ch_data, ch_resampled,
+                src_transform=ch_transform, dst_transform=transform,
+                src_crs="EPSG:4326", dst_crs="EPSG:4326",
+                resampling=Resampling.bilinear,
+            )
+            ch_data = ch_resampled
+        source_label += "+ETH_CanopyHeight_2020"
+    else:
+        log.warning(
+            "No canopy height data. Use --download or provide --canopy-height path"
         )
+
+    # ── Compute z₀, d, LAD ──────────────────────────────────────────────────
+    if lc_data is not None:
+        z0, d, lad = compute_z0_d_lad(lc_data, ch_data)
+    else:
+        # Uniform fallback
+        resolution_deg = resolution_m / 111320.0
+        nrows = max(1, int((bbox[3] - bbox[1]) / resolution_deg))
+        ncols = max(1, int((bbox[2] - bbox[0]) / resolution_deg))
+        z0  = np.full((nrows, ncols), Z0_DEFAULT, dtype=np.float32)
+        d   = np.zeros((nrows, ncols), dtype=np.float32)
+        lad = np.zeros((nrows, ncols), dtype=np.float32)
+        transform = from_bounds(bbox[0], bbox[1], bbox[2], bbox[3], ncols, nrows)
         source_label = "uniform_fallback_0.05m"
 
-    # ── Appliquer les valeurs z₀ spécifiques au site si connues ───────────────
-    # Surcharge basée sur perdigao.yaml si disponible
-    if "physics" in site_cfg:
-        z0_ridge   = site_cfg["physics"].get("z0_ridge_m", None)
-        z0_valley  = site_cfg["physics"].get("z0_valley_m", None)
-        z0_forest  = site_cfg["physics"].get("z0_forest_m", None)
-        log.info("Valeurs z₀ du site", extra={
-            "z0_ridge_m": z0_ridge, "z0_valley_m": z0_valley, "z0_forest_m": z0_forest,
-        })
-
-    # ── Écriture GeoTIFF ──────────────────────────────────────────────────────
-    if transform is None:
-        # Si transform non défini (cas fallback sans transform)
-        resolution_deg = resolution_m / 111320.0  # ~approximation
-        transform = from_bounds(
-            west - margin, south - margin,
-            east + margin, north + margin,
-            z0_array.shape[1], z0_array.shape[0],
-        )
-
+    # ── Write multi-band GeoTIFF ─────────────────────────────────────────────
     profile = {
         "driver": "GTiff",
-        "height": z0_array.shape[0],
-        "width":  z0_array.shape[1],
-        "count":  1,
+        "height": z0.shape[0],
+        "width":  z0.shape[1],
+        "count":  3,
         "dtype":  "float32",
         "crs":    "EPSG:4326",
         "transform": transform,
@@ -308,34 +383,29 @@ def main(site, output, config_dir, lc_file, year, resolution_m):
     }
 
     with rasterio.open(str(output_path), "w", **profile) as dst:
-        dst.write(z0_array, 1)
+        dst.write(z0,  1)
+        dst.write(d,   2)
+        dst.write(lad, 3)
         dst.update_tags(
             source=source_label,
             site=site,
-            units="m",
-            description="Rugosité dynamique z0 [m] pour la couche limite de surface",
+            band1="z0_m",
+            band2="displacement_height_m",
+            band3="LAD_1_per_m",
         )
+        dst.set_band_description(1, "roughness_length_z0_m")
+        dst.set_band_description(2, "displacement_height_d_m")
+        dst.set_band_description(3, "leaf_area_density_LAD_1_per_m")
 
     sha_out = sha256_file(output_path)
-    log.info("Carte z₀ exportée", extra={
+    log.info("Land cover raster exported", extra={
         "output": str(output_path),
         "source": source_label,
-        "shape": f"{z0_array.shape[0]}×{z0_array.shape[1]}",
-        "z0_min": float(np.nanmin(z0_array)),
-        "z0_max": float(np.nanmax(z0_array)),
-        "z0_mean": round(float(np.nanmean(z0_array)), 4),
+        "shape": f"{z0.shape[0]}x{z0.shape[1]}",
+        "z0_range": f"[{float(np.nanmin(z0)):.4f}, {float(np.nanmax(z0)):.3f}]",
+        "d_range": f"[{float(np.nanmin(d)):.1f}, {float(np.nanmax(d)):.1f}]",
         "sha256": sha_out[:16] + "...",
-        "warning": "uniform" in source_label,
     })
-
-    if "uniform" in source_label:
-        log.warning(
-            "ATTENTION : carte z₀ uniforme utilisée. "
-            "Les erreurs de rugosité affectent directement le profil inlet "
-            "et la couche limite de surface. "
-            "Téléchargez CGLS-LC100 depuis https://lcviewer.vito.be/download "
-            "pour améliorer la précision."
-        )
 
 
 if __name__ == "__main__":

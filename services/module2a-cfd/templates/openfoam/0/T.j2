@@ -9,12 +9,9 @@
  * 0/T.j2 — Temperature boundary conditions
  *
  * BC strategy:
- *   Lateral + top:  inletOutlet (inlet: T(z) profile, outlet: zeroGradient)
+ *   Lateral + top:  uniformMixed + MappedFile (inlet: T(z), outlet: zeroGradient)
  *   Terrain:        zeroGradient (neutral) or fixedValue (non-neutral)
  *   Bottom:         zeroGradient
- *
- * After mesh generation, init_from_era5.py patches inletValue/value to
- * nonuniform height-varying T(z) profiles.
  */
 FoamFile
 {
@@ -27,7 +24,6 @@ FoamFile
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 // T_ref = {{ inflow.T_ref }} K
 // L_mo  = {{ inflow.L_mo }} m  (0/None = neutral, >0 = stable, <0 = unstable)
-// NOTE: inletValue/value are placeholders — patched to nonuniform by init_from_era5.py
 
 dimensions      [0 0 0 1 0 0 0];
 
@@ -38,16 +34,38 @@ boundaryField
 {% for face in ['west', 'east', 'south', 'north'] %}
     {{ face }}
     {
-        type            inletOutlet;
-        inletValue      uniform {{ inflow.T_ref }};
+        type            uniformMixed;
+        uniformValue
+        {
+            type        mappedFile;
+            mapMethod   planar;
+            fieldTable  T;
+        }
+        uniformGradient zero;
+        uniformValueFraction
+        {
+            type        expression;
+            expression  "neg(phi)";
+        }
         value           uniform {{ inflow.T_ref }};
     }
 
 {% endfor %}
     top
     {
-        type            inletOutlet;
-        inletValue      uniform {{ inflow.T_ref }};
+        type            uniformMixed;
+        uniformValue
+        {
+            type        mappedFile;
+            mapMethod   planar;
+            fieldTable  T;
+        }
+        uniformGradient zero;
+        uniformValueFraction
+        {
+            type        expression;
+            expression  "neg(phi)";
+        }
         value           uniform {{ inflow.T_ref }};
     }
 

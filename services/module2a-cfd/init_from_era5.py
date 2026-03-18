@@ -5,7 +5,7 @@ Replaces potentialFoam: interpolates ERA5 wind (u, v), k, epsilon, and
 temperature T to every cell centre AND boundary face centre in the mesh.
 
 Pipeline position:
-    blockMesh → [snappyHexMesh] → checkMesh → **init_from_era5** → simpleFoam
+    cartesianMesh → checkMesh → **init_from_era5** → simpleFoam
 
 The script:
   1. Reads cell centres from the OpenFOAM case
@@ -15,8 +15,8 @@ The script:
      - Computes U = speed × (flowDir_x, flowDir_y, 0)
      - Computes k = u*²/√Cmu  and  ε(z) = Cmu^0.75·k^1.5/(κ·max(z, 2·z0))
   4. Writes internalField as nonuniform List
-  5. Patches boundaryField: inletValue + value → nonuniform List
-     (for inletOutlet patches only — wall functions are left unchanged)
+  5. Writes constant/boundaryData/<patch>/points + 0/<field> for MappedFile BCs
+  6. Detects solver (simpleFoam vs BBSF) for correct p_rgh formulation
 
 Usage
 -----
@@ -39,8 +39,11 @@ logger = logging.getLogger(__name__)
 KAPPA = 0.41
 CMU   = 0.09
 
-# Patch types whose inletValue/outletValue/value should be patched.
+# Patches on lateral/top faces that receive MappedFile boundaryData.
 # Wall functions, noSlip, zeroGradient, fixedFluxPressure etc. are left unchanged.
+BOUNDARY_DATA_PATCHES = {"west", "east", "south", "north", "top"}
+
+# Legacy: patch types for old inletOutlet workflow (kept for backward compat)
 PATCHABLE_BC_TYPES = {"inletOutlet", "outletInlet"}
 
 # Reference values for p_rgh computation
@@ -177,8 +180,9 @@ def read_boundary_face_centres(case_dir: Path) -> dict[str, np.ndarray]:
                 verts = faces[face_idx]
                 centres[i] = points[verts].mean(axis=0)
         result[patch_name] = centres
-        logger.debug("Patch %s: %d faces, z range [%.1f, %.1f] m",
-                     patch_name, n, centres[:, 2].min(), centres[:, 2].max())
+        if n > 0:
+            logger.debug("Patch %s: %d faces, z range [%.1f, %.1f] m",
+                         patch_name, n, centres[:, 2].min(), centres[:, 2].max())
 
     return result
 
@@ -280,12 +284,14 @@ def interpolate_profiles_at_z(
     u_star: float,
     z0: float,
     T_ref: float = 300.0,
+    is_bbsf: bool = False,
 ) -> dict[str, np.ndarray]:
     """Compute U, k, epsilon, T, p_rgh at given heights z.
 
     Parameters
     ----------
     z : (N,) heights above datum [m].
+    is_bbsf : if True, compute p_rgh in static form (Pa) for BBSF.
 
     Returns
     -------
@@ -308,13 +314,14 @@ def interpolate_profiles_at_z(
     else:
         T = np.full(n, T_ref)
 
-    # p_rgh = p(z) - rho0 * g * z   (kinematic: divide by rho0 → p/rho0 - g*z)
-    # For simpleFoam: p_rgh = p/rho (kinematic), dimensions [0 2 -2 0 0 0 0]
-    # For BBSF: p_rgh = p - rho0*g*z, dimensions [1 -1 -2 0 0 0 0]
-    # We use kinematic form (consistent with simpleFoam p dimensions)
     if p_interp is not None:
         p_abs = p_interp(z)  # Pa
-        p_rgh = p_abs / RHO0 - G_ACC * z  # kinematic p_rgh [m²/s²]
+        if is_bbsf:
+            # BBSF: p_rgh = p - rho0*g*z [Pa], dimensions [1 -1 -2 0 0 0 0]
+            p_rgh = p_abs - RHO0 * G_ACC * z
+        else:
+            # simpleFoam: p_rgh = p/rho0 - g*z [m²/s²], dimensions [0 2 -2 0 0 0 0]
+            p_rgh = p_abs / RHO0 - G_ACC * z
     else:
         p_rgh = np.zeros(n)
 
@@ -453,6 +460,96 @@ def _patch_boundary_values(
 
 
 # ---------------------------------------------------------------------------
+# Solver detection
+# ---------------------------------------------------------------------------
+
+def detect_solver(case_dir: Path) -> str:
+    """Read application name from system/controlDict."""
+    cd_path = case_dir / "system" / "controlDict"
+    if not cd_path.exists():
+        return "simpleFoam"
+    text = cd_path.read_text()
+    match = re.search(r'application\s+(\w+)', text)
+    return match.group(1) if match else "simpleFoam"
+
+
+# ---------------------------------------------------------------------------
+# Write constant/boundaryData for MappedFile BCs
+# ---------------------------------------------------------------------------
+
+def _write_of_points(filepath: Path, points: np.ndarray) -> None:
+    """Write an OpenFOAM points file for MappedFile (raw format, no FoamFile header)."""
+    n = len(points)
+    lines = [f'{n}', '(']
+    for i in range(n):
+        lines.append(f'({points[i, 0]:.6f} {points[i, 1]:.6f} {points[i, 2]:.6f})')
+    lines.append(')')
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    filepath.write_text('\n'.join(lines))
+
+
+def _write_of_mapped_vector(filepath: Path, data: np.ndarray) -> None:
+    """Write a vector field for MappedFile boundaryData (raw format)."""
+    n = len(data)
+    lines = [f'{n}', '(']
+    for i in range(n):
+        lines.append(f'({data[i, 0]:.6f} {data[i, 1]:.6f} {data[i, 2]:.6f})')
+    lines.append(')')
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    filepath.write_text('\n'.join(lines))
+
+
+def _write_of_mapped_scalar(filepath: Path, data: np.ndarray) -> None:
+    """Write a scalar field for MappedFile boundaryData (raw format)."""
+    n = len(data)
+    lines = [f'{n}', '(']
+    for i in range(n):
+        lines.append(f'{data[i]:.6e}')
+    lines.append(')')
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    filepath.write_text('\n'.join(lines))
+
+
+def write_boundary_data(
+    case_dir: Path,
+    boundary_faces: dict[str, np.ndarray],
+    patch_fields: dict[str, dict[str, np.ndarray]],
+) -> None:
+    """Write constant/boundaryData/<patch>/points and 0/<field> for each patch.
+
+    Parameters
+    ----------
+    case_dir : OpenFOAM case directory.
+    boundary_faces : dict mapping patch_name → (nFaces, 3) face centres.
+    patch_fields : dict mapping patch_name → {field_name: data_array}.
+    """
+    bd_root = case_dir / "constant" / "boundaryData"
+
+    for patch_name, fields in patch_fields.items():
+        if patch_name not in boundary_faces:
+            continue
+        face_centres = boundary_faces[patch_name]
+        if len(face_centres) == 0:
+            continue
+
+        patch_dir = bd_root / patch_name
+
+        # Write points
+        _write_of_points(patch_dir / "points", face_centres)
+
+        # Write each field at time=0
+        for field_name, data in fields.items():
+            time_dir = patch_dir / "0"
+            if data.ndim == 2 and data.shape[1] == 3:
+                _write_of_mapped_vector(time_dir / field_name, data)
+            else:
+                _write_of_mapped_scalar(time_dir / field_name, data)
+
+        logger.info("Wrote boundaryData for patch %s: %d faces, fields %s",
+                     patch_name, len(face_centres), list(fields.keys()))
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
@@ -462,9 +559,8 @@ def init_from_era5(
 ) -> None:
     """Initialise OpenFOAM fields from ERA5 interpolation.
 
-    Overwrites 0/U, 0/k, 0/epsilon, 0/T:
-      - internalField → nonuniform (per-cell interpolation)
-      - boundaryField inletValue/value → nonuniform (per-face interpolation)
+    - internalField → nonuniform List (per-cell interpolation)
+    - constant/boundaryData/<patch>/ → MappedFile data (per-face profiles)
 
     Parameters
     ----------
@@ -478,6 +574,11 @@ def init_from_era5(
 
     T_ref = float(inflow.get("T_ref", 300.0))
 
+    # Detect solver for p_rgh formulation
+    solver = detect_solver(case_dir)
+    is_bbsf = "boussinesq" in solver.lower()
+    logger.info("Solver: %s (BBSF=%s)", solver, is_bbsf)
+
     # Build interpolators once
     speed_interp, T_interp, p_interp, fd_x, fd_y, u_star, z0 = _build_interpolators(inflow)
 
@@ -488,7 +589,7 @@ def init_from_era5(
 
     cell_fields = interpolate_profiles_at_z(
         centres[:, 2], speed_interp, T_interp, p_interp,
-        fd_x, fd_y, u_star, z0, T_ref,
+        fd_x, fd_y, u_star, z0, T_ref, is_bbsf=is_bbsf,
     )
 
     u_path = case_dir / "0" / "U"
@@ -505,39 +606,38 @@ def init_from_era5(
     if p_path.exists():
         _patch_internal_field_scalar(p_path, cell_fields["p_rgh"])
 
-    # ---- Boundary field (face centres) ----
+    # ---- Boundary data for MappedFile BCs ----
     logger.info("Reading boundary face centres from %s", case_dir)
     boundary_faces = read_boundary_face_centres(case_dir)
 
-    # Compute profiles at each patch's face centres
-    u_patch_data = {}
-    k_patch_data = {}
-    eps_patch_data = {}
-    t_patch_data = {}
-    p_patch_data = {}
+    # Compute profiles at each patch's face centres and write boundaryData
+    patch_fields: dict[str, dict[str, np.ndarray]] = {}
 
     for patch_name, face_centres in boundary_faces.items():
+        if patch_name not in BOUNDARY_DATA_PATCHES:
+            continue
         if len(face_centres) == 0:
             continue
+
         pf = interpolate_profiles_at_z(
             face_centres[:, 2], speed_interp, T_interp, p_interp,
-            fd_x, fd_y, u_star, z0, T_ref,
+            fd_x, fd_y, u_star, z0, T_ref, is_bbsf=is_bbsf,
         )
-        u_patch_data[patch_name] = pf["U"]
-        k_patch_data[patch_name] = pf["k"]
-        eps_patch_data[patch_name] = pf["epsilon"]
-        t_patch_data[patch_name] = pf["T"]
-        p_patch_data[patch_name] = pf["p_rgh"]
 
-    _patch_boundary_values(u_path, u_patch_data, "vector")
-    _patch_boundary_values(k_path, k_patch_data, "scalar")
-    _patch_boundary_values(epsilon_path, eps_patch_data, "scalar")
-    if t_path.exists():
-        _patch_boundary_values(t_path, t_patch_data, "scalar")
-    if p_path.exists():
-        _patch_boundary_values(p_path, p_patch_data, "scalar")
+        fields = {
+            "U": pf["U"],
+            "k": pf["k"],
+            "epsilon": pf["epsilon"],
+            "p_rgh": pf["p_rgh"],
+        }
+        if t_path.exists():
+            fields["T"] = pf["T"]
 
-    logger.info("ERA5 initialisation complete for %s (internal + boundary)", case_dir)
+        patch_fields[patch_name] = fields
+
+    write_boundary_data(case_dir, boundary_faces, patch_fields)
+
+    logger.info("ERA5 initialisation complete for %s (internal + boundaryData)", case_dir)
 
 
 # ---------------------------------------------------------------------------

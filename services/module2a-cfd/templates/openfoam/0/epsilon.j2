@@ -12,12 +12,9 @@
  *   ABL equilibrium profile (Richards & Hoxey 1993)
  *
  * BC strategy:
- *   Lateral:  inletOutlet (inlet: epsilon(z) profile, outlet: zeroGradient)
+ *   Lateral:  uniformMixed + MappedFile (inlet: epsilon(z), outlet: zeroGradient)
  *   Top:      zeroGradient
  *   Terrain:  epsilonWallFunction
- *
- * After mesh generation, init_from_era5.py patches inletValue/value to
- * nonuniform height-varying epsilon(z) profiles.
  */
 {%- set Cmu = 0.09 %}
 {%- set k_init = inflow.u_star ** 2 / Cmu ** 0.5 %}
@@ -43,8 +40,19 @@ boundaryField
 {% for face in ['west', 'east', 'south', 'north'] %}
     {{ face }}
     {
-        type            inletOutlet;
-        inletValue      uniform {{ "%.6e" | format(epsilon_init) }};
+        type            uniformMixed;
+        uniformValue
+        {
+            type        mappedFile;
+            mapMethod   planar;
+            fieldTable  epsilon;
+        }
+        uniformGradient zero;
+        uniformValueFraction
+        {
+            type        expression;
+            expression  "neg(phi)";
+        }
         value           uniform {{ "%.6e" | format(epsilon_init) }};
     }
 

@@ -1,0 +1,56 @@
+# Local physics-progressive study: SF vs BBSF + Coriolis + canopy
+# Matches Venkatraman et al. (WES 2023) reference case
+#
+# Usage:
+#   cd services/module2a-cfd
+#   python run_local_study.py ../../configs/local_physics_study.yaml
+
+study:
+  name: physics_progressive
+  site: perdigao
+  timestamp: "2017-05-04T22:00"      # Venkatraman reference case
+  resolution_m: 500
+  domain_km: 10
+  context_cells: 1
+  n_iterations: 2000
+  write_interval: 200
+
+docker:
+  image: "microfluidica/openfoam:latest"
+  nprocs: 1                           # serial for local testing
+
+cases:
+  A:
+    label: "SF (baseline)"
+    solver: simpleFoam
+    thermal: false
+    coriolis: false
+    canopy: false
+  B:
+    label: "BBSF (no physics)"
+    solver: buoyantBoussinesqSimpleFoam
+    thermal: true
+    coriolis: false
+    canopy: false
+  C:
+    label: "SF + Coriolis"
+    solver: simpleFoam
+    thermal: false
+    coriolis: true
+    canopy: false
+  D:
+    label: "SF + Coriolis + Canopy"
+    solver: simpleFoam
+    thermal: false
+    coriolis: true
+    canopy: true
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  venkatraman_csv: "references/venkatraman2023_digitized.csv"
+  landcover_tif: "data/raw/landcover_perdigao.tif"
+  output_dir: "data/validation/physics_study"
+  towers:
+    - tse04    # SW ridge (upwind)
+    - tse09    # valley
+    - tse13    # NE ridge (downwind)

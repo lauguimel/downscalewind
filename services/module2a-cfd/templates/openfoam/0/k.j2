@@ -8,15 +8,12 @@
 /*
  * 0/k.j2 — Turbulent kinetic energy [m²/s²]
  *
- * k = u_star² / sqrt(Cmu) — ABL equilibrium value (constant in neutral SL)
+ * k = u_star² / sqrt(Cmu) — ABL equilibrium value
  *
  * BC strategy:
- *   Lateral:  inletOutlet (inlet: k profile, outlet: zeroGradient)
+ *   Lateral:  uniformMixed + MappedFile (inlet: k profile, outlet: zeroGradient)
  *   Top:      zeroGradient
  *   Terrain:  kqRWallFunction
- *
- * After mesh generation, init_from_era5.py patches inletValue/value to
- * nonuniform values (currently constant k, but ready for height-varying).
  */
 {%- set Cmu = 0.09 %}
 {%- set k_init = inflow.u_star ** 2 / Cmu ** 0.5 %}
@@ -40,8 +37,19 @@ boundaryField
 {% for face in ['west', 'east', 'south', 'north'] %}
     {{ face }}
     {
-        type            inletOutlet;
-        inletValue      uniform {{ "%.6f" | format(k_init) }};
+        type            uniformMixed;
+        uniformValue
+        {
+            type        mappedFile;
+            mapMethod   planar;
+            fieldTable  k;
+        }
+        uniformGradient zero;
+        uniformValueFraction
+        {
+            type        expression;
+            expression  "neg(phi)";
+        }
         value           uniform {{ "%.6f" | format(k_init) }};
     }
 
