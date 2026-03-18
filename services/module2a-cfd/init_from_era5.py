@@ -314,14 +314,11 @@ def interpolate_profiles_at_z(
     else:
         T = np.full(n, T_ref)
 
+    # p_rgh = p/rho0 - g*z [m²/s²], dimensions [0 2 -2 0 0 0 0]
+    # Same kinematic formulation for both simpleFoam and buoyantBoussinesqSimpleFoam
     if p_interp is not None:
         p_abs = p_interp(z)  # Pa
-        if is_bbsf:
-            # BBSF: p_rgh = p - rho0*g*z [Pa], dimensions [1 -1 -2 0 0 0 0]
-            p_rgh = p_abs - RHO0 * G_ACC * z
-        else:
-            # simpleFoam: p_rgh = p/rho0 - g*z [m²/s²], dimensions [0 2 -2 0 0 0 0]
-            p_rgh = p_abs / RHO0 - G_ACC * z
+        p_rgh = p_abs / RHO0 - G_ACC * z
     else:
         p_rgh = np.zeros(n)
 

@@ -167,48 +167,63 @@ potentialFlow
 // ---------------------------------------------------------------------------
 SIMPLE
 {
-    // 3 correctors needed for terrain meshes with maxNonOrtho > 70°
-    nNonOrthogonalCorrectors 3;
+    nNonOrthogonalCorrectors 0;
+
+{% if solver.name | default('simpleFoam') in ['buoyantBoussinesqSimpleFoam', 'buoyantSimpleFoam'] %}
+    pRefCell        0;
+    pRefValue       0;
+{% endif %}
 
     residualControl
     {
+{% if solver.name | default('simpleFoam') == 'buoyantBoussinesqSimpleFoam' %}
+        p_rgh           1e-4;
+{% else %}
         p               1e-4;
+{% endif %}
         U               1e-4;
         k               1e-4;
         epsilon         1e-4;
+{% if solver.thermal | default(false) %}
+        T               1e-4;
+{% endif %}
 {% if solver.name | default('simpleFoam') == 'buoyantSimpleFoam' %}
         p_rgh           1e-4;
         h               1e-4;
-        e               1e-4;
 {% endif %}
     }
 }
 
 // ---------------------------------------------------------------------------
-// Relaxation factors
+// Relaxation factors (following OF2412 hotRoom tutorial pattern)
+//   p_rgh: 0.7 (field), U: 0.3 (equation) — standard for buoyant SIMPLE
 // ---------------------------------------------------------------------------
 relaxationFactors
 {
     fields
     {
+{% if solver.name | default('simpleFoam') == 'buoyantBoussinesqSimpleFoam' %}
+        p_rgh           0.7;
+{% else %}
         p               0.3;
-{% if solver.name | default('simpleFoam') == 'buoyantSimpleFoam' %}
-        p_rgh           0.3;
 {% endif %}
     }
 
     equations
     {
+{% if solver.name | default('simpleFoam') == 'buoyantBoussinesqSimpleFoam' %}
+        U               0.3;
+        T               0.5;
+        "(k|epsilon)"   0.7;
+{% else %}
         U               0.7;
-        k               0.5;
-        epsilon         0.5;
+        k               0.7;
+        epsilon         0.7;
 {% if solver.thermal | default(false) %}
-        T               0.7;
+        T               0.5;
+{% endif %}
 {% endif %}
 {% if solver.name | default('simpleFoam') == 'buoyantSimpleFoam' %}
-        // Low relaxation for enthalpy: rhoConst makes energy decoupled
-        // from momentum, but the equation is still solved; 0.1 prevents
-        // divergence on the first iterations when phi is noisy.
         h               0.1;
         e               0.1;
 {% endif %}
