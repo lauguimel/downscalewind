@@ -52,6 +52,14 @@ boundaryField
     //   No explicit value is required; the 'calculated' BC reads from the
     //   internal field register.
     // -----------------------------------------------------------------------
+{% if domain is defined and domain.octagonal %}
+    lateral
+    {
+        type            calculated;
+        value           uniform 0;
+    }
+
+{% else %}
     west
     {
         type            calculated;
@@ -76,6 +84,7 @@ boundaryField
         value           uniform 0;
     }
 
+{% endif %}
     top
     {
         type            calculated;

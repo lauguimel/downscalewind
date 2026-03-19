@@ -34,6 +34,26 @@ internalField   uniform {{ "%.6f" | format(k_init) }};
 
 boundaryField
 {
+{% if domain is defined and domain.octagonal %}
+    lateral
+    {
+        type            uniformMixed;
+        uniformValue
+        {
+            type        mappedFile;
+            mapMethod   planar;
+            fieldTable  k;
+        }
+        uniformGradient zero;
+        uniformValueFraction
+        {
+            type        expression;
+            expression  "neg(phi)";
+        }
+        value           uniform {{ "%.6f" | format(k_init) }};
+    }
+
+{% else %}
 {% for face in ['west', 'east', 'south', 'north'] %}
     {{ face }}
     {
@@ -54,6 +74,7 @@ boundaryField
     }
 
 {% endfor %}
+{% endif %}
     top
     {
         type            zeroGradient;

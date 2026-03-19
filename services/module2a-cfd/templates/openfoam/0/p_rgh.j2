@@ -39,6 +39,26 @@ internalField   uniform 0;
 
 boundaryField
 {
+{% if domain is defined and domain.octagonal %}
+    lateral
+    {
+        type            uniformMixed;
+        uniformValue
+        {
+            type        mappedFile;
+            mapMethod   planar;
+            fieldTable  p_rgh;
+        }
+        uniformGradient  zero;
+        uniformValueFraction
+        {
+            type        expression;
+            expression  "pos(phi)";   // DUAL of U: Dirichlet on outlet, Neumann on inlet
+        }
+        value           uniform 0;
+    }
+
+{% else %}
 {% for face in ['west', 'east', 'south', 'north'] %}
     {{ face }}
     {
@@ -59,6 +79,7 @@ boundaryField
     }
 
 {% endfor %}
+{% endif %}
     top
     {
         // p_rgh_top = p_ERA5(z_top)/rho0 + g*z_top [m2/s2] (OF sign convention)

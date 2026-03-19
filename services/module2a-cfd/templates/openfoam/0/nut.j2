@@ -32,6 +32,14 @@ internalField   uniform {{ "%.6e" | format(nut_init) }};
 
 boundaryField
 {
+{% if domain is defined and domain.octagonal %}
+    lateral
+    {
+        type            calculated;
+        value           uniform {{ "%.6e" | format(nut_init) }};
+    }
+
+{% else %}
     west
     {
         type            calculated;
@@ -56,6 +64,7 @@ boundaryField
         value           uniform {{ "%.6e" | format(nut_init) }};
     }
 
+{% endif %}
     top
     {
         type            calculated;

@@ -41,6 +41,26 @@ internalField   uniform ( {{ "%.6f" | format(inflow.u_hub * fd_x) }} {{ "%.6f" |
 
 boundaryField
 {
+{% if domain is defined and domain.octagonal %}
+    lateral
+    {
+        type            uniformMixed;
+        uniformValue
+        {
+            type        mappedFile;
+            mapMethod   planar;
+            fieldTable  U;
+        }
+        uniformGradient zero;
+        uniformValueFraction
+        {
+            type        expression;
+            expression  "neg(phi)";
+        }
+        value           uniform ( {{ "%.6f" | format(inflow.u_hub * fd_x) }} {{ "%.6f" | format(inflow.u_hub * fd_y) }} 0 );
+    }
+
+{% else %}
 {% for face in ['west', 'east', 'south', 'north'] %}
     {{ face }}
     {
@@ -61,6 +81,7 @@ boundaryField
     }
 
 {% endfor %}
+{% endif %}
     top
     {
         type            zeroGradient;

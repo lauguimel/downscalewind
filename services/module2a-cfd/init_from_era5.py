@@ -44,6 +44,35 @@ CMU   = 0.09
 # Wall functions, noSlip, zeroGradient, fixedFluxPressure etc. are left unchanged.
 BOUNDARY_DATA_PATCHES = {"west", "east", "south", "north"}
 
+
+def detect_lateral_patches(boundary_faces: dict) -> set[str]:
+    """Detect which patches should receive lateral inflow boundary data.
+
+    For cylindrical (octagonal) domains, a single ``lateral`` patch is used.
+    For box domains, the four cardinal patches are used.
+
+    Parameters
+    ----------
+    boundary_faces : dict
+        Mapping of patch name → patch data (e.g., the boundary field dict
+        from an OpenFOAM ``0/U`` file or the inflow profile's patch list).
+
+    Returns
+    -------
+    set[str]
+        Set of patch names to write boundaryData for.
+
+    Examples
+    --------
+    >>> detect_lateral_patches({"lateral": {}, "top": {}, "terrain": {}})
+    {'lateral'}
+    >>> detect_lateral_patches({"west": {}, "east": {}, "south": {}, "north": {}, "top": {}})
+    {'west', 'east', 'south', 'north'}
+    """
+    if "lateral" in boundary_faces:
+        return {"lateral"}
+    return {"west", "east", "south", "north"}
+
 # Legacy: patch types for old inletOutlet workflow (kept for backward compat)
 PATCHABLE_BC_TYPES = {"inletOutlet", "outletInlet"}
 
@@ -620,11 +649,14 @@ def init_from_era5(
     logger.info("Reading boundary face centres from %s", case_dir)
     boundary_faces = read_boundary_face_centres(case_dir)
 
+    # Auto-detect lateral patches (cylindrical → "lateral"; box → cardinal four)
+    lateral_patches = detect_lateral_patches(boundary_faces)
+
     # Compute profiles at each patch's face centres and write boundaryData
     patch_fields: dict[str, dict[str, np.ndarray]] = {}
 
     for patch_name, face_centres in boundary_faces.items():
-        if patch_name not in BOUNDARY_DATA_PATCHES:
+        if patch_name not in lateral_patches:
             continue
         if len(face_centres) == 0:
             continue

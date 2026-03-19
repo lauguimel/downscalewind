@@ -1,43 +1,65 @@
-# Plan: Reboot Module 2A for OF2412 ESI + kraken-sim
-Generated: 2026-03-14
-Test command: cd services/module2a-cfd && python -c "from generate_mesh import generate_mesh; print('OK')" && python -c "from generate_campaign import generate_campaign; print('OK')"
+# Plan: Phase 1 — Cylindrical CFD domain infrastructure
+Generated: 2026-03-19
+Test command: conda run -n downscalewind pytest services/module2a-cfd/tests/ -v
 
-## Phase 1 — OF2412 ESI template headers + cleanup
-**Files to modify:** `0/U.j2`, `0/k.j2`, `0/epsilon.j2`, `0/p.j2`, `0/nut.j2`, `system/fvSolution.j2`, `constant/fvOptions.j2`, `system/surfaceFeatureExtractDict.j2`
-**Files to delete:** `system/surfaceFeaturesDict.j2`, `constant/turbulenceProperties` (static duplicate)
-**What to implement:** Update all Foundation-style OF headers (`Version: 10`, `www.openfoam.org`) to ESI style (`v2412`, `www.openfoam.com`). Remove `{{ of_version }}` template variable from fvOptions.j2 header. Delete surfaceFeaturesDict.j2 (Foundation `surfaceFeatures` command; ESI uses `surfaceFeatureExtract` with surfaceFeatureExtractDict.j2 which already exists). Delete the static `constant/turbulenceProperties` file (will be replaced by the renamed .j2 in Phase 2).
-**Headers already ESI (no change needed):** controlDict.j2, T.j2, alphat.j2, p_rgh.j2
-**Success test:** `grep -rL "www.openfoam.com" services/module2a-cfd/templates/openfoam/{0,system,constant}/*.j2` returns empty (all .j2 files have ESI header). `ls services/module2a-cfd/templates/openfoam/system/surfaceFeaturesDict.j2` fails (deleted). `ls services/module2a-cfd/templates/openfoam/constant/turbulenceProperties` fails (deleted).
-**Status:** done
+## Phase 1 — Octagon STL generator + terrain leveling
 
-## Phase 2 — Fix momentumTransport.j2 → turbulenceProperties.j2 + controlDict cleanup
-**Files to modify:** `constant/momentumTransport.j2` (rename to `constant/turbulenceProperties.j2` + rewrite content), `system/controlDict.j2`, `Allrun.j2`
+**Files to create/modify:**
+- `services/module2a-cfd/generate_mesh.py` (add `make_octagon_stl()` + terrain leveling)
+- `services/module2a-cfd/tests/test_octagon_stl.py` (new test file)
+
 **What to implement:**
-1. Rename `momentumTransport.j2` → `turbulenceProperties.j2`. Rewrite: remove `of_version` conditional, hardcode `object turbulenceProperties;`, use `RASModel kEpsilon;` (ESI syntax instead of Foundation `model kEpsilon;`), ESI header.
-2. In `controlDict.j2`: remove the entire `functions {}` block (lines 70-115) — kraken-sim injects its own functionObjects for monitoring.
-3. In `Allrun.j2`: change `runApplication surfaceFeatures` → `runApplication surfaceFeatureExtract` (ESI command name). The `runApplication checkMesh -latestTime` line already exists (line 45), keep it.
-**Success test:** `python -c "from jinja2 import Environment, FileSystemLoader; e=Environment(loader=FileSystemLoader('services/module2a-cfd/templates/openfoam')); t=e.get_template('constant/turbulenceProperties.j2'); print(t.render())"` renders without error and contains `RASModel`. `grep -c 'functions' services/module2a-cfd/templates/openfoam/system/controlDict.j2` returns 0. `grep 'surfaceFeatureExtract' services/module2a-cfd/templates/openfoam/Allrun.j2` matches.
+Add `make_octagon_stl(center_lat, center_lon, radius_m, height_m, n_sides=8)` that builds a regular octagonal prism as ASCII multi-solid STL with solids `lateral` (8 side panels, each 2 triangles) and `top` (fan of 8 triangles from centre). Add terrain leveling `z × (1 − tanh((1.6r/R)^8))` as an optional step in `dem_to_stl()` via new `level_terrain=True` and `domain_radius_m` parameters applied after reprojection, before triangulation. No change to the existing box path — new code is additive.
+
+**Success test:** `services/module2a-cfd/tests/test_octagon_stl.py::test_make_octagon_stl_geometry` — parse the returned STL string, verify 8×2 triangles in solid `lateral`, all vertices at the expected radius ± 1 m, `top` solid present. `test_level_terrain_blending` — verify leveling returns Z unchanged at r=0, ≈0 at r=R.
+
 **Status:** done
 
-## Phase 3 — Adapt generate_mesh.py (remove OF version logic)
-**Files to modify:** `services/module2a-cfd/generate_mesh.py`
-**What to implement:** Remove `of_version` parameter from `generate_mesh()` signature and from `jinja_ctx` dict. Remove the OF9 compatibility block (lines 598-603) that renames momentumTransport → turbulenceProperties. Remove `--of-version` CLI argument (line 679). Remove `of_version=args.of_version` from CLI call (line 718). The template is now `turbulenceProperties.j2` (renamed in Phase 2) and always renders as `turbulenceProperties` — no post-render rename needed.
-**Success test:** `cd services/module2a-cfd && python -c "from generate_mesh import generate_mesh; print('OK')"` succeeds. `grep -c 'of_version' services/module2a-cfd/generate_mesh.py` returns 0.
-**Status:** done
 
-## Phase 4 — Adapt generate_campaign.py for kraken-sim + create run.pbs.j2
-**Files to create:** `services/module2a-cfd/templates/openfoam/run.pbs.j2`
-**Files to modify:** `services/module2a-cfd/generate_campaign.py`
+## Phase 2 — meshDict.j2: 3-ring octagonal refinement
+
+**Files to create/modify:**
+- `services/module2a-cfd/templates/openfoam/system/meshDict.j2`
+- `services/module2a-cfd/generate_mesh.py` (add `domain_type` parameter + octagon FMS builder call)
+- `services/module2a-cfd/tests/test_meshdict_render.py` (new test file)
+
 **What to implement:**
-1. Create `run.pbs.j2` — PBS job script template for kraken-sim. Variables: `case_id`, `solver.name`, `solver.n_cores`, `walltime`, `queue`. Loads OpenFOAM module, sources bashrc, runs `./Allrun $NCPUS`.
-2. In `generate_campaign.py`: remove `of_version=9` from `generate_mesh()` call (line 333). Remove `_register_in_hpcsim()` function and all hpc-sim references (imports, `--db` CLI arg, db_path parameter). Replace JSON manifest with kraken-sim `campaign.yaml` output (YAML with case list + PBS template path). Each case entry has: case_id, solver, parameters, path.
-**Success test:** `cd services/module2a-cfd && python -c "from generate_campaign import generate_campaign; print('OK')"` succeeds. `grep -c 'hpc.sim\|hpcsim\|of_version' services/module2a-cfd/generate_campaign.py` returns 0. `test -f services/module2a-cfd/templates/openfoam/run.pbs.j2`.
+Add `domain_type` parameter (`"box"` default, `"cylinder"`) to `generate_mesh()`. When `"cylinder"`: call `make_octagon_stl()` → write `constant/triSurface/domain_octagon.stl`, update Jinja context with `domain.octagonal=True`. Update `meshDict.j2` with a Jinja conditional: when octagonal, emit 3-ring objectRefinements (`mesoZone` 200m / `fineZone` 100m / `nearTerrain` 50m) and a `renameBoundary` block collapsing sides to single `lateral` patch. Box path (default) is completely unchanged.
+
+**Success test:** `services/module2a-cfd/tests/test_meshdict_render.py::test_meshdict_octagonal_render` — render with `domain.octagonal=True`, assert `lateral` in renameBoundary, `mesoZone`/`fineZone`/`nearTerrain` present, `xMin`/`xMax` absent. `test_meshdict_box_render` — render with `domain.octagonal=False`, assert old box renaming intact.
+
 **Status:** done
 
-## Phase 5 — Simplify workflow_module2.py + update docs
-**Files to modify:** `notebooks/workflow_module2.py`, `CLAUDE.md`
+
+## Phase 3 — BC templates: 4-face loop → single lateral patch
+
+**Files to modify:**
+- `services/module2a-cfd/templates/openfoam/0/U.j2`
+- `services/module2a-cfd/templates/openfoam/0/k.j2`
+- `services/module2a-cfd/templates/openfoam/0/epsilon.j2`
+- `services/module2a-cfd/templates/openfoam/0/T.j2`
+- `services/module2a-cfd/templates/openfoam/0/p_rgh.j2`
+- `services/module2a-cfd/templates/openfoam/0/nut.j2`
+- `services/module2a-cfd/templates/openfoam/0/alphat.j2` (if it exists)
+- `services/module2a-cfd/tests/test_bc_templates.py` (new test file)
+
 **What to implement:**
-1. Rewrite `workflow_module2.py`: keep only case generation + campaign.yaml output. Remove sections 0 (baseline ERA5), 5 (OpenFOAM Docker run), 6 (export), 7 (convergence subprocess), 8 (CFD vs obs), 9 (QC), 10 (batch PoC). Keep sections 1-4 (canonical case selection, terrain viz, mesh generation, inlet profile) and add a new final section that calls `generate_campaign()` to produce campaign.yaml. Remove `OpenFOAMRunner` imports.
-2. Update `CLAUDE.md`: change "OF10 Foundation" references to "OF2412 ESI", remove hpc-sim mentions, add kraken-sim reference, update pipeline description.
-**Success test:** `python -c "import ast; ast.parse(open('notebooks/workflow_module2.py').read()); print('OK')"` (valid Python). `grep -c 'OpenFOAMRunner\|run_cfd_batch\|export_cfd\|check_coherence' notebooks/workflow_module2.py` returns 0. `grep 'OF2412\|kraken' CLAUDE.md` matches.
+In each template, add a Jinja conditional on `domain.octagonal`. When `True`: emit a single `lateral { ... }` block (same BC type as the 4-face loop). When `False` (default): keep the existing `{% for face in ['west', 'east', 'south', 'north'] %}` loop unchanged. `top`, `terrain`, and `bottom` blocks are unchanged in both branches.
+
+**Success test:** `services/module2a-cfd/tests/test_bc_templates.py::test_U_octagonal` — render `U.j2` with `domain.octagonal=True`, assert `lateral` present exactly once, `west`/`east`/`south`/`north` absent. `test_U_box` — render with `domain.octagonal=False`, assert `west` and `north` present. Parametrize over `k`, `p_rgh`, `nut`.
+
+**Status:** done
+
+
+## Phase 4 — init_from_era5.py: lateral patch auto-detection
+
+**Files to modify:**
+- `services/module2a-cfd/init_from_era5.py`
+- `services/module2a-cfd/tests/test_init_lateral.py` (new test file)
+
+**What to implement:**
+Replace the hardcoded `BOUNDARY_DATA_PATCHES = {"west", "east", "south", "north"}` constant with a function `detect_lateral_patches(boundary_faces: dict) -> set[str]` that returns `{"lateral"}` if `"lateral"` is a key in `boundary_faces`, otherwise returns `{"west", "east", "south", "north"}` (box fallback). Replace the patch-gating guard in `init_from_era5()` with a call to this function. Existing CLI and function signatures unchanged.
+
+**Success test:** `services/module2a-cfd/tests/test_init_lateral.py::test_detect_lateral_patches_octagonal` — call with `{"lateral": ..., "top": ..., "terrain": ...}`, assert returns `{"lateral"}`. `test_detect_lateral_patches_box` — call with box dict, assert returns `{"west","east","south","north"}`.
+
 **Status:** done

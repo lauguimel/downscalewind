@@ -201,6 +201,8 @@ def dem_to_stl(
     resolution_m: float,
     site_lat: float,
     site_lon: float,
+    level_terrain: bool = False,
+    domain_radius_m: float | None = None,
 ) -> None:
     """Resample SRTM DEM to CFD resolution and export as STL.
 
@@ -271,6 +273,13 @@ def dem_to_stl(
     X, Y = np.meshgrid(x_m, y_m)
     Z = elevation
 
+    # Optional terrain leveling: taper Z → 0 at domain boundary
+    if level_terrain and domain_radius_m is not None:
+        Z = _level_terrain(Z, X, Y, 0.0, 0.0, domain_radius_m)
+        logger.info(
+            "Terrain leveling applied: tanh blend over radius %.0f m", domain_radius_m
+        )
+
     # Triangulate: each quad → 2 triangles
     n_tri = 2 * (n_row - 1) * (n_col - 1)
     terrain = stl_mesh.Mesh(np.zeros(n_tri, dtype=stl_mesh.Mesh.dtype))
@@ -294,6 +303,103 @@ def dem_to_stl(
     logger.info("Terrain STL saved: %s (%d triangles)", out_stl, n_tri)
 
     return {"z_min": float(Z.min()), "z_max": float(Z.max())}
+
+
+def _level_terrain(
+    Z: np.ndarray,
+    X: np.ndarray,
+    Y: np.ndarray,
+    center_x: float,
+    center_y: float,
+    domain_radius_m: float,
+) -> np.ndarray:
+    """Apply tanh terrain leveling: smoothly reduce terrain height to 0 at boundary.
+
+    Parameters
+    ----------
+    Z : terrain elevation array
+    X, Y : coordinate arrays (same shape as Z)
+    center_x, center_y : domain centre in projected coords [m]
+    domain_radius_m : domain radius — terrain → 0 at this distance
+
+    Returns
+    -------
+    Z_leveled : same shape as Z
+    """
+    r = np.sqrt((X - center_x) ** 2 + (Y - center_y) ** 2)
+    blend = np.tanh((1.6 * r / domain_radius_m) ** 8)
+    return Z * (1.0 - blend)
+
+
+def make_octagon_stl(
+    center_x: float,
+    center_y: float,
+    radius_m: float,
+    height_m: float,
+    n_sides: int = 8,
+) -> str:
+    """Generate a regular polygon prism STL in ASCII multi-solid format.
+
+    Parameters
+    ----------
+    center_x, center_y : domain centre in projected coordinates [m]
+    radius_m : circumradius of the polygon [m]
+    height_m : prism height [m]
+    n_sides : number of sides (default 8 → octagon)
+
+    Returns
+    -------
+    ASCII STL string with two solids: 'lateral' and 'top'.
+    """
+    angles = [2.0 * np.pi * i / n_sides for i in range(n_sides)]
+    # Corner vertices at bottom and top
+    pts_bot = np.array(
+        [[center_x + radius_m * np.cos(a), center_y + radius_m * np.sin(a), 0.0]
+         for a in angles]
+    )
+    pts_top = np.array(
+        [[center_x + radius_m * np.cos(a), center_y + radius_m * np.sin(a), height_m]
+         for a in angles]
+    )
+    top_center = np.array([center_x, center_y, height_m])
+
+    lines: list[str] = []
+
+    def _write_facet(out: list[str], normal: np.ndarray, v0, v1, v2) -> None:
+        n = normal / (np.linalg.norm(normal) + 1e-300)
+        out.append(f"  facet normal {n[0]:.6e} {n[1]:.6e} {n[2]:.6e}")
+        out.append("    outer loop")
+        for v in (v0, v1, v2):
+            out.append(f"      vertex {v[0]:.6e} {v[1]:.6e} {v[2]:.6e}")
+        out.append("    endloop")
+        out.append("  endfacet")
+
+    # ---- lateral panels ----
+    lines.append("solid lateral")
+    for i in range(n_sides):
+        bl = pts_bot[i]
+        br = pts_bot[(i + 1) % n_sides]
+        tl = pts_top[i]
+        tr = pts_top[(i + 1) % n_sides]
+        # Outward normal: midpoint of panel projected radially
+        mid_angle = 2.0 * np.pi * (i + 0.5) / n_sides
+        normal = np.array([np.cos(mid_angle), np.sin(mid_angle), 0.0])
+        # Triangle 1: BL, BR, TR
+        _write_facet(lines, normal, bl, br, tr)
+        # Triangle 2: BL, TR, TL
+        _write_facet(lines, normal, bl, tr, tl)
+    lines.append("endsolid lateral")
+
+    # ---- top cap ----
+    lines.append("solid top")
+    top_normal = np.array([0.0, 0.0, 1.0])
+    for i in range(n_sides):
+        tl = pts_top[i]
+        tr = pts_top[(i + 1) % n_sides]
+        _write_facet(lines, top_normal, top_center, tl, tr)
+    lines.append("endsolid top")
+
+    return "\n".join(lines) + "\n"
 
 
 def build_domain_fms(
@@ -468,6 +574,7 @@ def generate_mesh(
     thermal: bool = False,
     coriolis: bool = True,
     canopy_enabled: bool = False,
+    domain_type: str = "box",
     **kwargs,
 ) -> dict:
     """Generate an OpenFOAM case directory with cfMesh mesh and BC files.
@@ -555,14 +662,33 @@ def generate_mesh(
     # ---- Build closed FMS surface for cfMesh --------------------------------
     half_x = geom["total_x_m"] / 2
     half_y = geom["total_y_m"] / 2
-    fms_path = trisurf_dir / "domain.stl"
-    build_domain_fms(
-        terrain_stl=stl_path,
-        out_fms=fms_path,
-        x_min=-half_x, x_max=half_x,
-        y_min=-half_y, y_max=half_y,
-        z_min=0.0, z_max=domain_z_max,
-    )
+
+    if domain_type == "cylinder":
+        # Generate octagonal domain STL (lateral + top solids)
+        octagon_radius_m = domain_km * 1000.0 / 2.0
+        octagon_stl_content = make_octagon_stl(
+            center_x=0.0,
+            center_y=0.0,
+            radius_m=octagon_radius_m,
+            height_m=domain_z_max,
+        )
+        octagon_stl_path = trisurf_dir / "domain_octagon.stl"
+        octagon_stl_path.parent.mkdir(parents=True, exist_ok=True)
+        octagon_stl_path.write_text(octagon_stl_content)
+        logger.info(
+            "Octagonal domain STL saved: %s (radius=%.0f m, height=%.0f m)",
+            octagon_stl_path, octagon_radius_m, domain_z_max,
+        )
+    else:
+        # Box domain: build closed FMS from terrain + bounding box faces
+        fms_path = trisurf_dir / "domain.stl"
+        build_domain_fms(
+            terrain_stl=stl_path,
+            out_fms=fms_path,
+            x_min=-half_x, x_max=half_x,
+            y_min=-half_y, y_max=half_y,
+            z_min=0.0, z_max=domain_z_max,
+        )
 
     # ---- cfMesh refinement zones -------------------------------------------
     cfmesh_refinements = compute_cfmesh_refinements(geom, terrain_z_max)
@@ -673,6 +799,8 @@ def generate_mesh(
             "y_max":       half_y,
             "z_min":       0.0,
             "z_max":       geom["total_z_m"],
+            "octagonal":   domain_type == "cylinder",
+            "radius_m":    domain_km * 1000.0 / 2.0 if domain_type == "cylinder" else None,
         },
         "mesh": {
             "max_cell_size":          geom["max_cell_size"],
