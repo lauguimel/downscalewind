@@ -59,6 +59,9 @@ if [ -f "$INFLOW_JSON" ] && command -v python3 > /dev/null 2>&1; then
     # Write cell centres (needed by init_from_era5.py)
     postProcess -func writeCellCentres -time 0 > log.writeCellCentres 2>&1 || true
     python3 init_from_era5.py --case-dir . --inflow "$INFLOW_JSON" \
+{% if solver.name | default('simpleFoam') == 'buoyantBoussinesqSimpleFoam' -%}
+        --neutral-T-init \
+{% endif -%}
         > log.init_from_era5 2>&1
     if [ $? -ne 0 ]; then
         echo "WARNING: init_from_era5.py failed — falling back to potentialFoam" >&2

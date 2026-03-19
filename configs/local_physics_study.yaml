@@ -10,7 +10,7 @@ study:
   site: perdigao
   timestamp: "2017-05-04T22:00"      # Venkatraman reference case
   resolution_m: 500
-  domain_km: 10
+  domain_km: 5
   context_cells: 1
   n_iterations: 2000
   write_interval: 200
@@ -44,6 +44,13 @@ cases:
     thermal: false
     coriolis: true
     canopy: true
+  B_flat:
+    label: "BBSF flat terrain"
+    solver: buoyantBoussinesqSimpleFoam
+    thermal: true
+    coriolis: false
+    canopy: false
+    flat: true                        # srtm_tif=None → flat terrain STL
 
 validation:
   obs_zarr: "data/raw/perdigao_obs.zarr"

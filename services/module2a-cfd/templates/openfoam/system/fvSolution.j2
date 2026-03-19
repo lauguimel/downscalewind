@@ -169,10 +169,10 @@ SIMPLE
 {
     nNonOrthogonalCorrectors 0;
 
-{% if solver.name | default('simpleFoam') in ['buoyantBoussinesqSimpleFoam', 'buoyantSimpleFoam'] %}
-    pRefCell        0;
-    pRefValue       0;
-{% endif %}
+    // No pRefCell/pRefValue: pressure is anchored by Dirichlet BCs
+    // (fixedValue p_rgh at top + uniformMixed/pos(phi) at lateral outlets).
+    // Adding pRefCell would shift the entire p_rgh field by a constant each
+    // iteration, conflicting with the Dirichlet values → divergence.
 
     residualControl
     {
@@ -214,7 +214,8 @@ relaxationFactors
 {% if solver.name | default('simpleFoam') == 'buoyantBoussinesqSimpleFoam' %}
         U               0.3;
         T               0.5;
-        "(k|epsilon)"   0.7;
+        // Conservative k/eps: stable stratification can cause turbulence blowup
+        "(k|epsilon)"   0.3;
 {% else %}
         U               0.7;
         k               0.7;

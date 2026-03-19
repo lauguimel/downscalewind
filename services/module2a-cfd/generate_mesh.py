@@ -619,6 +619,19 @@ def generate_mesh(
                      np.polyval(np.polyfit(_z, _u, 5), 10),
                      np.polyval(np.polyfit(_z, _u, 5), 100))
 
+    # ---- p_rgh at domain top (fixedValue BC — synoptic pressure anchor) --------
+    # p_rgh = p/rho0 - g*z  [m2/s2, kinematic]
+    _G = 9.81
+    _RHO0 = 1.225
+    _p_rgh_top = 0.0
+    if "p_profile" in inflow and "z_levels" in inflow:
+        _p_top_Pa = float(np.interp(domain_top,
+                                    np.array(inflow["z_levels"]),
+                                    np.array(inflow["p_profile"])))
+        _p_rgh_top = _p_top_Pa / _RHO0 + _G * domain_top
+        logger.info("p_rgh_top = %.2f m2/s2 (ERA5 p=%.0f Pa at z_top=%.0f m)",
+                    _p_rgh_top, _p_top_Pa, domain_top)
+
     # ---- Robin BC: inletOutlet on all lateral faces ----------------------------
     wind_dir = float(inflow.get("wind_dir", 270.0))
     logger.info("Wind dir %.1f° — Robin BC on all lateral faces", wind_dir)
@@ -683,12 +696,18 @@ def generate_mesh(
             "longitude": site_lon,
         },
         "physics": {
-            "T_ref_K":  float(inflow.get("T_ref", 300.0)),
-            "p_ref_Pa": 0.0,
-            "rho_ref":  1.225,
-            "coriolis": coriolis,
+            "T_ref_K":    float(inflow.get("T_ref", 300.0)),
+            "p_ref_Pa":   0.0,
+            "rho_ref":    1.225,
+            "p_rgh_top":  _p_rgh_top,
+            "coriolis":   coriolis,
             "T_poly_coeffs": T_poly_coeffs,
             "U_poly_coeffs": U_poly_coeffs,
+            # Ambient turbulence sources (BBSF k-ε Lim, Venkatraman 2023 Table 3)
+            "k_amb":           kwargs.get("k_amb", 0.001),
+            "epsilon_amb":     kwargs.get("epsilon_amb", 7.208e-08),
+            "l_max":           kwargs.get("l_max", 62.14),
+            "use_lmax_limiter": kwargs.get("use_lmax_limiter", False),
         },
         "solver": {
             "name":           solver_name,

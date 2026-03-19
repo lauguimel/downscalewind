@@ -39,9 +39,10 @@ logger = logging.getLogger(__name__)
 KAPPA = 0.41
 CMU   = 0.09
 
-# Patches on lateral/top faces that receive MappedFile boundaryData.
+# Patches on lateral faces that receive MappedFile boundaryData.
+# Top face now uses zeroGradient U + fixedValue p_rgh (no boundaryData needed).
 # Wall functions, noSlip, zeroGradient, fixedFluxPressure etc. are left unchanged.
-BOUNDARY_DATA_PATCHES = {"west", "east", "south", "north", "top"}
+BOUNDARY_DATA_PATCHES = {"west", "east", "south", "north"}
 
 # Legacy: patch types for old inletOutlet workflow (kept for backward compat)
 PATCHABLE_BC_TYPES = {"inletOutlet", "outletInlet"}
@@ -314,11 +315,13 @@ def interpolate_profiles_at_z(
     else:
         T = np.full(n, T_ref)
 
-    # p_rgh = p/rho0 - g*z [m²/s²], dimensions [0 2 -2 0 0 0 0]
-    # Same kinematic formulation for both simpleFoam and buoyantBoussinesqSimpleFoam
+    # p_rgh = p/rho0 + g*z [m²/s²], dimensions [0 2 -2 0 0 0 0]
+    # OF defines p = p_rgh + rhok*gh where gh = g · h = -g*z (g = (0,0,-9.81))
+    # → p_rgh = p + rhok*g*z ≈ p/rho0 + g*z  (PLUS sign, not minus!)
+    # With minus sign, dp_rgh/dz ≈ -2g → artificial +g body force everywhere → crash.
     if p_interp is not None:
         p_abs = p_interp(z)  # Pa
-        p_rgh = p_abs / RHO0 - G_ACC * z
+        p_rgh = p_abs / RHO0 + G_ACC * z
     else:
         p_rgh = np.zeros(n)
 
@@ -553,6 +556,7 @@ def write_boundary_data(
 def init_from_era5(
     case_dir: Path | str,
     inflow_json: Path | str,
+    neutral_T_init: bool = False,
 ) -> None:
     """Initialise OpenFOAM fields from ERA5 interpolation.
 
@@ -563,6 +567,9 @@ def init_from_era5(
     ----------
     case_dir : OpenFOAM case directory (must have mesh already generated).
     inflow_json : Path to inflow profile JSON (from prepare_inflow.py).
+    neutral_T_init : if True, skip T internalField patch (keep template uniform
+        T_ref). BCs still get stratified ERA5 profile via boundaryData.
+        Use for BBSF: avoids large buoyancy at iter 1 that crashes k-epsilon.
     """
     case_dir = Path(case_dir)
 
@@ -599,7 +606,13 @@ def init_from_era5(
     _patch_internal_field_scalar(k_path, cell_fields["k"])
     _patch_internal_field_scalar(epsilon_path, cell_fields["epsilon"])
     if t_path.exists():
-        _patch_internal_field_scalar(t_path, cell_fields["T"])
+        if neutral_T_init:
+            # Keep template uniform T_ref — BBSF neutral spin-up strategy.
+            # Stratified T from ERA5 activates full buoyancy at iter 1 → k-ε crash.
+            # BCs (boundaryData) still receive stratified profile below.
+            logger.info("neutral_T_init=True: skipping T internalField patch (keeping uniform T_ref)")
+        else:
+            _patch_internal_field_scalar(t_path, cell_fields["T"])
     if p_path.exists():
         _patch_internal_field_scalar(p_path, cell_fields["p_rgh"])
 
@@ -650,6 +663,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--case-dir", required=True, help="OpenFOAM case directory")
     parser.add_argument("--inflow", required=True, help="Inflow profile JSON")
+    parser.add_argument("--neutral-T-init", action="store_true",
+                        help="Keep T internalField as uniform T_ref (BBSF neutral spin-up)")
     args = parser.parse_args()
 
-    init_from_era5(case_dir=Path(args.case_dir), inflow_json=Path(args.inflow))
+    init_from_era5(
+        case_dir=Path(args.case_dir),
+        inflow_json=Path(args.inflow),
+        neutral_T_init=args.neutral_T_init,
+    )

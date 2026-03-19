@@ -32,6 +32,12 @@ RAS
     turbulence      on;
 
     printCoeffs     yes;
+
+    // Prevent k/epsilon from going to zero (stable stratification can suppress k).
+    // Without these bounds, nuT = Cmu*k2/eps -> 0/0 or overflow -> U diverges.
+    kMin            1e-10;
+    epsilonMin      1e-10;
+    nuTildaMin      1e-10;
 }
 
 // ************************************************************************* //

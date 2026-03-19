@@ -8,14 +8,17 @@
 /*
  * 0/p_rgh.j2 — Modified pressure boundary conditions
  *
- * p_rgh = p - rho * g * h   (buoyantBoussinesqSimpleFoam)
- * p_rgh ≡ p/rho             (simpleFoam, kinematic)
+ * p_rgh = p/rho0 + g*z      (buoyantBoussinesqSimpleFoam, kinematic)
+ *   OF: p = p_rgh + rhok*gh, gh = g·h = -9.81*z → p_rgh = p/rho0 + g*z
+ *   Hydrostatic check: dp_rgh/dz ≈ 0 (neutral, rhok=1) ✓
+ * p_rgh ≡ p/rho0            (simpleFoam, kinematic — hydrostatic in p implicitly)
  *
- * BC strategy (DUAL of U — opposite fraction):
+ * BC strategy:
  *   Lateral faces:  uniformMixed + MappedFile with pos(phi) fraction.
  *                   Dirichlet p(z) on OUTLET faces (where U is Neumann),
  *                   Neumann on INLET faces (where U is Dirichlet).
- *   Top:           fixedFluxPressure (consistent with uniformMixed U)
+ *   Top:           fixedValue = ERA5 hydrostatic p_rgh at domain top
+ *                  (anchors synoptic pressure; U is free via zeroGradient)
  *   Terrain/bottom: fixedFluxPressure (no-penetration wall)
  *
  * Profiles are written by init_from_era5.py into constant/boundaryData/.
@@ -58,9 +61,10 @@ boundaryField
 {% endfor %}
     top
     {
-        type            fixedFluxPressure;
-        gradient        uniform 0;
-        value           uniform 0;
+        // p_rgh_top = p_ERA5(z_top)/rho0 + g*z_top [m2/s2] (OF sign convention)
+        // Anchors synoptic pressure; velocity adjusts freely (zeroGradient U).
+        type            fixedValue;
+        value           uniform {{ "%.4f" | format(physics.p_rgh_top) }};
     }
 
     terrain

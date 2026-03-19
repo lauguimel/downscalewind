@@ -8,12 +8,12 @@
 /*
  * 0/U.j2 — Velocity boundary conditions
  *
- * BC strategy (uniformMixed + MappedFile on all lateral faces):
+ * BC strategy (uniformMixed + MappedFile on lateral faces):
  *   Lateral:  uniformMixed — reads height-varying ERA5 profiles from
  *             constant/boundaryData/<patch>/0/U (MappedFile).
  *             Inlet/outlet switching via phi: neg(phi) → Dirichlet (inlet),
  *             pos(phi) → Neumann/zeroGradient (outlet).
- *   Top:      uniformMixed (same strategy)
+ *   Top:      zeroGradient (free boundary — pressure anchored by fixedValue p_rgh)
  *   Terrain:  noSlip
  *
  * Profiles are written by init_from_era5.py into constant/boundaryData/.
@@ -63,20 +63,7 @@ boundaryField
 {% endfor %}
     top
     {
-        type            uniformMixed;
-        uniformValue
-        {
-            type        mappedFile;
-            mapMethod   planar;
-            fieldTable  U;
-        }
-        uniformGradient zero;
-        uniformValueFraction
-        {
-            type        expression;
-            expression  "neg(phi)";
-        }
-        value           uniform ( {{ "%.6f" | format(inflow.u_hub * fd_x) }} {{ "%.6f" | format(inflow.u_hub * fd_y) }} 0 );
+        type            zeroGradient;
     }
 
     terrain

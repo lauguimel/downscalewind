@@ -9,9 +9,10 @@
  * 0/T.j2 — Temperature boundary conditions
  *
  * BC strategy:
- *   Lateral + top:  uniformMixed + MappedFile (inlet: T(z), outlet: zeroGradient)
- *   Terrain:        zeroGradient (neutral) or fixedValue (non-neutral)
- *   Bottom:         zeroGradient
+ *   Lateral:  uniformMixed + MappedFile (inlet: T(z), outlet: zeroGradient)
+ *   Top:      zeroGradient (free boundary — pressure anchored by fixedValue p_rgh)
+ *   Terrain:  zeroGradient (neutral) or fixedValue (non-neutral)
+ *   Bottom:   zeroGradient
  */
 FoamFile
 {
@@ -53,20 +54,7 @@ boundaryField
 {% endfor %}
     top
     {
-        type            uniformMixed;
-        uniformValue
-        {
-            type        mappedFile;
-            mapMethod   planar;
-            fieldTable  T;
-        }
-        uniformGradient zero;
-        uniformValueFraction
-        {
-            type        expression;
-            expression  "neg(phi)";
-        }
-        value           uniform {{ inflow.T_ref }};
+        type            zeroGradient;
     }
 
     terrain

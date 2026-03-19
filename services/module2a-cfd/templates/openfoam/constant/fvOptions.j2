@@ -11,6 +11,7 @@
  * Conditional blocks:
  *   physics.coriolis (default true)  — Coriolis force on U (atmCoriolisUSource)
  *   canopy.enabled   (default false) — Plant canopy drag (atmPlantCanopy* native)
+ *   solver.thermal   (default false) — Ambient k/ε sources + L_max limiter (BBSF)
  *
  * Note: ESI v2412 uses native atmCoriolisUSource from atmosphericModels library.
  *       Requires `libs (atmosphericModels);` in controlDict.
@@ -18,6 +19,8 @@
  * References:
  *   Sogachev & Panferov (2006) — TKE-dissipation for plant canopy
  *   Letzgus et al. (WES 2023) — Perdigão CFD with k-epsilon + canopy
+ *   van der Laan et al. (2021) — Ambient source terms for k-ε stability
+ *   Venkatraman et al. (WES 2023, Table 3) — kAmb=0.001, εAmb=7.208e-8, Lmax=62.14
  */
 FoamFile
 {
@@ -45,9 +48,54 @@ coriolisForce
 }
 {% endif -%}
 
-// NOTE: Boussinesq buoyancy is handled natively by buoyantSimpleFoam
+// NOTE: Boussinesq buoyancy is handled natively by buoyantBoussinesqSimpleFoam
 // via the Boussinesq equation of state in thermophysicalProperties.
 // No explicit fvOption needed — p_rgh + g provide the buoyancy coupling.
+
+{% if solver.thermal | default(false) -%}
+// -------------------------------------------------------------------------
+// Ambient turbulence source terms (k-epsilon Lim, BBSF only)
+//   Prevents k/epsilon from going to zero above the ABL in stably
+//   stratified conditions. Without these, nuT → 0 → U diverges.
+//   Values from Venkatraman et al. (WES 2023), Table 3, k-ε Lim model:
+//     kAmb = 0.001 m²/s²  (≈ 0.1% of typical ABL peak TKE)
+//     εAmb = 7.208e-8 m²/s³ = Cμ^(3/4) * kAmb^(3/2) / Lmax
+//   Reference: van der Laan et al. (2021a), Venkatraman et al. (2023)
+// -------------------------------------------------------------------------
+
+ambientTurbSource
+{
+    type            atmAmbientTurbSource;
+
+    atmAmbientTurbSourceCoeffs
+    {
+        selectionMode   all;
+        kAmb            {{ physics.k_amb | default(0.001) }};
+        epsilonAmb      {{ physics.epsilon_amb | default(7.208e-08) }};
+    }
+}
+
+// -------------------------------------------------------------------------
+// Turbulence length scale limiter (Lmax = 62.14 m)
+//   Caps the turbulent length scale L = k^(3/2)/ε to prevent unrealistic
+//   growth above the ABL. Lmax from Venkatraman et al. (WES 2023) Table 3.
+//   NOTE: disabled by default — Venkatraman warns this causes convergence
+//   difficulties. Enable with physics.use_lmax_limiter: true only once
+//   the ambient source terms alone produce a stable solution.
+// -------------------------------------------------------------------------
+{% if physics.use_lmax_limiter | default(false) %}
+lengthScaleLimiter
+{
+    type            atmLengthScaleTurbSource;
+
+    atmLengthScaleTurbSourceCoeffs
+    {
+        selectionMode   all;
+        Lmax            {{ physics.l_max | default(62.14) }};
+    }
+}
+{% endif -%}
+{% endif -%}
 
 {% if canopy.enabled | default(false) -%}
 // -------------------------------------------------------------------------

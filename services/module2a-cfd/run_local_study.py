@@ -122,12 +122,14 @@ def step_generate_cases(cfg: dict, cases_dir: Path, inflow_json: Path) -> dict:
         log.info("Generating case", extra={
             "case": case_id, "label": case_cfg["label"],
         })
+        # flat: true → use flat terrain STL (srtm_tif=None) for box validation
+        case_srtm = None if case_cfg.get("flat", False) else srtm_tif
         generate_mesh(
             site_cfg=site_cfg,
             resolution_m=study["resolution_m"],
             context_cells=study["context_cells"],
             output_dir=case_dir,
-            srtm_tif=srtm_tif,
+            srtm_tif=case_srtm,
             inflow_json=inflow_json,
             domain_km=study["domain_km"],
             solver_name=case_cfg["solver"],
@@ -250,8 +252,15 @@ def step_init_fields(case_dirs: dict, inflow_json: Path, cfg: dict) -> None:
             shutil.copy2(init_script, dst_init)
 
         # Run init_from_era5.py locally (needs numpy/scipy, not OpenFOAM)
+        is_bbsf = "boussinesq" in cfg["cases"][case_id]["solver"].lower()
+        init_cmd = [
+            sys.executable, "init_from_era5.py",
+            "--case-dir", ".", "--inflow", "inflow.json",
+        ]
+        if is_bbsf:
+            init_cmd.append("--neutral-T-init")
         result = subprocess.run(
-            [sys.executable, "init_from_era5.py", "--case-dir", ".", "--inflow", "inflow.json"],
+            init_cmd,
             cwd=case_dir,
             capture_output=True, text=True,
         )
@@ -358,14 +367,18 @@ def step_precursor(case_dirs: dict, cfg: dict) -> None:
             "timestep": latest.name,
         })
 
-        # Copy U, k, epsilon, p (NOT T — BBSF needs its own thermal init)
-        # Also NOT p_rgh — different formulation (static vs kinematic)
-        for field in ["U", "k", "epsilon", "nut"]:
+        # Copy U, k, epsilon, nut, p_rgh from converged SF solution.
+        # Both SF and BBSF use kinematic p_rgh [m2/s2]; when T ≈ T_ref the
+        # buoyancy correction is negligible, so SF p_rgh is a valid BBSF start.
+        for field in ["U", "k", "epsilon", "nut", "p_rgh"]:
             src = latest / field
             dst = cdir / "0" / field
             if src.exists() and dst.exists():
                 shutil.copy2(src, dst)
                 log.info("  Copied %s from %s/%s", field, sf_case_id, latest.name)
+
+        # Note: T internalField is kept as uniform T_ref by init_from_era5.py
+        # (--neutral-T-init flag in step_init_fields). No post-hoc reset needed.
 
 
 def step_solve(case_dirs: dict, cfg: dict) -> dict:
