@@ -1,0 +1,72 @@
+# Phase 0.1 — Stability sweep: 4 BBSF cases with parametric inflow
+# Validates thermal stratification physics (neutral/stable/unstable/very_stable)
+# at 500m resolution (coarse, fast, convergence + profile check only — no canopy at this res).
+#
+# Go/no-go criteria:
+#   - All 4 cases converge < 2000 iter
+#   - Profile U: case B (stable) slower near ground, C (unstable) faster vs A (neutral)
+#   - Temperature stays within ±5K of T_ref
+#
+# Usage:
+#   cd services/module2a-cfd
+#   python run_local_study.py ../../configs/phase0_stability.yaml
+
+study:
+  name: phase0_stability
+  site: perdigao
+  resolution_m: 500
+  domain_km: 5
+  context_cells: 1
+  n_iterations: 2000
+  write_interval: 200
+  inflow_mode: parametric         # no ERA5 dependency — clean log-law profiles
+  inflow:
+    speed_ms: 10.0
+    direction_deg: 231            # Venkatraman (2023) reference direction
+
+docker:
+  image: "microfluidica/openfoam:latest"
+  nprocs: 1                       # serial for local testing
+
+cases:
+  A:
+    label: "BBSF neutral (Ri_b=0)"
+    solver: buoyantBoussinesqSimpleFoam
+    thermal: true
+    coriolis: false
+    canopy: false
+    stability: neutral
+
+  B:
+    label: "BBSF stable (Ri_b=+0.15)"
+    solver: buoyantBoussinesqSimpleFoam
+    thermal: true
+    coriolis: false
+    canopy: false
+    stability: stable
+
+  C:
+    label: "BBSF unstable (Ri_b=-0.10)"
+    solver: buoyantBoussinesqSimpleFoam
+    thermal: true
+    coriolis: false
+    canopy: false
+    stability: unstable
+
+  D:
+    label: "BBSF very stable (Ri_b=+0.30)"
+    solver: buoyantBoussinesqSimpleFoam
+    thermal: true
+    coriolis: false
+    canopy: false
+    stability: very_stable
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  venkatraman_csv: "references/venkatraman2023_digitized.csv"
+  landcover_tif: "data/raw/landcover_perdigao.tif"
+  output_dir: "data/validation/phase0_stability"
+  towers:
+    - tse04    # SW ridge (upwind)
+    - tse09    # valley
+    - tse13    # NE ridge (downwind)

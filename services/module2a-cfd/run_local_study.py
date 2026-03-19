@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shared.logging_config import get_logger
 from generate_mesh import generate_mesh
 from prepare_inflow import prepare_inflow
+from generate_campaign import build_parametric_inflow
 
 log = get_logger("run_local_study")
 
@@ -102,8 +103,57 @@ def step_prepare_inflow(cfg: dict, output_json: Path) -> dict:
     return inflow
 
 
-def step_generate_cases(cfg: dict, cases_dir: Path, inflow_json: Path) -> dict:
-    """Generate OpenFOAM case directories for each study case."""
+def step_prepare_parametric_inflows(cfg: dict, cases_dir: Path) -> dict[str, Path]:
+    """Generate one inflow JSON per case using parametric (no ERA5) profiles.
+
+    Reads speed_ms and direction_deg from cfg['study']['inflow'], and
+    stability preset from each case's 'stability' key.
+
+    Returns {case_id: Path(inflow.json)}.
+    """
+    inflow_dir = cases_dir / "inflow_profiles"
+    inflow_dir.mkdir(parents=True, exist_ok=True)
+
+    inflow_cfg = cfg["study"]["inflow"]
+    speed_ms = float(inflow_cfg["speed_ms"])
+    direction_deg = float(inflow_cfg["direction_deg"])
+
+    inflow_jsons: dict[str, Path] = {}
+    for case_id, case_cfg in cfg["cases"].items():
+        json_path = inflow_dir / f"inflow_{case_id}.json"
+        if json_path.exists():
+            log.info("Parametric inflow exists", extra={"case": case_id})
+            inflow_jsons[case_id] = json_path
+            continue
+
+        stability = case_cfg.get("stability", "neutral")
+        inflow_data = build_parametric_inflow(
+            speed_ms=speed_ms,
+            direction_deg=direction_deg,
+            stability=stability,
+        )
+        json_path.write_text(__import__("json").dumps(inflow_data, indent=2))
+        log.info("Parametric inflow written", extra={
+            "case": case_id,
+            "stability": stability,
+            "speed_ms": speed_ms,
+            "direction_deg": direction_deg,
+        })
+        inflow_jsons[case_id] = json_path
+
+    return inflow_jsons
+
+
+def step_generate_cases(
+    cfg: dict,
+    cases_dir: Path,
+    inflow_jsons: "dict[str, Path] | Path",
+) -> dict:
+    """Generate OpenFOAM case directories for each study case.
+
+    inflow_jsons may be either a single Path (shared across all cases, ERA5 mode)
+    or a dict {case_id: Path} for parametric mode where each case has its own profile.
+    """
     site_cfg_path = ROOT / "configs" / "sites" / f"{cfg['study']['site']}.yaml"
     with open(site_cfg_path) as f:
         site_cfg = yaml.safe_load(f)
@@ -122,6 +172,10 @@ def step_generate_cases(cfg: dict, cases_dir: Path, inflow_json: Path) -> dict:
         log.info("Generating case", extra={
             "case": case_id, "label": case_cfg["label"],
         })
+        # Resolve per-case or shared inflow JSON
+        inflow_json = (
+            inflow_jsons[case_id] if isinstance(inflow_jsons, dict) else inflow_jsons
+        )
         # flat: true → use flat terrain STL (srtm_tif=None) for box validation
         case_srtm = None if case_cfg.get("flat", False) else srtm_tif
         generate_mesh(
@@ -218,8 +272,16 @@ def step_mesh(case_dirs: dict, cfg: dict) -> None:
         shutil.copytree(poly_mesh, dst)
 
 
-def step_init_fields(case_dirs: dict, inflow_json: Path, cfg: dict) -> None:
-    """Initialize fields from ERA5/inflow profile for each case."""
+def step_init_fields(
+    case_dirs: dict,
+    inflow_jsons: "dict[str, Path] | Path",
+    cfg: dict,
+) -> None:
+    """Initialize fields from inflow profile for each case.
+
+    inflow_jsons may be a single shared Path (ERA5 mode) or
+    a dict {case_id: Path} (parametric mode).
+    """
     _, _, solver_image, solver_platform = _detect_docker_config(cfg)
 
     for case_id, case_dir in case_dirs.items():
@@ -238,6 +300,11 @@ def step_init_fields(case_dirs: dict, inflow_json: Path, cfg: dict) -> None:
             case_dir,
             "postProcess -func writeCellCentres -time 0",
             image=solver_image, platform=solver_platform,
+        )
+
+        # Resolve per-case or shared inflow JSON
+        inflow_json = (
+            inflow_jsons[case_id] if isinstance(inflow_jsons, dict) else inflow_jsons
         )
 
         # Copy inflow.json to case dir
@@ -601,14 +668,22 @@ def main(config, cases, skip_mesh, skip_solve, only_compare):
         "resolution_m": cfg["study"]["resolution_m"],
     })
 
-    # Inflow
-    inflow_json = cases_dir / "inflow.json"
-    inflow = step_prepare_inflow(cfg, inflow_json)
+    # Inflow — ERA5 (single shared) or parametric (per-case)
+    inflow_mode = cfg["study"].get("inflow_mode", "era5")
+    if inflow_mode == "parametric":
+        inflow_jsons = step_prepare_parametric_inflows(cfg, cases_dir)
+    else:
+        inflow_json = cases_dir / "inflow.json"
+        step_prepare_inflow(cfg, inflow_json)
+        inflow_jsons = inflow_json  # single Path, shared across cases
 
     # Generate cases
-    case_dirs = step_generate_cases(cfg, cases_dir, inflow_json)
+    case_dirs = step_generate_cases(cfg, cases_dir, inflow_jsons)
 
     if only_compare:
+        if inflow_mode == "parametric":
+            log.info("Parametric mode: skipping observation comparison")
+            return
         export_paths = {}
         output_dir = ROOT / cfg["validation"]["output_dir"]
         for case_id in cfg["cases"]:
@@ -623,7 +698,7 @@ def main(config, cases, skip_mesh, skip_solve, only_compare):
         step_mesh(case_dirs, cfg)
 
     # Init fields
-    step_init_fields(case_dirs, inflow_json, cfg)
+    step_init_fields(case_dirs, inflow_jsons, cfg)
 
     # LAD for canopy cases
     step_generate_lad(case_dirs, cfg)
@@ -639,8 +714,11 @@ def main(config, cases, skip_mesh, skip_solve, only_compare):
     # Export
     export_paths = step_export(case_dirs, cfg)
 
-    # Compare
-    step_compare(export_paths, cfg, timings)
+    # Compare vs observations (ERA5 mode only — parametric has no matching timestamp)
+    if inflow_mode != "parametric":
+        step_compare(export_paths, cfg, timings)
+    else:
+        log.info("Parametric mode: skipping obs comparison (no ERA5 timestamp)")
 
     log.info("Study complete", extra={
         "cases_dir": str(cases_dir),

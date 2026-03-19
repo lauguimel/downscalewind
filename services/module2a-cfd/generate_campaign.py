@@ -100,6 +100,11 @@ STABILITY_PRESETS = {
         "T_grad_Km": -0.3,
         "L_mo": -200.0,    # negative = unstable
     },
+    "very_stable": {
+        "Ri_b": 0.30,
+        "T_grad_Km": 1.0,  # K per 100m (strong inversion)
+        "L_mo": 80.0,      # short Obukhov length = very stable
+    },
 }
 
 
