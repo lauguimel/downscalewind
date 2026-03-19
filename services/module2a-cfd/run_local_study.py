@@ -178,14 +178,16 @@ def step_generate_cases(
         )
         # flat: true → use flat terrain STL (srtm_tif=None) for box validation
         case_srtm = None if case_cfg.get("flat", False) else srtm_tif
+        # Per-case resolution overrides study-level (for resolution sweep configs)
+        case_resolution = case_cfg.get("resolution_m", study.get("resolution_m", 500))
         generate_mesh(
             site_cfg=site_cfg,
-            resolution_m=study["resolution_m"],
+            resolution_m=case_resolution,
             context_cells=study["context_cells"],
             output_dir=case_dir,
             srtm_tif=case_srtm,
             inflow_json=inflow_json,
-            domain_km=study["domain_km"],
+            domain_km=study.get("domain_km", 5),
             solver_name=case_cfg["solver"],
             thermal=case_cfg.get("thermal", False),
             coriolis=case_cfg.get("coriolis", False),
@@ -649,7 +651,10 @@ def step_compare(export_paths: dict, cfg: dict, timings: dict) -> None:
 @click.option("--skip-mesh", is_flag=True, help="Skip mesh generation")
 @click.option("--skip-solve", is_flag=True, help="Skip solver (export only)")
 @click.option("--only-compare", is_flag=True, help="Only run comparison step")
-def main(config, cases, skip_mesh, skip_solve, only_compare):
+@click.option("--generate-only", is_flag=True,
+              help="Generate case dirs + inflow JSONs only (no cfMesh, no solve). "
+                   "Use for pre-generating HPC cases before upload via submit_pilot.py.")
+def main(config, cases, skip_mesh, skip_solve, only_compare, generate_only):
     """Run a local physics-progressive CFD study."""
     with open(config) as f:
         cfg = yaml.safe_load(f)
@@ -665,7 +670,7 @@ def main(config, cases, skip_mesh, skip_solve, only_compare):
     log.info("Starting local study", extra={
         "study_name": study_name,
         "cases": list(cfg["cases"].keys()),
-        "resolution_m": cfg["study"]["resolution_m"],
+        "resolution_m": cfg["study"].get("resolution_m", "per-case"),
     })
 
     # Inflow — ERA5 (single shared) or parametric (per-case)
@@ -679,6 +684,14 @@ def main(config, cases, skip_mesh, skip_solve, only_compare):
 
     # Generate cases
     case_dirs = step_generate_cases(cfg, cases_dir, inflow_jsons)
+
+    if generate_only:
+        log.info("--generate-only: stopping after case generation (no cfMesh/solve)")
+        log.info("Cases ready for HPC upload", extra={
+            "cases_dir": str(cases_dir),
+            "n_cases": len(case_dirs),
+        })
+        return
 
     if only_compare:
         if inflow_mode == "parametric":

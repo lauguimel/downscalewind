@@ -1,0 +1,73 @@
+# Phase 0.2 — Resolution sweep: 500m / 250m / 100m
+# BBSF neutral, direction 231°, 10 m/s, 10km domain
+#
+# Go/no-go gate:
+#   RMSE(100m) < RMSE(250m) × 0.8 AND cost(100m) < 2h/run → choose 100m
+#   RMSE(100m) ≈ RMSE(250m) (< 5% diff)                   → choose 250m
+#   RMSE(250m) < RMSE(500m) × 0.7                          → 250m minimum
+#
+# Workflow:
+#   # 1. Generate case dirs locally (templates + STL, no cfMesh)
+#   cd services/module2a-cfd
+#   python run_local_study.py ../../configs/phase0_resolution.yaml --generate-only
+#
+#   # 2. Upload + submit to Aqua HPC (cfMesh + solver run on HPC)
+#   python submit_pilot.py --group phase0_resolution --all
+#
+#   # 3. After download, compare with obs
+#   python run_local_study.py ../../configs/phase0_resolution.yaml --only-compare
+
+study:
+  name: phase0_resolution
+  site: perdigao
+  timestamp: "2017-05-04T22:00"          # for ERA5 obs comparison after HPC run
+  domain_km: 10                           # 10km box (larger than Phase 0.1 5km)
+  context_cells: 1
+  n_iterations: 2000
+  write_interval: 200
+  inflow_mode: parametric
+  inflow:
+    speed_ms: 10.0
+    direction_deg: 231                    # Venkatraman reference direction
+
+docker:
+  image: "microfluidica/openfoam:latest"
+  nprocs: 12                              # parallel on HPC (unused for generate-only)
+
+cases:
+  res_500:
+    label: "BBSF neutral 500m"
+    solver: buoyantBoussinesqSimpleFoam
+    thermal: true
+    coriolis: false
+    canopy: false
+    stability: neutral
+    resolution_m: 500                     # per-case resolution (overrides study level)
+
+  res_250:
+    label: "BBSF neutral 250m"
+    solver: buoyantBoussinesqSimpleFoam
+    thermal: true
+    coriolis: false
+    canopy: false
+    stability: neutral
+    resolution_m: 250
+
+  res_100:
+    label: "BBSF neutral 100m"
+    solver: buoyantBoussinesqSimpleFoam
+    thermal: true
+    coriolis: false
+    canopy: false
+    stability: neutral
+    resolution_m: 100
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  venkatraman_csv: "references/venkatraman2023_digitized.csv"
+  landcover_tif: "data/raw/landcover_perdigao.tif"
+  output_dir: "data/validation/phase0_resolution"
+  towers:
+    - tse04    # SW ridge (upwind)
+    - tse09    # valley
+    - tse13    # NE ridge (downwind)

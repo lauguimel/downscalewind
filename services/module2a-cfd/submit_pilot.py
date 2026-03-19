@@ -41,32 +41,64 @@ WRAPPER = "OF9_RT.sh"
 GROUPS = {
     "pilot_sf": {
         "manifest": "campaign_manifest_pilot_sf.json",
+        "local_dir": PILOT_DIR,
         "walltime": "4:00:00",
         "mem_gb": 8,
         "ncpus": 12,
     },
     "pilot_bbsf": {
         "manifest": "campaign_manifest_pilot_bbsf.json",
+        "local_dir": PILOT_DIR,
         "walltime": "5:00:00",
         "mem_gb": 8,
         "ncpus": 12,
     },
+    # ── Phase 0.2 — Resolution sweep (500m / 250m / 100m, BBSF neutral) ──
+    "phase0_resolution": {
+        "manifest": None,   # auto-generated from configs/phase0_resolution.yaml
+        "local_dir": PROJECT_ROOT / "data" / "cases" / "phase0_resolution",
+        "walltime": "2:00:00",   # 100m run ≈ 40 min on 12 cores — keep margin
+        "mem_gb": 16,
+        "ncpus": 12,
+    },
 }
+
+
+def _load_phase0_resolution_manifest() -> dict:
+    """Build the phase0_resolution manifest from configs/phase0_resolution.yaml."""
+    import yaml
+    cfg_path = PROJECT_ROOT / "configs" / "phase0_resolution.yaml"
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+    manifest = {}
+    for case_id, case_cfg in cfg["cases"].items():
+        manifest[f"case_{case_id}"] = {
+            "solver": case_cfg["solver"],
+            "direction_deg": cfg["study"]["inflow"]["direction_deg"],
+            "speed_ms": cfg["study"]["inflow"]["speed_ms"],
+            "stability": case_cfg.get("stability", "neutral"),
+            "resolution_m": case_cfg["resolution_m"],
+            "thermal": case_cfg.get("thermal", True),
+        }
+    return manifest
 
 # ── PBS template ────────────────────────────────────────────────────────
 PBS_TEMPLATE = """\
-#!/bin/bash
+#!/bin/bash -l
 #PBS -N {job_name}
-#PBS -q workq
 #PBS -l select=1:ncpus={ncpus}:mem={mem_gb}GB
 #PBS -l walltime={walltime}
 #PBS -j oe
-#PBS -o {job_name}.log
+#PBS -V
 
-cd $PBS_O_WORKDIR
+cd {remote_dir}
+chmod +x Allrun Allcontinue Allclean 2>/dev/null
 
 # Run inside OpenFOAM 9 container
-{wrapper} ./Allrun {ncpus}
+if [ -f "Allrun" ]; then
+    {wrapper} -- "cd {remote_dir} && ./Allrun {ncpus}" > log.Allrun 2>&1
+    exit $?
+fi
 """
 
 
@@ -82,18 +114,28 @@ def _get_db() -> CaseDatabase:
 
 # ── Commands ────────────────────────────────────────────────────────────
 
-def register_cases(dry_run: bool = False) -> list[str]:
+def _get_manifest(group_name: str, group_cfg: dict) -> dict:
+    """Return the {case_id: params} manifest for a group."""
+    if group_name == "phase0_resolution":
+        return _load_phase0_resolution_manifest()
+    manifest_path = group_cfg["local_dir"] / group_cfg["manifest"]
+    return json.loads(manifest_path.read_text())
+
+
+def register_cases(dry_run: bool = False, group_filter: str | None = None) -> list[str]:
     """Register pilot cases in the hpc-sim database."""
     db = _get_db()
     config = _get_config()
     registered = []
 
     for group_name, group_cfg in GROUPS.items():
-        manifest_path = PILOT_DIR / group_cfg["manifest"]
-        manifest = json.loads(manifest_path.read_text())
+        if group_filter and group_name != group_filter:
+            continue
+        manifest = _get_manifest(group_name, group_cfg)
+        local_base = group_cfg["local_dir"]
 
         for case_id, params in manifest.items():
-            local_dir = str(PILOT_DIR / case_id)
+            local_dir = str(local_base / case_id)
             existing = db.get_case(case_id)
             if existing:
                 print(f"  {case_id}: already in DB (state={existing['state']})")
@@ -124,7 +166,7 @@ def register_cases(dry_run: bool = False) -> list[str]:
     return registered
 
 
-def upload_cases(dry_run: bool = False) -> list[str]:
+def upload_cases(dry_run: bool = False, group_filter: str | None = None) -> list[str]:
     """Upload pilot cases to Aqua via hpc-sim TransferManager."""
     db = _get_db()
     config = _get_config()
@@ -132,6 +174,8 @@ def upload_cases(dry_run: bool = False) -> list[str]:
     uploaded = []
 
     for group_name in GROUPS:
+        if group_filter and group_name != group_filter:
+            continue
         cases = db.list_cases(group_name=group_name)
         for case in cases:
             case_id = case["case_id"]
@@ -157,7 +201,7 @@ def upload_cases(dry_run: bool = False) -> list[str]:
     return uploaded
 
 
-def submit_cases(dry_run: bool = False) -> dict[str, str]:
+def submit_cases(dry_run: bool = False, group_filter: str | None = None) -> dict[str, str]:
     """Write PBS scripts remotely + submit via PBSManager.submit_batch()."""
     db = _get_db()
     config = _get_config()
@@ -169,6 +213,8 @@ def submit_cases(dry_run: bool = False) -> dict[str, str]:
     scripts: dict[str, str] = {}  # case_id -> remote PBS script path
 
     for group_name, group_cfg in GROUPS.items():
+        if group_filter and group_name != group_filter:
+            continue
         cases = db.list_cases(group_name=group_name)
         for case in cases:
             case_id = case["case_id"]
@@ -183,6 +229,7 @@ def submit_cases(dry_run: bool = False) -> dict[str, str]:
                 mem_gb=group_cfg["mem_gb"],
                 walltime=group_cfg["walltime"],
                 wrapper=WRAPPER,
+                remote_dir=remote_dir,
             )
 
             if dry_run:
@@ -190,11 +237,11 @@ def submit_cases(dry_run: bool = False) -> dict[str, str]:
                       f"(walltime={group_cfg['walltime']}, ncpus={group_cfg['ncpus']})")
                 continue
 
-            # Write PBS script to remote via SSH (single command)
+            # Write PBS script to remote via base64 (printf multiline fails over SSH)
             ssh.run(f"chmod +x {remote_dir}/Allrun")
-            # Use printf to avoid heredoc issues
-            escaped = pbs_content.replace("\\", "\\\\").replace("'", "'\\''")
-            ssh.run(f"printf '%s' '{escaped}' > {remote_dir}/run.pbs")
+            import base64
+            b64 = base64.b64encode(pbs_content.encode()).decode()
+            ssh.run(f"echo '{b64}' | base64 -d > {remote_dir}/run.pbs")
 
             scripts[case_id] = f"{remote_dir}/run.pbs"
             print(f"  {case_id}: PBS script written")
@@ -254,6 +301,9 @@ def main():
     parser.add_argument("--all", action="store_true",
                         help="Register + upload + submit")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--group", default=None,
+                        choices=list(GROUPS.keys()),
+                        help="Restrict to one group (default: all groups)")
     args = parser.parse_args()
 
     if args.all:
@@ -267,17 +317,18 @@ def main():
         show_status()
         return
 
+    g = args.group
     if args.register:
-        print("=== Registering pilot cases ===")
-        register_cases(dry_run=args.dry_run)
+        print(f"=== Registering cases (group={g or 'all'}) ===")
+        register_cases(dry_run=args.dry_run, group_filter=g)
 
     if args.upload:
-        print("\n=== Uploading to Aqua ===")
-        upload_cases(dry_run=args.dry_run)
+        print(f"\n=== Uploading to Aqua (group={g or 'all'}) ===")
+        upload_cases(dry_run=args.dry_run, group_filter=g)
 
     if args.submit:
-        print("\n=== Submitting PBS jobs ===")
-        submit_cases(dry_run=args.dry_run)
+        print(f"\n=== Submitting PBS jobs (group={g or 'all'}) ===")
+        submit_cases(dry_run=args.dry_run, group_filter=g)
 
 
 if __name__ == "__main__":
