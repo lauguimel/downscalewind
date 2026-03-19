@@ -839,8 +839,8 @@ def generate_mesh(
         },
         "solver": {
             "name":           solver_name,
-            "n_iter":         1000,
-            "write_interval": 100,
+            "n_iter":         kwargs.get("n_iter", 1000),
+            "write_interval": kwargs.get("write_interval", 100),
             "n_cores":        n_cores,
             "thermal":        thermal,
             "boussinesq":     kwargs.get("boussinesq", False),
