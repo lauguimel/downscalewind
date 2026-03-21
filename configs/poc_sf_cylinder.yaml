@@ -1,0 +1,54 @@
+# PoC SF-only — Smoke test: simpleFoam on cylindrical domain (3 rings)
+#
+# Validates that the octagonal domain + 3-ring cfMesh refinement works with SF.
+# Single case, Perdigão, ERA5 inflow at 2017-05-04T22:00 (SW, near-neutral).
+#
+# Ring structure (controlled by maxCellSize + compute_octagonal_refinements):
+#   outer      : 1000 m cells  (maxCellSize = resolution_m)
+#   mesoZone   :  200 m cells  (hardcoded in generate_mesh.py)
+#   fineZone   :  100 m cells  (hardcoded)
+#   nearTerrain:   50 m cells  (hardcoded)
+#
+# Terrain STL auto-resolves to 50m for cylinder (decoupled from maxCellSize).
+#
+# Usage:
+#   cd services/module2a-cfd
+#   python run_local_study.py ../../configs/poc_sf_cylinder.yaml
+#
+# Go/no-go:
+#   - cfMesh generates mesh without error, maxNonOrtho < 70°
+#   - SF converges < 300 iter (residuals U < 1e-4)
+#   - Wind field shows terrain speedup on ridges
+
+study:
+  name: poc_sf_cylinder
+  site: perdigao
+  resolution_m: 1000            # outer ring maxCellSize — 3 inner rings are hardcoded
+  timestamp: "2017-05-04T22:00"
+  domain_type: cylinder          # octagonal domain with concentric refinement
+  domain_km: 10                  # diameter = 10 km → radius = 5 km (fast smoke test)
+  context_cells: 1
+  n_iterations: 500
+  write_interval: 100
+  inflow_mode: era5
+
+docker:
+  image: "microfluidica/openfoam:latest"
+  nprocs: 6
+
+cases:
+  sf_smoke:
+    label: "SF cylinder smoke (R=5km, 4-ring 1000/200/100/50m)"
+    solver: simpleFoam
+    thermal: false
+    coriolis: false
+    canopy: false
+    stability: neutral
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  output_dir: "data/validation/poc_sf_cylinder"
+  towers:
+    - tse04
+    - tse09
+    - tse13

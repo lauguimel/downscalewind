@@ -54,7 +54,7 @@ DOMAIN_HEIGHT_M    = 3000.0     # m above highest terrain point
 STL_FILENAME       = "terrain.stl"
 
 # cfMesh boundary layer defaults
-N_BOUNDARY_LAYERS      = 3
+N_BOUNDARY_LAYERS      = 5
 BL_EXPANSION_RATIO     = 1.2
 BL_FIRST_LAYER_M       = 10.0   # max first layer thickness [m]
 
@@ -188,6 +188,62 @@ def compute_cfmesh_refinements(
     })
 
     return refinements
+
+
+def compute_octagonal_refinements(
+    domain_km: float,
+    domain_z_max: float,
+    fine_cell_size: float = 30,
+) -> list[dict]:
+    """Compute 3-ring objectRefinement zones for octagonal/cylindrical domains.
+
+    Ring structure (progressive refinement from maxCellSize):
+      mesoZone   : 500 m cells, ~57% of domain diameter (transition zone)
+      fineZone   : 200 m cells, 2.4×2.4 km (GNN output cube + margin)
+      nearTerrain: fine_cell_size cells, 2.4×2.4×0.5 km (surface layer)
+
+    The ratio between adjacent zones is kept ≤ 2.5:1 for smooth cfMesh transitions.
+
+    Parameters
+    ----------
+    domain_km:
+        Domain diameter [km].
+    domain_z_max:
+        Domain height [m].
+    fine_cell_size:
+        Finest cell size [m] (default 100, use 50 for production).
+
+    Returns
+    -------
+    List of objectRefinement dicts for meshDict.j2 template.
+    """
+    diameter_m = domain_km * 1000.0
+
+    # mesoZone: 500m cells, covers ~57% of domain diameter (capped at 80%)
+    meso_extent = min(0.57 * diameter_m, 0.8 * diameter_m)
+    # Fine/near-terrain: fixed 2.4 km (GNN output cube 1×1 km + 0.7 km margin)
+    fine_extent = min(2400.0, 0.5 * diameter_m)
+
+    return [
+        {
+            "name": "mesoZone",
+            "cell_size": 500,
+            "cx": 0.0, "cy": 0.0, "cz": domain_z_max / 2.0,
+            "lx": meso_extent, "ly": meso_extent, "lz": domain_z_max,
+        },
+        {
+            "name": "fineZone",
+            "cell_size": 200,
+            "cx": 0.0, "cy": 0.0, "cz": 500.0,
+            "lx": fine_extent, "ly": fine_extent, "lz": 1000.0,
+        },
+        {
+            "name": "nearTerrain",
+            "cell_size": fine_cell_size,
+            "cx": 0.0, "cy": 0.0, "cz": 250.0,
+            "lx": fine_extent, "ly": fine_extent, "lz": 500.0,
+        },
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -400,6 +456,57 @@ def make_octagon_stl(
     lines.append("endsolid top")
 
     return "\n".join(lines) + "\n"
+
+
+def build_octagon_domain_stl(
+    terrain_stl: Path,
+    octagon_stl_content: str,
+    out_stl: Path,
+) -> None:
+    """Build a closed STL surface for cfMesh from terrain + octagon prism.
+
+    Combines into a single ASCII multi-solid file:
+    - terrain STL (bottom surface, solid "terrain")
+    - octagon prism (lateral walls + top cap, solids "lateral" and "top")
+
+    cfMesh requires a closed surfaceFile to determine inside/outside via
+    ray-casting.  Without the terrain as the bottom face, the octagon is open
+    and cartesianMesh produces zero cells.
+    """
+    try:
+        from stl import mesh as stl_mesh
+    except ImportError as exc:
+        raise ImportError("numpy-stl is required: pip install numpy-stl") from exc
+
+    terrain = stl_mesh.Mesh.from_file(str(terrain_stl))
+
+    out_stl.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_stl, "w") as f:
+        # Terrain solid (bottom)
+        f.write("solid terrain\n")
+        for tri in terrain.vectors:
+            v0, v1, v2 = tri
+            e1 = v1 - v0
+            e2 = v2 - v0
+            n = np.cross(e1, e2)
+            norm = np.linalg.norm(n)
+            if norm > 0:
+                n = n / norm
+            f.write(f"  facet normal {n[0]} {n[1]} {n[2]}\n")
+            f.write("    outer loop\n")
+            for v in tri:
+                f.write(f"      vertex {v[0]} {v[1]} {v[2]}\n")
+            f.write("    endloop\n")
+            f.write("  endfacet\n")
+        f.write("endsolid terrain\n")
+
+        # Octagon solids (lateral + top) — already ASCII
+        f.write(octagon_stl_content)
+
+    logger.info(
+        "Combined octagon domain STL: %s (%d terrain tri + octagon lateral+top)",
+        out_stl, len(terrain.vectors),
+    )
 
 
 def build_domain_fms(
@@ -629,6 +736,9 @@ def generate_mesh(
     DEG_LAT = 1.0 / 111_000.0
     DEG_LON = 1.0 / (111_000.0 * np.cos(np.radians(site_lat)))
 
+    is_cylinder = domain_type == "cylinder"
+    octagon_radius_m = domain_km * 1000.0 / 2.0 if is_cylinder else None
+
     terrain_z_max = 0.0
     if srtm_tif is not None and Path(srtm_tif).exists():
         bounds = (
@@ -637,13 +747,18 @@ def generate_mesh(
             site_lon + half_m * DEG_LON,
             site_lat + half_m * DEG_LAT,
         )
+        # For cylindrical domains, STL must match finest refinement,
+        # not maxCellSize which controls the coarse outer ring.
+        stl_resolution = min(30, resolution_m) if is_cylinder else resolution_m
         terrain_stats = dem_to_stl(
             srtm_tif=Path(srtm_tif),
             out_stl=stl_path,
             bounds_lonlat=bounds,
-            resolution_m=resolution_m,
+            resolution_m=stl_resolution,
             site_lat=site_lat,
             site_lon=site_lon,
+            level_terrain=is_cylinder,
+            domain_radius_m=octagon_radius_m,
         )
         terrain_z_max = terrain_stats["z_max"]
     else:
@@ -663,21 +778,19 @@ def generate_mesh(
     half_x = geom["total_x_m"] / 2
     half_y = geom["total_y_m"] / 2
 
-    if domain_type == "cylinder":
-        # Generate octagonal domain STL (lateral + top solids)
-        octagon_radius_m = domain_km * 1000.0 / 2.0
+    if is_cylinder:
+        # Build closed surface: terrain (bottom) + octagon (lateral + top)
         octagon_stl_content = make_octagon_stl(
             center_x=0.0,
             center_y=0.0,
             radius_m=octagon_radius_m,
             height_m=domain_z_max,
         )
-        octagon_stl_path = trisurf_dir / "domain_octagon.stl"
-        octagon_stl_path.parent.mkdir(parents=True, exist_ok=True)
-        octagon_stl_path.write_text(octagon_stl_content)
+        combined_stl_path = trisurf_dir / "domain_octagon.stl"
+        build_octagon_domain_stl(stl_path, octagon_stl_content, combined_stl_path)
         logger.info(
             "Octagonal domain STL saved: %s (radius=%.0f m, height=%.0f m)",
-            octagon_stl_path, octagon_radius_m, domain_z_max,
+            combined_stl_path, octagon_radius_m, domain_z_max,
         )
     else:
         # Box domain: build closed FMS from terrain + bounding box faces
@@ -691,7 +804,10 @@ def generate_mesh(
         )
 
     # ---- cfMesh refinement zones -------------------------------------------
-    cfmesh_refinements = compute_cfmesh_refinements(geom, terrain_z_max)
+    if is_cylinder:
+        cfmesh_refinements = compute_octagonal_refinements(domain_km, domain_z_max)
+    else:
+        cfmesh_refinements = compute_cfmesh_refinements(geom, terrain_z_max)
     logger.info(
         "cfMesh refinements: %s",
         ", ".join(f"{r['name']}={r['cell_size']:.0f}m" for r in cfmesh_refinements),
@@ -757,6 +873,22 @@ def generate_mesh(
         _p_rgh_top = _p_top_Pa / _RHO0 + _G * domain_top
         logger.info("p_rgh_top = %.2f m2/s2 (ERA5 p=%.0f Pa at z_top=%.0f m)",
                     _p_rgh_top, _p_top_Pa, domain_top)
+
+    # ---- Lmax: turbulent length scale limiter (Venkatraman KE-Lim) ---------------
+    # Lmax = 0.00027 * U_g / fc  (Blackadar 1962, Venkatraman 2023 Table 3)
+    # fc = 2 * Omega * sin(lat), U_g = geostrophic wind ≈ ERA5 wind at domain top
+    _OMEGA = 7.2921e-5
+    _fc = 2.0 * _OMEGA * np.sin(np.radians(site_lat))
+    _u_hub = float(inflow.get("u_hub", 10.0))
+    if "u_profile" in inflow and "z_levels" in inflow:
+        _U_geo = float(np.interp(domain_top,
+                                 np.array(inflow["z_levels"]),
+                                 np.array(inflow["u_profile"])))
+    else:
+        _U_geo = _u_hub
+    _l_max_calc = 0.00027 * _U_geo / abs(_fc)
+    logger.info("Lmax limiter: U_geo=%.1f m/s, fc=%.2e s⁻¹ → Lmax=%.1f m (Blackadar)",
+                _U_geo, _fc, _l_max_calc)
 
     # ---- Robin BC: inletOutlet on all lateral faces ----------------------------
     wind_dir = float(inflow.get("wind_dir", 270.0))
@@ -834,8 +966,8 @@ def generate_mesh(
             # Ambient turbulence sources (BBSF k-ε Lim, Venkatraman 2023 Table 3)
             "k_amb":           kwargs.get("k_amb", 0.001),
             "epsilon_amb":     kwargs.get("epsilon_amb", 7.208e-08),
-            "l_max":           kwargs.get("l_max", 62.14),
-            "use_lmax_limiter": kwargs.get("use_lmax_limiter", False),
+            "l_max":           kwargs.get("l_max", min(_l_max_calc, 62.14)),
+            "use_lmax_limiter": kwargs.get("use_lmax_limiter", thermal),
         },
         "solver": {
             "name":           solver_name,

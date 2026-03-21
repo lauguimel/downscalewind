@@ -33,14 +33,14 @@ FoamFile
 {% if domain.octagonal %}
 // ---------------------------------------------------------------------------
 // Octagonal (cylindrical) domain
-// Surface: terrain STL (bottom) + octagon prism STL (lateral + top)
+// Closed surface: terrain (bottom) + octagon prism (lateral + top)
 // ---------------------------------------------------------------------------
 surfaceFile "constant/triSurface/domain_octagon.stl";
 
 // ---------------------------------------------------------------------------
 // Global cell size — controls the coarsest cells in the outer zone
 // ---------------------------------------------------------------------------
-maxCellSize 1000;
+maxCellSize {{ mesh.max_cell_size }};
 
 // ---------------------------------------------------------------------------
 // Surface refinement on terrain
@@ -56,40 +56,22 @@ surfaceMeshRefinement
 }
 
 // ---------------------------------------------------------------------------
-// Object-based refinement zones — 3-ring octagonal refinement
-//   mesoZone  : 200 m cells across 16x16 km meso region
-//   fineZone  : 100 m cells in 2.4x2.4 km central region
-//   nearTerrain: 50 m cells in lower 500 m of fine zone
+// Object-based refinement zones — 3-ring structure
+//   Sizes computed by generate_mesh.py based on domain radius
 // ---------------------------------------------------------------------------
 objectRefinements
 {
-    mesoZone
+{%- for ref in cfmesh_refinements %}
+    {{ ref.name }}
     {
-        type    box;
-        centre  ( 0 0 1500 );
-        lengthX 16000;
-        lengthY 16000;
-        lengthZ 3000;
-        cellSize 200;
+        type        box;
+        cellSize    {{ ref.cell_size }};
+        centre      ( {{ ref.cx }} {{ ref.cy }} {{ ref.cz }} );
+        lengthX     {{ ref.lx }};
+        lengthY     {{ ref.ly }};
+        lengthZ     {{ ref.lz }};
     }
-    fineZone
-    {
-        type    box;
-        centre  ( 0 0 500 );
-        lengthX 2400;
-        lengthY 2400;
-        lengthZ 1000;
-        cellSize 100;
-    }
-    nearTerrain
-    {
-        type    box;
-        centre  ( 0 0 250 );
-        lengthX 2400;
-        lengthY 2400;
-        lengthZ 500;
-        cellSize 50;
-    }
+{%- endfor %}
 }
 
 // ---------------------------------------------------------------------------
