@@ -1,0 +1,28 @@
+# HPC configuration — QUT Aqua cluster (PBS)
+# Used by _archive/run_convergence_study.py via hpc_foam library
+
+connection:
+  hpc_host: aqua.qut.edu.au
+  username: maitreje  # update with actual username
+  remote_base_dir: /home/maitreje/rheotool_bbSF/convergence
+
+container:
+  # OpenFOAM 9 + RheoTool (buoyantBoussinesqSimpleFoam available)
+  apptainer_wrapper: OF9_RT.sh
+  # Alternative: direct .sif image path
+  # apptainer_image: /data/maitreje/containers/openfoam9-rheotool_v1.4.sif
+  of_version: 9  # OF9 Foundation naming conventions
+
+resources:
+  default_ncpus: 12
+  default_mem: 8GB
+  default_walltime: "4:00:00"
+  queue: workq
+
+solver:
+  name: simpleFoam  # overridden per case by convergence study
+  parallel: true
+
+monitoring:
+  check_interval: 300
+  max_stall_time: 3600

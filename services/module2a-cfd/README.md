@@ -5,25 +5,28 @@
 ## Responsabilité
 
 1. **Reconstruction du profil vertical** ERA5/IFS → conditions aux limites OpenFOAM
-2. **Batch runner CFD** : génération et exécution de 240 simulations `buoyantSimpleFoam`
-3. **Export** des champs CFD (u, v, w, p, k, ω, T) vers la base de données Zarr
+2. **Batch runner CFD** : génération et exécution de 240 simulations `simpleFoam`
+3. **Export** des champs CFD (u, v, w, p, k, ε, T) vers la base de données Zarr
 
-## Solveur : buoyantSimpleFoam
+## Solveur : simpleFoam + k-ε modifié
 
-Résout les équations de Navier-Stokes compressibles avec équation d'énergie
-et terme de flottabilité — adapté aux écoulements ABL stratifiés.
+Résout les équations RANS incompressibles stationnaires — validé quantitativement
+à Perdigão (Letzgus et al. WES 2023, 88M cellules, 12.5 m résolution).
 
-Turbulence : k-ω SST avec `atmOmegaWallFunction` (standard ABL OpenFOAM).
+Turbulence : k-ε modifié (Parente et al. 2011) avec `epsilonWallFunction`.
+Source terms : Coriolis + canopée forestière via `fvOptions`.
 
-## Conditions aux limites (domaine fixe)
+## Conditions aux limites (Robin BC, domaine fixe)
 
-| Face | Condition | Variables |
-|------|-----------|-----------|
-| Left, Front, Right | `atmBoundaryLayerInletVelocity` | U, k, ω |
-| Back | `totalPressure` p=0 | p_rgh |
-| Top | `pressureInletOutletVelocity` + p=0 | p_rgh, U |
-| Bottom | `noSlip` + `atmNutWallFunction` | U=0, nut |
+| Face | U | k | ε | p_rgh | T |
+|------|---|---|---|-------|---|
+| West, East, South, North | `inletOutlet` | `inletOutlet` | `inletOutlet` | `fixedValue 0` | `inletOutlet` |
+| Top | `slip` | `zeroGradient` | `zeroGradient` | `fixedValue 0` | `inletOutlet` |
+| Terrain | `noSlip` | `kqRWallFunction` | `epsilonWallFunction` | `fixedFluxPressure` | (see T.j2) |
 
+`inletOutlet` = Robin BC : Dirichlet (profil prescrit) quand le flux entre,
+Neumann (`zeroGradient`) quand il sort. Basculé automatiquement par face de cellule.
+Réf : Venkatraman et al. (WES 2023), Neunaber et al. (WES 2022).
 Direction du vent paramétrée via `flowDir` → pas de rotation du maillage.
 
 ## Maillage : snappyHexMesh
@@ -64,14 +67,14 @@ templates/openfoam/
 │   ├── turbulenceProperties
 │   └── transportProperties
 └── 0/
-    ├── U.j2, T.j2, k.j2, omega.j2, p_rgh.j2, alphat.j2
+    ├── U.j2, T.j2, k.j2, epsilon.j2, p_rgh.j2, alphat.j2
 ```
 
 ## Fichiers à créer
 
 - `prepare_inflow.py` : reconstruction profil vertical (3 couches + Helmholtz 1D)
 - `generate_mesh.py` : SRTM → STL → blockMesh + snappyHexMesh
-- `run_cfd_batch.py` : batch runner multiprocessing
+- `_archive/run_cfd_batch.py` : batch runner multiprocessing (archived — use run_sf_poc.py)
 - `export_cfd.py` : fluidfoam → Zarr
 - `check_coherence.py` : métriques de cohérence physique
 - `requirements.txt`, `Dockerfile`

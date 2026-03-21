@@ -90,11 +90,13 @@ validation/      → reads all outputs, produces metrics + figures
 - **ERA5 grid convention**: lat[0]=North, v>0=northward
 
 ### Module 2A — CFD (in progress)
-- OpenFOAM `simpleFoam` (k-ε, OF2412 ESI) via Apptainer on HPC
+- OpenFOAM `simpleFoam` (k-ε, OF ESI) via Apptainer on HPC
+- Mesher: cfMesh `cartesianMesh` (octree, 2:1 transitions) — replaced blockMesh+snappyHexMesh
+- Docker: `microfluidica/openfoam:latest` (OF v2512 ESI + cfMesh pre-compiled)
 - 240 runs: 16 directions × 5 speeds × 3 stabilities
 - Source terms: Coriolis + plant canopy drag (fvOptions)
 - Land cover: ESA WorldCover 2021 (10 m) + ETH Canopy Height 2020 (10 m)
-- Pipeline: SRTM→STL→snappyHexMesh→solver→kraken-sim→Parquet→Zarr
+- Pipeline: SRTM→STL→build_domain_fms→cartesianMesh→solver→kraken-sim→Parquet→Zarr
 
 ## Data Splits (never change)
 - train: 2016-01-01 → 2016-10-31
@@ -110,6 +112,54 @@ validation/      → reads all outputs, produces metrics + figures
 - Site config: configs/sites/perdigao.yaml
 - MLflow tracking: local in data/mlruns/
 - Notebooks: Marimo (.py files), not Jupyter. Use `marimo edit <file>.py`
+
+## Directory Layout — Module 2A CFD
+
+```
+services/module2a-cfd/
+├── *.py                  # Core pipeline scripts (run_sf_poc, generate_mesh, prepare_inflow, etc.)
+├── analysis/             # Post-processing, figures, validation vs obs
+│   analyze_convergence.py, make_convergence_figures.py, compare_cfd_obs.py,
+│   plot_convergence.py, viz_3d_terrain.py, viz_3d_notebook.py
+├── _archive/             # Deferred scripts (HPC orchestration, precursor, old batch runner)
+├── templates/openfoam/   # Jinja2 templates for OF case generation
+└── tests/                # Unit tests (octagon STL, meshDict, BC templates)
+```
+
+```
+data/validation/
+├── figures/              # ALL publication figures, organized by study
+│   ├── convergence/      # Mesh convergence study (5 canonical figures)
+│   ├── sf_bbsf/          # SF vs BBSF + Venkatraman reproductions
+│   ├── physics_study/    # Physics progressive profiles
+│   └── poc_sf/           # PoC SF convergence + CFD vs ERA5
+├── convergence_study/    # Resolution sweep results (500/250/100m)
+├── physics_study/        # 5-case physics study (Zarr + CSVs)
+├── phase0_stability/     # Thermal stratification results
+├── phase0_resolution/    # Resolution sweep results
+└── phase1_cylinder/      # Cylindrical domain results
+```
+
+## Workflow Rules — Studies & Campaigns
+
+### When starting a new study or campaign:
+1. **Config first**: create a YAML in `configs/` (e.g., `configs/my_study.yaml`)
+2. **Core scripts only at root**: only scripts that are part of the reusable pipeline go in `services/module2a-cfd/`
+3. **Analysis scripts → `analysis/`**: any post-processing, figure generation, or comparison script goes in `services/module2a-cfd/analysis/`
+4. **One-off experiments → notebook**: use Marimo in `notebooks/` for exploratory work, not standalone .py scripts
+5. **Results → `data/validation/<study_name>/`**: each study gets its own subfolder
+6. **Figures → `data/validation/figures/<study_name>/`**: all PNGs/PDFs go here, never at the root of `data/validation/`
+
+### When a study is superseded:
+- Move its scripts to `_archive/` (not delete — may be reused in v1.5+)
+- Keep its results in `data/validation/` (reproducibility)
+- Update references in CLAUDE.md and README if needed
+
+### What NOT to do:
+- Never put figures directly in `data/validation/` (use `figures/<study>/`)
+- Never create standalone .py analysis scripts at the module root — use `analysis/`
+- Never leave OpenFOAM case directories in `data/` root — use `data/cases/<study>/`
+- Never duplicate pipeline logic in one-off scripts — import from core scripts
 
 ## Key Files
 - `shared/data_io.py` — Zarr creation/read helpers, CF-conventions
