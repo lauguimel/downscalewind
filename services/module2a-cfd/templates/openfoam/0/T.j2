@@ -32,27 +32,8 @@ internalField   uniform {{ inflow.T_ref }};
 
 boundaryField
 {
-{% if domain is defined and domain.octagonal %}
-    lateral
-    {
-        type            uniformMixed;
-        uniformValue
-        {
-            type        mappedFile;
-            mapMethod   planar;
-            fieldTable  T;
-        }
-        uniformGradient zero;
-        uniformValueFraction
-        {
-            type        expression;
-            expression  "neg(phi)";
-        }
-        value           uniform {{ inflow.T_ref }};
-    }
-
-{% else %}
-{% for face in ['west', 'east', 'south', 'north'] %}
+{% set lateral_faces = domain.lateral_patches | default(['lateral']) if (domain is defined and domain.octagonal) else ['west', 'east', 'south', 'north'] %}
+{% for face in lateral_faces %}
     {{ face }}
     {
         type            uniformMixed;
@@ -72,7 +53,6 @@ boundaryField
     }
 
 {% endfor %}
-{% endif %}
     top
     {
         type            inletOutlet;

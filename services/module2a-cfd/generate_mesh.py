@@ -961,6 +961,10 @@ def generate_mesh(
             "z_max":       geom["total_z_m"],
             "octagonal":   domain_type == "cylinder",
             "radius_m":    domain_km * 1000.0 / 2.0 if domain_type == "cylinder" else None,
+            # lateral_patches: patch names for BC templates
+            # cfMesh octagon → ["lateral"], terrainBlockMesher → ["section_0".."section_7"]
+            # None → template defaults to ["lateral"] for octagonal, cardinal for box
+            "lateral_patches": None,
         },
         "mesh": {
             "max_cell_size":          geom["max_cell_size"],

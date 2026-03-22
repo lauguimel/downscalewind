@@ -33,7 +33,8 @@ internalField   uniform 101325;
 
 boundaryField
 {
-{% for face in ['west', 'east', 'south', 'north'] %}
+{% set lateral_faces = domain.lateral_patches | default(['lateral']) if (domain is defined and domain.octagonal) else ['west', 'east', 'south', 'north'] %}
+{% for face in lateral_faces %}
     {{ face }}
     {
         type            calculated;
@@ -48,12 +49,6 @@ boundaryField
     }
 
     terrain
-    {
-        type            calculated;
-        value           uniform 101325;
-    }
-
-    bottom
     {
         type            calculated;
         value           uniform 101325;
@@ -67,7 +62,7 @@ internalField   uniform 0;
 
 boundaryField
 {
-{% for face in ['west', 'east', 'south', 'north'] %}
+{% for face in lateral_faces %}
     {{ face }}
     {
         type            fixedValue;
@@ -81,11 +76,6 @@ boundaryField
     }
 
     terrain
-    {
-        type            zeroGradient;
-    }
-
-    bottom
     {
         type            zeroGradient;
     }

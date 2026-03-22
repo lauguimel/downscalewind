@@ -32,39 +32,15 @@ internalField   uniform {{ "%.6e" | format(nut_init) }};
 
 boundaryField
 {
-{% if domain is defined and domain.octagonal %}
-    lateral
+{% set lateral_faces = domain.lateral_patches | default(['lateral']) if (domain is defined and domain.octagonal) else ['west', 'east', 'south', 'north'] %}
+{% for face in lateral_faces %}
+    {{ face }}
     {
         type            calculated;
         value           uniform {{ "%.6e" | format(nut_init) }};
     }
 
-{% else %}
-    west
-    {
-        type            calculated;
-        value           uniform {{ "%.6e" | format(nut_init) }};
-    }
-
-    east
-    {
-        type            calculated;
-        value           uniform {{ "%.6e" | format(nut_init) }};
-    }
-
-    south
-    {
-        type            calculated;
-        value           uniform {{ "%.6e" | format(nut_init) }};
-    }
-
-    north
-    {
-        type            calculated;
-        value           uniform {{ "%.6e" | format(nut_init) }};
-    }
-
-{% endif %}
+{% endfor %}
     top
     {
         type            calculated;

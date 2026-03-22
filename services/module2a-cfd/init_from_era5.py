@@ -71,6 +71,10 @@ def detect_lateral_patches(boundary_faces: dict) -> set[str]:
     """
     if "lateral" in boundary_faces:
         return {"lateral"}
+    # terrainBlockMesher cylindrical domain: section_0 .. section_N
+    sections = {k for k in boundary_faces if k.startswith("section_")}
+    if sections:
+        return sections
     return {"west", "east", "south", "north"}
 
 # Legacy: patch types for old inletOutlet workflow (kept for backward compat)
@@ -337,22 +341,26 @@ def interpolate_profiles_at_z(
     U[:, 1] = speed * fd_y
 
     k = np.full(n, u_star**2 / CMU**0.5)
-    epsilon = CMU**0.75 * k**1.5 / (KAPPA * np.maximum(z, z0 * 2.0))
+    # Epsilon: UNIFORM value consistent with epsilonWallFunction.
+    # The wall function computes eps_wall = Cmu^0.75 * k^1.5 / (kappa * y_wall).
+    # Using log-law eps(z) creates a violent mismatch at iter 2 when the wall
+    # function overrides → eps drops 40× → eps/k ratio crashes → Pε explodes.
+    # y_wall ≈ first BL cell height (cfMesh maxFirstLayerThickness).
+    _y_wall = 10.0  # m — matches BL_FIRST_LAYER_M in generate_mesh.py
+    _k_scalar = float(k[0])
+    _eps_uniform = CMU**0.75 * _k_scalar**1.5 / (KAPPA * _y_wall)
+    epsilon = np.full(n, _eps_uniform)
+    logger.info("epsilon init = %.6e m²/s³ (uniform, y_wall=%.1f m, k=%.4f)",
+                _eps_uniform, _y_wall, _k_scalar)
 
     if T_interp is not None:
         T = T_interp(z)
     else:
         T = np.full(n, T_ref)
 
-    # p_rgh = p/rho0 + g*z [m²/s²], dimensions [0 2 -2 0 0 0 0]
-    # OF defines p = p_rgh + rhok*gh where gh = g · h = -g*z (g = (0,0,-9.81))
-    # → p_rgh = p + rhok*g*z ≈ p/rho0 + g*z  (PLUS sign, not minus!)
-    # With minus sign, dp_rgh/dz ≈ -2g → artificial +g body force everywhere → crash.
-    if p_interp is not None:
-        p_abs = p_interp(z)  # Pa
-        p_rgh = p_abs / RHO0 + G_ACC * z
-    else:
-        p_rgh = np.zeros(n)
+    # p_rgh is a Lagrange multiplier ≈ 0 in Boussinesq.
+    # Do NOT initialise with ERA5 pressure (creates non-Boussinesq gradient).
+    p_rgh = np.zeros(n)
 
     return {"U": U, "k": k, "epsilon": epsilon, "T": T, "p_rgh": p_rgh}
 
@@ -605,7 +613,7 @@ def init_from_era5(
     with open(inflow_json) as f:
         inflow = json.load(f)
 
-    T_ref = float(inflow.get("T_ref", 300.0))
+    T_ref_surface = float(inflow.get("T_ref", 300.0))
 
     # Detect solver for p_rgh formulation
     solver = detect_solver(case_dir)
@@ -615,10 +623,57 @@ def init_from_era5(
     # Build interpolators once
     speed_interp, T_interp, p_interp, fd_x, fd_y, u_star, z0 = _build_interpolators(inflow)
 
+    # Compute T_ref as volume-average of ERA5 T profile over domain height.
+    # ERA5 levels are regularly spaced in pressure → uniform weight for average.
+    # Using T at surface (T_ref_surface) causes a systematic negative buoyancy
+    # force above ground (T(z) < T_ref everywhere → air "too cold" → Uz < 0).
+    T_ref = T_ref_surface  # fallback
+    if T_interp is not None and "z_levels" in inflow:
+        z_era5 = np.array(inflow["z_levels"])
+        T_era5 = np.array(inflow["T_profile"])
+        # Domain top: read from mesh bounding box or estimate from controlDict
+        # For now, use the max z_level within 5000 m (typical domain height)
+        z_domain_top = 5000.0  # will be refined below with actual cell centres
+        mask = z_era5 <= z_domain_top
+        if mask.sum() > 2:
+            T_ref = float(np.trapz(T_era5[mask], z_era5[mask]) / (z_era5[mask][-1] - z_era5[mask][0]))
+        logger.info("T_ref: surface=%.2f K → volume-average(0-%dm)=%.2f K (Δ=%.1f K)",
+                    T_ref_surface, z_domain_top, T_ref, T_ref_surface - T_ref)
+
     # ---- Internal field (cell centres) ----
     logger.info("Reading cell centres from %s", case_dir)
     centres = read_cell_centres(case_dir)
     logger.info("Found %d cell centres", len(centres))
+
+    # Refine T_ref with actual domain height from cell centres
+    if T_interp is not None and "z_levels" in inflow:
+        z_domain_top_actual = float(centres[:, 2].max())
+        z_era5 = np.array(inflow["z_levels"])
+        T_era5 = np.array(inflow["T_profile"])
+        mask = z_era5 <= z_domain_top_actual
+        if mask.sum() > 2:
+            T_ref = float(np.trapz(T_era5[mask], z_era5[mask]) / (z_era5[mask][-1] - z_era5[mask][0]))
+        logger.info("T_ref refined with z_top=%.0f m: T_ref=%.2f K", z_domain_top_actual, T_ref)
+
+        # Update transportProperties with corrected T_ref
+        tp_path = case_dir / "constant" / "transportProperties"
+        if tp_path.exists():
+            tp_text = tp_path.read_text()
+            import re as _re
+            tp_text = _re.sub(
+                r'(TRef\s+\[.*?\]\s+)[\d.]+',
+                lambda m: m.group(1) + f"{T_ref:.2f}",
+                tp_text,
+            )
+            # Also update beta = 1/T_ref
+            beta_new = 1.0 / T_ref
+            tp_text = _re.sub(
+                r'(beta\s+\[.*?\]\s+)[\d.e+-]+',
+                lambda m: m.group(1) + f"{beta_new:.6e}",
+                tp_text,
+            )
+            tp_path.write_text(tp_text)
+            logger.info("Updated transportProperties: TRef=%.2f K, beta=%.6e K⁻¹", T_ref, beta_new)
 
     cell_fields = interpolate_profiles_at_z(
         centres[:, 2], speed_interp, T_interp, p_interp,

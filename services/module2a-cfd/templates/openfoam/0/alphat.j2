@@ -52,39 +52,15 @@ boundaryField
     //   No explicit value is required; the 'calculated' BC reads from the
     //   internal field register.
     // -----------------------------------------------------------------------
-{% if domain is defined and domain.octagonal %}
-    lateral
+{% set lateral_faces = domain.lateral_patches | default(['lateral']) if (domain is defined and domain.octagonal) else ['west', 'east', 'south', 'north'] %}
+{% for face in lateral_faces %}
+    {{ face }}
     {
         type            calculated;
         value           uniform 0;
     }
 
-{% else %}
-    west
-    {
-        type            calculated;
-        value           uniform 0;
-    }
-
-    east
-    {
-        type            calculated;
-        value           uniform 0;
-    }
-
-    south
-    {
-        type            calculated;
-        value           uniform 0;
-    }
-
-    north
-    {
-        type            calculated;
-        value           uniform 0;
-    }
-
-{% endif %}
+{% endfor %}
     top
     {
         type            calculated;

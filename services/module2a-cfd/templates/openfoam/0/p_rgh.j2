@@ -6,22 +6,16 @@
      \\/     M anipulation  |
 \*---------------------------------------------------------------------------*/
 /*
- * 0/p_rgh.j2 — Modified pressure boundary conditions
+ * 0/p_rgh.j2 — Modified pressure boundary conditions (BBSF)
  *
- * p_rgh = p/rho0 + g*z      (buoyantBoussinesqSimpleFoam, kinematic)
- *   OF: p = p_rgh + rhok*gh, gh = g·h = -9.81*z → p_rgh = p/rho0 + g*z
- *   Hydrostatic check: dp_rgh/dz ≈ 0 (neutral, rhok=1) ✓
- * p_rgh ≡ p/rho0            (simpleFoam, kinematic — hydrostatic in p implicitly)
+ * p_rgh is a Lagrange multiplier enforcing ∇·U = 0 in Boussinesq.
+ * It is NOT a thermodynamic pressure — ERA5 values must NOT be imposed.
  *
- * BC strategy:
- *   Lateral faces:  uniformMixed + MappedFile with pos(phi) fraction.
- *                   Dirichlet p(z) on OUTLET faces (where U is Neumann),
- *                   Neumann on INLET faces (where U is Dirichlet).
- *   Top:           fixedValue = ERA5 hydrostatic p_rgh at domain top
- *                  (anchors synoptic pressure; U is free via zeroGradient)
- *   Terrain/bottom: fixedFluxPressure (no-penetration wall)
- *
- * Profiles are written by init_from_era5.py into constant/boundaryData/.
+ * BC strategy (dual of U):
+ *   U lateral:     neg(phi) → Dirichlet ERA5 (inlet), Neumann (outlet)
+ *   p_rgh lateral: pos(phi) → Dirichlet 0 (outlet), Neumann (inlet)
+ *   Top:           zeroGradient — free for orographic waves.
+ *   Terrain:       fixedFluxPressure (no-penetration wall).
  */
 FoamFile
 {
@@ -39,53 +33,25 @@ internalField   uniform 0;
 
 boundaryField
 {
-{% if domain is defined and domain.octagonal %}
-    lateral
-    {
-        type            uniformMixed;
-        uniformValue
-        {
-            type        mappedFile;
-            mapMethod   planar;
-            fieldTable  p_rgh;
-        }
-        uniformGradient  zero;
-        uniformValueFraction
-        {
-            type        expression;
-            expression  "pos(phi)";   // DUAL of U: Dirichlet on outlet, Neumann on inlet
-        }
-        value           uniform 0;
-    }
-
-{% else %}
-{% for face in ['west', 'east', 'south', 'north'] %}
+{% set lateral_faces = domain.lateral_patches | default(['lateral']) if (domain is defined and domain.octagonal) else ['west', 'east', 'south', 'north'] %}
+{% for face in lateral_faces %}
     {{ face }}
     {
         type            uniformMixed;
-        uniformValue
-        {
-            type        mappedFile;
-            mapMethod   planar;
-            fieldTable  p_rgh;
-        }
-        uniformGradient  zero;
+        uniformValue    uniform 0;
+        uniformGradient zero;
         uniformValueFraction
         {
             type        expression;
-            expression  "pos(phi)";   // DUAL of U: Dirichlet on outlet, Neumann on inlet
+            expression  "pos(phi)";   // Dirichlet 0 on OUTLET, Neumann on INLET
         }
         value           uniform 0;
     }
 
 {% endfor %}
-{% endif %}
     top
     {
-        // p_rgh_top = p_ERA5(z_top)/rho0 + g*z_top [m2/s2] (OF sign convention)
-        // Anchors synoptic pressure; velocity adjusts freely (zeroGradient U).
-        type            fixedValue;
-        value           uniform {{ "%.4f" | format(physics.p_rgh_top) }};
+        type            zeroGradient;
     }
 
     terrain
