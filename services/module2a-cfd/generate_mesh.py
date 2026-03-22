@@ -964,7 +964,7 @@ def generate_mesh(
             # lateral_patches: patch names for BC templates
             # cfMesh octagon → ["lateral"], terrainBlockMesher → ["section_0".."section_7"]
             # None → template defaults to ["lateral"] for octagonal, cardinal for box
-            "lateral_patches": None,
+            "lateral_patches": kwargs.get("lateral_patches", None),
         },
         "mesh": {
             "max_cell_size":          geom["max_cell_size"],

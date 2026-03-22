@@ -1,0 +1,67 @@
+# PoC — terrainBlockMesher smoke test (coarse mesh, 500m centre)
+#
+# Structured hex mesh via terrainBlockMesher Docker (OF 2.4.x)
+# Solved with simpleFoam in OF2512 Docker
+#
+# Usage:
+#   cd services/module2a-cfd
+#   python run_tbm_study.py ../../configs/poc_tbm_smoke.yaml
+
+study:
+  name: poc_tbm_smoke
+  site: perdigao
+  timestamp: "2017-05-04T22:00"
+  inflow_mode: era5
+  n_iterations: 500
+  write_interval: 100
+  transport_T: true
+  mesher: terrainBlockMesher     # ← tells the workflow to use TBM instead of cfMesh
+
+docker:
+  tbm_image: "terrainblockmesher:of24"
+  solver_image: "microfluidica/openfoam:latest"
+  nprocs: 6
+
+# terrainBlockMesher parameters
+terrainBlockMesher:
+  # STL terrain coordinates — Perdigão centre
+  origin: [0, 0, 0]
+  p_corner: [2000, 2000, 100]         # inner domain: 2×2 km (centred on 0,0)
+  dimensions: [2000, 2000, 5000]      # inner block size + height
+  p_above: [0, 0, 10000]             # reference point above terrain
+
+  # Block structure — coarse for smoke test
+  blocks: [10, 10]                    # 10×10 blocks in inner domain
+  cells_per_block: [3, 3, 30]        # 3×3×30 cells/block → ~500m horizontal, ~167m vertical
+  grading: [1, 1, 15]                # vertical grading: 15× → ~10m first cell, 5000m height
+
+  # Cylindrical outer domain
+  cylinder:
+    centre: [0, 0, 100]
+    radius: 7000                      # R=7km (Venkatraman)
+    radial_grading: 10
+    radial_cells: 15                  # coarse for smoke test
+    n_sections: 8
+
+  # Orthogonal splines for better mesh quality
+  orthogonal_splines:
+    normal_dist: 5000
+
+  check_mesh: "true"
+
+cases:
+  tbm_smoke:
+    label: "TBM smoke 500m (structured hex)"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  output_dir: "data/validation/poc_tbm_smoke"
+  towers:
+    - tse04
+    - tse09
+    - tse13

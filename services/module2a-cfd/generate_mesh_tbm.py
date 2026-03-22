@@ -42,7 +42,7 @@ TBM_IMAGE = "terrainblockmesher:of24"
 def _render_tbm_dict(config: dict, stl_filename: str, output_path: Path) -> None:
     """Render terrainBlockMesherDict from Jinja2 template."""
     env = Environment(
-        loader=FileSystemLoader(str(TEMPLATE_DIR / "system")),
+        loader=FileSystemLoader(str(TEMPLATE_DIR.parent / "tbm")),
         keep_trailing_newline=True,
     )
     template = env.get_template("terrainBlockMesherDict.j2")

@@ -1,0 +1,116 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  2.4.x                                |
+|   \\  /    A nd           | Web:      www.OpenFOAM.org                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      terrainBlockMesherDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+// STL terrain surface
+stl
+{
+    {{ stl_file }}
+    {
+        type triSurfaceMesh;
+    }
+};
+
+writeBlockMeshDict  true;
+writePolyMesh       true;
+
+blockManager
+{
+    coordinates
+    {
+        origin          ({{ origin.0 }} {{ origin.1 }} {{ origin.2 }});
+        baseVectors     (
+                            ( 1  0  0)
+                            ( 0  1  0)
+                            ( 0  0  1)
+                        );
+    }
+
+    // Lower-left corner of the bounding box
+    p_corner    ({{ p_corner.0 }} {{ p_corner.1 }} {{ p_corner.2 }});
+
+    // Domain dimensions (x, y, z)
+    dimensions  ({{ dimensions.0 }} {{ dimensions.1 }} {{ dimensions.2 }});
+
+    // A point well above the STL (for projection ray-casting)
+    p_above     ({{ p_above.0 }} {{ p_above.1 }} {{ p_above.2 }});
+
+    // Number of blocks in terrain directions (z is set to 1)
+    blocks      ({{ blocks.0 }} {{ blocks.1 }} 1);
+
+    // Number of cells per block
+    cells       ({{ cells_per_block.0 }} {{ cells_per_block.1 }} {{ cells_per_block.2 }});
+
+    // Maximal search distance for STL projection
+    maxDistProj {{ max_dist_proj }};
+
+    // Grading factors (1 = uniform, >1 = refined at bottom)
+    gradingFactors  ( {{ grading.0 }} {{ grading.1 }} {{ grading.2 }} );
+
+    // Patch names
+    patch_name_west     west;
+    patch_name_east     east;
+    patch_name_north    north;
+    patch_name_south    south;
+    patch_name_sky      top;
+    patch_name_ground   terrain;
+
+    // Patch types
+    patch_type_west     patch;
+    patch_type_east     patch;
+    patch_type_north    patch;
+    patch_type_south    patch;
+    patch_type_sky      patch;
+    patch_type_ground   wall;
+{% if cylinder is defined and cylinder %}
+
+    // Cylindrical outer domain
+    outerCylinder
+    {
+        centrePoint                 ({{ cylinder.centre.0 }} {{ cylinder.centre.1 }} {{ cylinder.centre.2 }});
+        radius                      {{ cylinder.radius }};
+        radialGrading               {{ cylinder.radial_grading | default(5) }};
+        radialBlockCells            {{ cylinder.radial_cells | default(20) }};
+        firstSectionStartDirection  ({{ cylinder.first_section_dir | default("-1 1 0") }});
+        numberOfSections            {{ cylinder.n_sections | default(8) }};
+
+        blendingFunction
+        {
+            type    distance;
+            dMin    0;
+            dMax    {{ cylinder.blend_distance | default(cylinder.radius * 0.3) }};
+
+            transitionFunction
+            {
+                type    smooth;
+            }
+        }
+    }
+{% endif %}
+{% if orthogonal_splines is defined and orthogonal_splines %}
+
+    orthogonalizeUpwardSplines
+    {
+        splineNormalDist    {{ orthogonal_splines.normal_dist | default(5) }};
+    }
+{% endif %}
+}
+
+checkMesh               {{ check_mesh | default("true") }};
+checkMeshNoTopology     false;
+checkMeshAllGeometry    true;
+checkMeshAllTopology    true;
+
+// ************************************************************************* //
