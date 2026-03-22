@@ -84,7 +84,7 @@ boundaryField
 {% endif %}
     top
     {
-{%- if solver.top_bc_U | default("pressureInletOutletVelocity") == "inletOutlet" %}
+{%- if solver.top_bc_U | default("inletOutlet") == "inletOutlet" %}
         // inletOutlet: zeroGrad on outflow, fixed on inflow. More stable than PIOV.
         type            inletOutlet;
         inletValue      uniform ( {{ "%.6f" | format(inflow.u_hub * fd_x) }} {{ "%.6f" | format(inflow.u_hub * fd_y) }} 0 );
