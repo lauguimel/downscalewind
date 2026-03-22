@@ -1,0 +1,79 @@
+/*---------------------------------------------------------------------------*\
+                               |
+  _____        _______ ____    | IWESOL: IWES Open Library
+ |_ _\ \      / / ____/ ___|   |
+  | | \ \ /\ / /|  _| \___ \   | Copyright: Fraunhofer Institute for Wind
+  | |  \ V  V / | |___ ___) |  | Energy and Energy System Technology IWES
+ |___|  \_/\_/  |_____|____/   |
+                               | http://www.iwes.fraunhofer.de
+                               |
+-------------------------------------------------------------------------------
+License
+    This file is part of IWESOL.
+
+    IWESOL is free software: you can redistribute it and/or modify it
+    under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    IWESOL is distributed in the hope that it will be useful, but WITHOUT
+    ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+    FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+    for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with IWESOL.  If not, see <http://www.gnu.org/licenses/>.
+
+Class
+
+Description
+
+SourceFiles
+
+References
+
+\*---------------------------------------------------------------------------*/
+
+#ifndef VECTORLIKE2D_H_
+#define VECTORLIKE2D_H_
+
+#include <cmath>
+
+#include "Geometrical2D.h"
+
+namespace jlib{
+
+
+class VectorLike2D: public Geometrical2D {
+
+public:
+
+	/// Rotation by an cos/sin of angle.
+	virtual void rotate(double cosval, double sinval);
+
+	/// Cartesian translation.
+	virtual void translate(double delta_x,double delta_y);
+
+	/// Rescaling by a factor.
+	virtual void rescale(double factor);
+
+	/// Returns Cartesian x-component
+	virtual double getX() const = 0;
+
+	/// Returns Cartesian y-component
+	virtual double getY() const = 0;
+
+protected:
+
+	/// Returns reference to Cartesian x-component
+	virtual double & getRefX() = 0;
+
+	/// Returns reference to Cartesian y-component
+	virtual double & getRefY() = 0;
+
+};
+
+
+}
+
+#endif /* VECTORLIKE2D_H_ */

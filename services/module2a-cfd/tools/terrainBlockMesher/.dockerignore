@@ -1,0 +1,7 @@
+.git
+*.md
+Dockerfile
+.dockerignore
+iwesol/doc
+iwesol/OF/OF-2.1.1
+iwesol/OF/OF-2.3.0
