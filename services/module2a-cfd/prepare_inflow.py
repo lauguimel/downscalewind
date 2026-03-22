@@ -273,13 +273,22 @@ def extract_era5_profile(
     lat: float,
     lon: float,
 ) -> dict:
-    """Extract ERA5 vertical profile at a given timestamp and location.
+    """Extract ERA5 vertical profile using trilinear interpolation.
+
+    Trilinear (lat × lon × z) interpolation:
+      1. Extract u, v, T, z_geo at the 4 surrounding ERA5 columns
+      2. Each column has its own geometric height z(level) — the geopotential
+         height of a pressure level varies with (lat, lon)
+      3. Resample all 4 columns to a common z grid using 1-D interpolation
+      4. Bilinear (lat, lon) at each common z level
+
+    This avoids mixing values at different altitudes, which matters when
+    geopotential height varies between ERA5 grid points (terrain, synoptic).
 
     Parameters
     ----------
     era5_data:
-        Dict as returned by shared.data_io with keys:
-        times, pressure_levels, lats, lons, u, v, t, z (geopotential).
+        Dict with keys: times, pressure_levels, lats, lons, u, v, t, z.
     timestamp:
         Target timestamp (nearest ERA5 time step is used).
     lat, lon:
@@ -290,7 +299,9 @@ def extract_era5_profile(
     dict with keys: z_m, u_ms, v_ms, T_K, pressure_hPa
         Vertical arrays ordered from surface to top.
     """
-    times = era5_data["times"]  # array of np.datetime64
+    from scipy.interpolate import interp1d
+
+    times = era5_data["times"]
 
     # Nearest time index
     dt = np.abs(times - timestamp)
@@ -304,27 +315,82 @@ def extract_era5_profile(
 
     lats = era5_data["lats"]
     lons = era5_data["lons"]
+    pressure_hPa = np.asarray(era5_data["pressure_levels"], dtype=float)
+    n_levels = len(pressure_hPa)
+
     i0, i1, j0, j1, wlat, wlon = _bilinear_weights(lats, lons, lat, lon)
 
-    def interp(field4d: np.ndarray) -> np.ndarray:
-        """shape (time, level, lat, lon) → (level,) at t_idx, lat, lon"""
-        return _apply_bilinear(field4d[t_idx], i0, i1, j0, j1, wlat, wlon)
+    # Step 1: Extract 4 corner columns [level] for each variable
+    corners = [(i0, j0), (i0, j1), (i1, j0), (i1, j1)]
+    weights = [
+        (1 - wlat) * (1 - wlon),
+        (1 - wlat) * wlon,
+        wlat * (1 - wlon),
+        wlat * wlon,
+    ]
 
-    u_lev = interp(era5_data["u"])   # [level]
-    v_lev = interp(era5_data["v"])
-    T_lev = interp(era5_data["t"])
-    z_lev = interp(era5_data["z"]) / G  # geopotential → geometric height [m]
+    corner_z = []  # geometric height at each corner [level]
+    corner_u = []
+    corner_v = []
+    corner_T = []
 
-    pressure_hPa = np.asarray(era5_data["pressure_levels"], dtype=float)
+    for (ci, cj) in corners:
+        corner_z.append(era5_data["z"][t_idx, :, ci, cj] / G)
+        corner_u.append(era5_data["u"][t_idx, :, ci, cj])
+        corner_v.append(era5_data["v"][t_idx, :, ci, cj])
+        corner_T.append(era5_data["t"][t_idx, :, ci, cj])
 
-    # Sort from surface (high pressure) to top (low pressure)
-    order = np.argsort(-pressure_hPa)
+    # Step 2: Build common z grid from the bilinear-weighted z
+    # Use the weighted average of corner z values as the common grid
+    z_common = np.zeros(n_levels)
+    for k, w in enumerate(weights):
+        z_common += w * corner_z[k]
+
+    # Sort common z from surface (low altitude) to top
+    order = np.argsort(z_common)
+    z_common_sorted = z_common[order]
+
+    # Step 3: Resample each corner column to the common z grid, then bilinear
+    u_out = np.zeros(n_levels)
+    v_out = np.zeros(n_levels)
+    T_out = np.zeros(n_levels)
+
+    for k, w in enumerate(weights):
+        # Sort this corner's profile by ascending z
+        cz = corner_z[k]
+        c_order = np.argsort(cz)
+        cz_sorted = cz[c_order]
+
+        # Interpolate this corner's u, v, T to the common z grid
+        for var_data, var_out in [
+            (corner_u[k], u_out),
+            (corner_v[k], v_out),
+            (corner_T[k], T_out),
+        ]:
+            f = interp1d(
+                cz_sorted, var_data[c_order],
+                kind="linear", bounds_error=False,
+                fill_value=(var_data[c_order[0]], var_data[c_order[-1]]),
+            )
+            var_out += w * f(z_common_sorted)
+
+    # Step 4: Sort from surface to top and return
+    p_sorted = pressure_hPa[order]
+
+    logger.debug(
+        "Trilinear ERA5 profile: z=[%.0f, %.0f] m, "
+        "max dz between corners=%.1f m",
+        z_common_sorted[0], z_common_sorted[-1],
+        max(np.ptp(np.array([cz[order[0]] for cz in corner_z])),
+            np.ptp(np.array([cz[order[-1]] for cz in corner_z]))),
+    )
+
     return {
-        "z_m":          z_lev[order],
-        "u_ms":         u_lev[order],
-        "v_ms":         v_lev[order],
-        "T_K":          T_lev[order],
-        "pressure_hPa": pressure_hPa[order],
+        "z_m":          z_common_sorted,
+        "u_ms":         u_out,
+        "v_ms":         v_out,
+        "T_K":          T_out,
+        "pressure_hPa": p_sorted,
     }
 
 
@@ -539,10 +605,30 @@ def reconstruct_inlet_profile(
     else:
         p_out = np.full_like(z_output, P0)
 
-    # Combine all layers
+    # Combine all layers — speed profile
     speed_out = np.concatenate([spd1, spd2, spd3])
-    u_out     = speed_out * flow_dir_x
-    v_out     = speed_out * flow_dir_y
+
+    # Component profiles u(z), v(z) — direction varies with height
+    # Layer 1 (log-law): use surface direction (constant, correct for BL)
+    # Layer 2+3: cubic spline on ERA5 u(z), v(z) independently
+    if len(z_era5) >= 2:
+        cs_u = CubicSpline(z_era5, u_era5, extrapolate=True)
+        cs_v = CubicSpline(z_era5, v_era5, extrapolate=True)
+    else:
+        cs_u = lambda z: np.full_like(z, u_era5[0])  # noqa
+        cs_v = lambda z: np.full_like(z, v_era5[0])  # noqa
+
+    u_out = np.zeros_like(z_output)
+    v_out = np.zeros_like(z_output)
+
+    # Layer 1: surface direction × log-law speed
+    u_out[mask1] = spd1 * flow_dir_x
+    v_out[mask1] = spd1 * flow_dir_y
+
+    # Layer 2+3: ERA5 component splines (direction varies with height)
+    mask23 = ~mask1
+    u_out[mask23] = cs_u(z_output[mask23])
+    v_out[mask23] = cs_v(z_output[mask23])
 
     # Values at hub height
     hub_mask = np.searchsorted(z_output, HUB_HEIGHT)
@@ -681,6 +767,8 @@ def prepare_inflow(
     result["Ri_b"] = Ri_b
     result["z_levels"] = result.pop("z_m")
     result["u_profile"] = result.pop("speed_ms")
+    result["ux_profile"] = result.pop("u_ms")   # eastward component at each z
+    result["uy_profile"] = result.pop("v_ms")   # northward component at each z
     result["T_profile"] = result.pop("T_K")
     result["p_profile"] = result.pop("p_Pa")
 

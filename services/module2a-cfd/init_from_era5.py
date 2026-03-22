@@ -267,7 +267,7 @@ def _parse_of_vector_field(filepath: Path) -> np.ndarray:
 def _build_interpolators(inflow: dict):
     """Build speed, temperature, and pressure interpolators from inflow JSON.
 
-    Returns (speed_interp, T_interp_or_None, p_interp_or_None, fd_x, fd_y, u_star, z0).
+    Returns (speed_interp, T_interp, p_interp, fd_x, fd_y, u_star, z0, ux_interp, uy_interp).
     """
     from scipy.interpolate import interp1d
 
@@ -279,6 +279,23 @@ def _build_interpolators(inflow: dict):
         kind="linear", bounds_error=False,
         fill_value=(u_profile[0], u_profile[-1]),
     )
+
+    # Component profiles ux(z), uy(z) — wind direction varies with height
+    ux_interp = None
+    uy_interp = None
+    if "ux_profile" in inflow and "uy_profile" in inflow:
+        ux_profile = np.array(inflow["ux_profile"])
+        uy_profile = np.array(inflow["uy_profile"])
+        ux_interp = interp1d(
+            z_levels, ux_profile,
+            kind="linear", bounds_error=False,
+            fill_value=(ux_profile[0], ux_profile[-1]),
+        )
+        uy_interp = interp1d(
+            z_levels, uy_profile,
+            kind="linear", bounds_error=False,
+            fill_value=(uy_profile[0], uy_profile[-1]),
+        )
 
     T_interp = None
     T_profile = inflow.get("T_profile")
@@ -305,7 +322,7 @@ def _build_interpolators(inflow: dict):
     u_star = float(inflow["u_star"])
     z0 = float(inflow.get("z0", inflow.get("z0_eff", 0.05)))
 
-    return speed_interp, T_interp, p_interp, fd_x, fd_y, u_star, z0
+    return speed_interp, T_interp, p_interp, fd_x, fd_y, u_star, z0, ux_interp, uy_interp
 
 
 def interpolate_profiles_at_z(
@@ -319,6 +336,8 @@ def interpolate_profiles_at_z(
     z0: float,
     T_ref: float = 300.0,
     is_bbsf: bool = False,
+    ux_interp=None,
+    uy_interp=None,
 ) -> dict[str, np.ndarray]:
     """Compute U, k, epsilon, T, p_rgh at given heights z.
 
@@ -326,6 +345,9 @@ def interpolate_profiles_at_z(
     ----------
     z : (N,) heights above datum [m].
     is_bbsf : if True, compute p_rgh in static form (Pa) for BBSF.
+    ux_interp, uy_interp : optional interpolators for height-varying wind components.
+        If provided, wind direction varies with height (ERA5 Ekman spiral).
+        If None, falls back to speed × (fd_x, fd_y) uniform direction.
 
     Returns
     -------
@@ -334,11 +356,16 @@ def interpolate_profiles_at_z(
     n = len(z)
     z = np.maximum(z, 0.1)
 
-    speed = np.maximum(speed_interp(z), 0.0)
-
     U = np.zeros((n, 3))
-    U[:, 0] = speed * fd_x
-    U[:, 1] = speed * fd_y
+    if ux_interp is not None and uy_interp is not None:
+        # Height-varying wind direction from ERA5 components
+        U[:, 0] = ux_interp(z)
+        U[:, 1] = uy_interp(z)
+    else:
+        # Fallback: uniform direction (old behaviour)
+        speed = np.maximum(speed_interp(z), 0.0)
+        U[:, 0] = speed * fd_x
+        U[:, 1] = speed * fd_y
 
     k = np.full(n, u_star**2 / CMU**0.5)
     # Epsilon: UNIFORM value consistent with epsilonWallFunction.
@@ -621,7 +648,7 @@ def init_from_era5(
     logger.info("Solver: %s (BBSF=%s)", solver, is_bbsf)
 
     # Build interpolators once
-    speed_interp, T_interp, p_interp, fd_x, fd_y, u_star, z0 = _build_interpolators(inflow)
+    speed_interp, T_interp, p_interp, fd_x, fd_y, u_star, z0, ux_interp, uy_interp = _build_interpolators(inflow)
 
     # Compute T_ref as volume-average of ERA5 T profile over domain height.
     # ERA5 levels are regularly spaced in pressure → uniform weight for average.
@@ -678,6 +705,7 @@ def init_from_era5(
     cell_fields = interpolate_profiles_at_z(
         centres[:, 2], speed_interp, T_interp, p_interp,
         fd_x, fd_y, u_star, z0, T_ref, is_bbsf=is_bbsf,
+        ux_interp=ux_interp, uy_interp=uy_interp,
     )
 
     u_path = case_dir / "0" / "U"
@@ -719,6 +747,7 @@ def init_from_era5(
         pf = interpolate_profiles_at_z(
             face_centres[:, 2], speed_interp, T_interp, p_interp,
             fd_x, fd_y, u_star, z0, T_ref, is_bbsf=is_bbsf,
+            ux_interp=ux_interp, uy_interp=uy_interp,
         )
 
         fields = {
