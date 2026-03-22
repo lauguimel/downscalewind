@@ -77,7 +77,9 @@ boundaryField
 {% endif %}
     top
     {
-        type            zeroGradient;
+        type            inletOutlet;
+        inletValue      uniform {{ "%.6f" | format(k_init) }};
+        value           uniform {{ "%.6f" | format(k_init) }};
     }
 
     terrain

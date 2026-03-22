@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 DEFAULT_DOMAIN_KM  = 25.0       # km — default width of the refined central zone
-DOMAIN_HEIGHT_M    = 3000.0     # m above highest terrain point
+DOMAIN_HEIGHT_M    = 5000.0     # m above highest terrain point
 STL_FILENAME       = "terrain.stl"
 
 # cfMesh boundary layer defaults
@@ -195,14 +195,20 @@ def compute_octagonal_refinements(
     domain_z_max: float,
     fine_cell_size: float = 30,
 ) -> list[dict]:
-    """Compute 3-ring objectRefinement zones for octagonal/cylindrical domains.
+    """Compute 6-zone progressive refinement for octagonal/cylindrical domains.
 
-    Ring structure (progressive refinement from maxCellSize):
-      mesoZone   : 500 m cells, ~57% of domain diameter (transition zone)
-      fineZone   : 200 m cells, 2.4×2.4 km (GNN output cube + margin)
-      nearTerrain: fine_cell_size cells, 2.4×2.4×0.5 km (surface layer)
+    Zones decay in both R (horizontal distance from centre) and z (altitude).
+    cfMesh takes the MINIMUM cellSize among overlapping boxes, so overlapping
+    zones naturally produce the desired progressive refinement.
 
-    The ratio between adjacent zones is kept ≤ 2.5:1 for smooth cfMesh transitions.
+    Zone structure (from coarsest to finest):
+      meso             : 500 m, ~65% of domain, full height   — far field
+      transition_high  : 200 m, 4×4 km, z=500–2000 m         — upper transition
+      transition_low   : 100 m, 4×4 km, z=0–500 m            — upstream context
+      core_upper       :  2×fine, 2.4×2.4 km, z=300–1000 m   — upper ABL fine zone
+      core_surface     :  fine,  2.4×2.4 km, z=0–300 m       — GNN output + BL
+
+    Max ratio between adjacent zones: 2.5:1
 
     Parameters
     ----------
@@ -211,7 +217,7 @@ def compute_octagonal_refinements(
     domain_z_max:
         Domain height [m].
     fine_cell_size:
-        Finest cell size [m] (default 100, use 50 for production).
+        Finest cell size [m] in core_surface (default 30, configurable).
 
     Returns
     -------
@@ -219,29 +225,49 @@ def compute_octagonal_refinements(
     """
     diameter_m = domain_km * 1000.0
 
-    # mesoZone: 500m cells, covers ~57% of domain diameter (capped at 80%)
-    meso_extent = min(0.57 * diameter_m, 0.8 * diameter_m)
-    # Fine/near-terrain: fixed 2.4 km (GNN output cube 1×1 km + 0.7 km margin)
-    fine_extent = min(2400.0, 0.5 * diameter_m)
+    # Horizontal extents
+    meso_extent = min(0.65 * diameter_m, 0.85 * diameter_m)
+    transition_extent = min(4000.0, 0.45 * diameter_m)
+    core_extent = min(2400.0, 0.25 * diameter_m)
+
+    # Core upper cell size: 2× fine (e.g., 60m if fine=30m)
+    core_upper_size = fine_cell_size * 2
 
     return [
+        # Far field — fills gap between outer (maxCellSize) and transition
         {
-            "name": "mesoZone",
+            "name": "meso",
             "cell_size": 500,
             "cx": 0.0, "cy": 0.0, "cz": domain_z_max / 2.0,
             "lx": meso_extent, "ly": meso_extent, "lz": domain_z_max,
         },
+        # Upper transition — moderate resolution above ABL
         {
-            "name": "fineZone",
+            "name": "transition_high",
             "cell_size": 200,
-            "cx": 0.0, "cy": 0.0, "cz": 500.0,
-            "lx": fine_extent, "ly": fine_extent, "lz": 1000.0,
+            "cx": 0.0, "cy": 0.0, "cz": 1250.0,
+            "lx": transition_extent, "ly": transition_extent, "lz": 1500.0,
         },
+        # Lower transition — upstream terrain context
         {
-            "name": "nearTerrain",
-            "cell_size": fine_cell_size,
+            "name": "transition_low",
+            "cell_size": 100,
             "cx": 0.0, "cy": 0.0, "cz": 250.0,
-            "lx": fine_extent, "ly": fine_extent, "lz": 500.0,
+            "lx": transition_extent, "ly": transition_extent, "lz": 500.0,
+        },
+        # Core upper — ABL above surface layer in fine zone
+        {
+            "name": "core_upper",
+            "cell_size": core_upper_size,
+            "cx": 0.0, "cy": 0.0, "cz": 650.0,
+            "lx": core_extent, "ly": core_extent, "lz": 700.0,
+        },
+        # Core surface — finest cells, GNN output zone + boundary layer
+        {
+            "name": "core_surface",
+            "cell_size": fine_cell_size,
+            "cx": 0.0, "cy": 0.0, "cz": 150.0,
+            "lx": core_extent, "ly": core_extent, "lz": 300.0,
         },
     ]
 
@@ -682,6 +708,8 @@ def generate_mesh(
     coriolis: bool = True,
     canopy_enabled: bool = False,
     domain_type: str = "box",
+    fine_cell_size: float = 30,
+    transport_T: bool = False,
     **kwargs,
 ) -> dict:
     """Generate an OpenFOAM case directory with cfMesh mesh and BC files.
@@ -749,7 +777,7 @@ def generate_mesh(
         )
         # For cylindrical domains, STL must match finest refinement,
         # not maxCellSize which controls the coarse outer ring.
-        stl_resolution = min(30, resolution_m) if is_cylinder else resolution_m
+        stl_resolution = min(fine_cell_size, resolution_m) if is_cylinder else resolution_m
         terrain_stats = dem_to_stl(
             srtm_tif=Path(srtm_tif),
             out_stl=stl_path,
@@ -805,7 +833,7 @@ def generate_mesh(
 
     # ---- cfMesh refinement zones -------------------------------------------
     if is_cylinder:
-        cfmesh_refinements = compute_octagonal_refinements(domain_km, domain_z_max)
+        cfmesh_refinements = compute_octagonal_refinements(domain_km, domain_z_max, fine_cell_size)
     else:
         cfmesh_refinements = compute_cfmesh_refinements(geom, terrain_z_max)
     logger.info(
@@ -975,7 +1003,11 @@ def generate_mesh(
             "write_interval": kwargs.get("write_interval", 100),
             "n_cores":        n_cores,
             "thermal":        thermal,
+            "transport_T":    transport_T,
             "boussinesq":     kwargs.get("boussinesq", False),
+            "top_bc_U":       kwargs.get("top_bc_U", "inletOutlet"),
+            "n_non_ortho_correctors": kwargs.get("n_non_ortho_correctors", 0),
+            "use_limited_grad": kwargs.get("use_limited_grad", False),
         },
         "canopy": {
             "enabled": canopy_enabled,

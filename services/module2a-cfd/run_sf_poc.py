@@ -160,6 +160,8 @@ def generate_cases(
             thermal=case_template.get("thermal", False),
             coriolis=case_template.get("coriolis", False),
             canopy_enabled=case_template.get("canopy", False),
+            fine_cell_size=case_template.get("fine_cell_size", study.get("fine_cell_size", 30)),
+            transport_T=case_template.get("transport_T", study.get("transport_T", False)),
             n_iter=study.get("n_iterations", 500),
             write_interval=study.get("write_interval", 100),
         )
@@ -378,6 +380,11 @@ def main():
         n_fail = len(report) - n_ok - n_cached
         log.info("Results: %d converged, %d cached, %d failed / %d total",
                  n_ok, n_cached, n_fail, len(report))
+
+    # Step 5: Auto-evaluate all converged cases
+    log.info("Running post-solve evaluation...")
+    from evaluate_case import evaluate_batch
+    evaluate_batch(output_dir)
 
 
 if __name__ == "__main__":

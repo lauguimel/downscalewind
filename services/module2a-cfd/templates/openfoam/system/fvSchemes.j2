@@ -39,11 +39,20 @@ ddtSchemes
 // ---------------------------------------------------------------------------
 gradSchemes
 {
+{%- if solver.use_limited_grad | default(false) %}
+    // Tighter gradient limiting (0.5) — reduces velocity spikes at mesh transitions
+    default         cellLimited Gauss linear 0.5;
+    grad(U)         cellLimited Gauss linear 0.5;
+    grad(k)         cellLimited Gauss linear 0.5;
+    grad(epsilon)   cellLimited Gauss linear 0.5;
+    grad(T)         cellLimited Gauss linear 0.5;
+{%- else %}
     default         Gauss linear;
     grad(U)         cellLimited Gauss linear 1;
     grad(k)         cellLimited Gauss linear 1;
     grad(epsilon)   cellLimited Gauss linear 1;
     grad(T)         cellLimited Gauss linear 1;
+{%- endif %}
 }
 
 // ---------------------------------------------------------------------------
@@ -70,7 +79,7 @@ divSchemes
     // buoyantSimpleFoam: div(((rho*nuEff)*dev2(T(grad(U)))))
     div((nuEff*dev2(T(grad(U)))))           Gauss linear;
     div(((rho*nuEff)*dev2(T(grad(U)))))     Gauss linear;
-{% if solver.thermal | default(false) %}
+{% if solver.thermal | default(false) or solver.transport_T | default(false) %}
 
     // Temperature — bounded linearUpwind
     div(phi,T)                          bounded Gauss linearUpwind grad(T);

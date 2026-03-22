@@ -67,7 +67,65 @@ runTimeModifiable yes;
 // ---------------------------------------------------------------------------
 // Runtime libraries
 //   atmosphericModels: provides atmCoriolisUSource, atmBoundaryLayer* BCs
+{%- if solver.thermal | default(false) %}
+//   turbulenceModels: provides alphatJayatillekeWallFunction (needed by decomposePar)
+{%- endif %}
 // ---------------------------------------------------------------------------
-libs            (atmosphericModels);
+libs            ( "libatmosphericModels.so"{{ ' "libturbulenceModels.so"' if solver.thermal | default(false) else "" }} );
+
+// ---------------------------------------------------------------------------
+// Convergence monitoring — written every iteration to postProcessing/
+// Allows early stopping when metrics stabilise (no need to wait for endTime)
+// ---------------------------------------------------------------------------
+functions
+{
+    // Residuals written to postProcessing/solverInfo/ every iteration
+    // Captures initial residuals + convergence criteria from fvSolution
+    solverInfo
+    {
+        type            solverInfo;
+        libs            ( "libutilityFunctionObjects.so" );
+        writeControl    timeStep;
+        writeInterval   1;
+        fields          ( U {{ 'p_rgh' if solver.thermal | default(false) else 'p' }} k epsilon{{ ' T' if solver.thermal | default(false) or solver.transport_T | default(false) else '' }} );
+    }
+
+    // Global min/max of key fields — catches divergence early
+    fieldMinMax
+    {
+        type            fieldMinMax;
+        libs            ( "libfieldFunctionObjects.so" );
+        writeControl    timeStep;
+        writeInterval   1;
+        mode            magnitude;
+        fields          ( U k{{ ' T' if solver.thermal | default(false) or solver.transport_T | default(false) else '' }} );
+    }
+
+    // Volume-averaged fields — convergence of global solution
+    volAverages
+    {
+        type            volFieldValue;
+        libs            ( "libfieldFunctionObjects.so" );
+        writeControl    timeStep;
+        writeInterval   1;
+        operation       volAverage;
+        regionType      all;
+        writeFields     false;
+        fields          ( U k epsilon{{ ' T' if solver.thermal | default(false) or solver.transport_T | default(false) else '' }} );
+    }
+
+{%- if solver.transport_T | default(false) and solver.name | default("simpleFoam") == "simpleFoam" %}
+    // Passive scalar transport for temperature — advected by U, diffused by nut/Prt.
+    // T does NOT affect U (no buoyancy). Fine-tuning with BBSF adds the T→U coupling.
+    scalarTransportT
+    {
+        type            scalarTransport;
+        libs            ( "libsolverFunctionObjects.so" );
+        field           T;
+        resetOnStartUp  false;
+        writeControl    writeTime;
+    }
+{%- endif %}
+}
 
 // ************************************************************************* //

@@ -80,7 +80,9 @@ boundaryField
 {% endif %}
     top
     {
-        type            zeroGradient;
+        type            inletOutlet;
+        inletValue      uniform {{ "%.6e" | format(epsilon_init) }};
+        value           uniform {{ "%.6e" | format(epsilon_init) }};
     }
 
     terrain

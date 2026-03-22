@@ -187,14 +187,39 @@ def step_generate_cases(
             output_dir=case_dir,
             srtm_tif=case_srtm,
             inflow_json=inflow_json,
-            domain_km=study.get("domain_km", 5),
+            domain_km=case_cfg.get("domain_km", study.get("domain_km", 5)),
+            domain_type=case_cfg.get("domain_type", study.get("domain_type", "box")),
             solver_name=case_cfg["solver"],
             thermal=case_cfg.get("thermal", False),
             coriolis=case_cfg.get("coriolis", False),
             canopy_enabled=case_cfg.get("canopy", False),
+            fine_cell_size=case_cfg.get("fine_cell_size", study.get("fine_cell_size", 30)),
+            transport_T=case_cfg.get("transport_T", study.get("transport_T", False)),
+            top_bc_U=case_cfg.get("top_bc_U", study.get("top_bc_U", "pressureInletOutletVelocity")),
+            n_non_ortho_correctors=case_cfg.get("n_non_ortho_correctors", study.get("n_non_ortho_correctors", 0)),
+            use_limited_grad=case_cfg.get("use_limited_grad", study.get("use_limited_grad", False)),
             n_iter=study.get("n_iterations", 2000),
             write_interval=study.get("write_interval", 200),
         )
+
+        # Ensure inflow.json and init_from_era5.py are in the case dir.
+        # Allrun needs both at HPC time (after cartesianMesh, before solver).
+        dst_inflow = case_dir / "inflow.json"
+        if not dst_inflow.exists():
+            shutil.copy2(inflow_json, dst_inflow)
+
+        init_script = Path(__file__).parent / "init_from_era5.py"
+        dst_init = case_dir / "init_from_era5.py"
+        if not dst_init.exists():
+            shutil.copy2(init_script, dst_init)
+
+        # reconstruct_fields.py must be in the case dir — Allrun looks for it
+        # there (SCRIPT_DIR = dirname of Allrun = case dir on HPC).
+        recon_script = Path(__file__).parent / "reconstruct_fields.py"
+        dst_recon = case_dir / "reconstruct_fields.py"
+        if not dst_recon.exists() and recon_script.exists():
+            shutil.copy2(recon_script, dst_recon)
+
         case_dirs[case_id] = case_dir
 
     return case_dirs
@@ -350,7 +375,11 @@ def step_generate_lad(case_dirs: dict, cfg: dict) -> None:
 
     site_lat = site_cfg["site"]["coordinates"]["latitude"]
     site_lon = site_cfg["site"]["coordinates"]["longitude"]
-    landcover_tif = ROOT / cfg["validation"]["landcover_tif"]
+    landcover_tif_rel = cfg.get("validation", {}).get("landcover_tif")
+    if landcover_tif_rel is None:
+        log.info("No landcover_tif in config, skipping LAD generation")
+        return
+    landcover_tif = ROOT / landcover_tif_rel
 
     if not landcover_tif.exists():
         log.warning("Landcover TIF not found, skipping LAD generation",
@@ -487,12 +516,32 @@ def step_solve(case_dirs: dict, cfg: dict) -> dict:
         })
         t0 = time.time()
 
+        # potentialFoam: project U onto div-free field before main solve.
+        # init_from_era5 sets U(z) = ERA5 profile cell-by-cell, which does NOT
+        # satisfy ∇·U = 0 on the 3D mesh with terrain. Without this step,
+        # the first SIMPLE iteration creates a massive p_rgh correction → ±50 m/s.
+        log.info("Running potentialFoam (div-free projection)", extra={"case": case_id})
+        pot_result = run_docker(
+            case_dir,
+            "potentialFoam -writePhi > log.potentialFoam 2>&1"
+            " && grep 'continuity' log.potentialFoam | tail -1",
+            image=solver_image, platform=solver_platform, timeout=300,
+        )
+        if pot_result.returncode != 0:
+            log.error("potentialFoam FAILED — cannot proceed without div-free init", extra={
+                "case": case_id, "stderr": pot_result.stderr[-300:],
+            })
+            raise RuntimeError(f"potentialFoam failed for {case_id}")
+        log.info("potentialFoam done", extra={
+            "case": case_id, "stdout": pot_result.stdout.strip()[-200:],
+        })
+
         if nprocs > 1:
             command = (
                 f"foamDictionary system/decomposeParDict "
                 f"-entry numberOfSubdomains -set {nprocs} && "
                 f"decomposePar && "
-                f"mpirun -np {nprocs} {solver} -parallel && "
+                f"mpirun --allow-run-as-root -np {nprocs} {solver} -parallel && "
                 f"reconstructPar -latestTime"
             )
         else:
@@ -732,6 +781,14 @@ def main(config, cases, skip_mesh, skip_solve, only_compare, generate_only):
         step_compare(export_paths, cfg, timings)
     else:
         log.info("Parametric mode: skipping obs comparison (no ERA5 timestamp)")
+
+    # Auto-evaluate: profiles + ERA5 comparison + metrics
+    log.info("Running post-solve evaluation...")
+    try:
+        from evaluate_case import evaluate_batch
+        evaluate_batch(cases_dir)
+    except Exception as exc:
+        log.warning("Auto-evaluation failed: %s", exc)
 
     log.info("Study complete", extra={
         "cases_dir": str(cases_dir),

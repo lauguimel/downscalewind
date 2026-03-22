@@ -1,0 +1,77 @@
+# PoC — Mesh convergence study: octree-compatible resolutions
+#
+# cfMesh octree quantizes cell sizes to powers of 2 of the root cell.
+# With maxCellSize=1000m and domain ~16km, the effective levels are:
+#   Level 7: 125m
+#   Level 8: 62.5m
+#   Level 9: 31.25m
+#   Level 10: 15.6m
+#
+# Requesting intermediate values (e.g., 50m, 40m) rounds to the nearest level.
+# This config uses exact octree sizes for a clean convergence study.
+#
+# Usage:
+#   cd services/module2a-cfd
+#   python run_local_study.py ../../configs/poc_mesh_convergence.yaml
+
+study:
+  name: poc_mesh_convergence
+  site: perdigao
+  resolution_m: 1000
+  timestamp: "2017-05-04T22:00"
+  domain_type: cylinder
+  domain_km: 14                  # R=7km (Venkatraman)
+  context_cells: 1
+  n_iterations: 500
+  write_interval: 100
+  inflow_mode: era5
+  transport_T: true
+
+docker:
+  image: "microfluidica/openfoam:latest"
+  nprocs: 6
+
+cases:
+  res125:
+    label: "125m (octree level 7)"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    fine_cell_size: 125
+
+  res62:
+    label: "62.5m (octree level 8)"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    fine_cell_size: 62.5
+
+  res31:
+    label: "31.25m (octree level 9)"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    fine_cell_size: 31.25
+
+  res15:
+    label: "15.6m (octree level 10)"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    fine_cell_size: 15.625
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  output_dir: "data/validation/poc_mesh_convergence"
+  towers:
+    - tse04
+    - tse09
+    - tse13

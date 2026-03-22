@@ -1,0 +1,66 @@
+# PoC — Top BC study: 3 strategies for top boundary condition
+#
+# A: inletOutlet U top (zeroGrad outflow, fixed inflow)
+# B: pressureInletOutletVelocity + nNonOrthogonalCorrectors=2
+# C: pressureInletOutletVelocity + cellLimited velocity bound
+#
+# All: R=7km, 100m fine, 100 iter, SF + T passive + Coriolis
+
+study:
+  name: poc_top_bc_study
+  site: perdigao
+  resolution_m: 1000
+  timestamp: "2017-05-04T22:00"
+  domain_type: cylinder
+  domain_km: 14
+  context_cells: 1
+  n_iterations: 100
+  write_interval: 50
+  inflow_mode: era5
+  transport_T: true
+  fine_cell_size: 100
+
+docker:
+  image: "microfluidica/openfoam:latest"
+  nprocs: 6
+
+cases:
+  topA_inletOutlet:
+    label: "inletOutlet U top"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    fine_cell_size: 100
+    top_bc_U: inletOutlet
+
+  topB_piov_noc:
+    label: "pressureIOV + nonOrthoCorr=2"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    fine_cell_size: 100
+    top_bc_U: pressureInletOutletVelocity
+    n_non_ortho_correctors: 2
+
+  topC_piov_limited:
+    label: "pressureIOV + cellLimited"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    fine_cell_size: 100
+    top_bc_U: pressureInletOutletVelocity
+    use_limited_grad: true
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  output_dir: "data/validation/poc_top_bc_study"
+  towers:
+    - tse04
+    - tse09
+    - tse13
