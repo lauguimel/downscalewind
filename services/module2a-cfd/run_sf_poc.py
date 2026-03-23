@@ -290,6 +290,7 @@ def solve_all(case_dirs: dict, cfg: dict) -> pd.DataFrame:
                 f"foamDictionary system/decomposeParDict "
                 f"-entry numberOfSubdomains -set {nprocs} && "
                 f"decomposePar && "
+                f'for d in processor*/; do ln -sf ../../constant/boundaryData "$d/constant/"; done && '
                 f"mpirun --allow-run-as-root -np {nprocs} simpleFoam -parallel && "
                 f"reconstructPar -latestTime"
             )

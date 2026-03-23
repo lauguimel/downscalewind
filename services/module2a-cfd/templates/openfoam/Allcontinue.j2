@@ -79,6 +79,12 @@ if [ "$NPROCS" -gt 1 ]; then
 
     if [ "$NEED_REDECOMPOSE" = true ]; then
         runApplication decomposePar
+        # Symlink boundaryData into processor dirs (MappedFile parallel compat)
+        if [ -d constant/boundaryData ]; then
+            for d in processor*/; do
+                ln -sf ../../constant/boundaryData "$d/constant/"
+            done
+        fi
     fi
 
     # Remove log file to allow re-run

@@ -81,9 +81,34 @@ fi
 if [ "$NPROCS" -gt 1 ]; then
     foamDictionary system/decomposeParDict -entry numberOfSubdomains -set $NPROCS
     runApplication decomposePar
+    # Symlink boundaryData into each processor dir (MappedFile resolves relative
+    # to processor path in OF ESI, not global case root)
+    if [ -d constant/boundaryData ]; then
+        for d in processor*/; do
+            ln -sf ../../constant/boundaryData "$d/constant/"
+        done
+    fi
     runParallel $SOLVER
     check_log log.$SOLVER
-    runApplication reconstructPar -latestTime
+    # Reconstruct fields via Python — avoids reconstructPar failure on cases with
+    # uniformMixed BCs using expression "neg/pos(phi)" (phi not in objectRegistry
+    # during reconstruction in OF ESI v2406).
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if [ -f "$SCRIPT_DIR/reconstruct_fields.py" ] && command -v python3 > /dev/null 2>&1; then
+        echo "Reconstructing fields with reconstruct_fields.py..."
+        python3 "$SCRIPT_DIR/reconstruct_fields.py" \
+            --case-dir . --time latest --write-foam \
+            --fields U T k p_rgh \
+            > log.reconstruct_fields 2>&1
+        if [ $? -ne 0 ]; then
+            echo "ERROR: reconstruct_fields.py failed — see log.reconstruct_fields" >&2
+            tail -20 log.reconstruct_fields >&2
+            exit 1
+        fi
+    else
+        echo "WARNING: reconstruct_fields.py not found or no python3 — falling back to reconstructPar" >&2
+        runApplication reconstructPar -latestTime
+    fi
 else
     runApplication $SOLVER
     check_log log.$SOLVER

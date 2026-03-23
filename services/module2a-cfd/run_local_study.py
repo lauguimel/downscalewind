@@ -541,6 +541,7 @@ def step_solve(case_dirs: dict, cfg: dict) -> dict:
                 f"foamDictionary system/decomposeParDict "
                 f"-entry numberOfSubdomains -set {nprocs} && "
                 f"decomposePar && "
+                f'for d in processor*/; do ln -sf ../../constant/boundaryData "$d/constant/"; done && '
                 f"mpirun --allow-run-as-root -np {nprocs} {solver} -parallel && "
                 f"reconstructPar -latestTime"
             )

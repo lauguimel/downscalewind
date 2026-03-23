@@ -53,6 +53,7 @@ def run_docker(case_dir: Path, command: str, nprocs: int = 1, timeout: int = 720
             f"foamDictionary system/decomposeParDict "
             f"-entry numberOfSubdomains -set {nprocs} && "
             f"decomposePar && "
+            f'for d in processor*/; do ln -sf ../../constant/boundaryData "$d/constant/"; done && '
             f"mpirun --allow-run-as-root -np {nprocs} {command} -parallel"
         )
     else:

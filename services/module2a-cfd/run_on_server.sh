@@ -62,6 +62,7 @@ echo "[$(date +%H:%M:%S)] Running simpleFoam (nprocs=$NPROCS)..."
 if [ "$NPROCS" -gt 1 ]; then
     SOLVE_CMD="foamDictionary system/decomposeParDict -entry numberOfSubdomains -set $NPROCS && \
                decomposePar -force && \
+               for d in processor*/; do ln -sf ../../constant/boundaryData \${d}constant/boundaryData; done && \
                mpirun --allow-run-as-root -np $NPROCS simpleFoam -parallel > /case/log.simpleFoam 2>&1 && \
                reconstructPar -latestTime >> /case/log.simpleFoam 2>&1"
 else

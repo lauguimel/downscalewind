@@ -185,6 +185,7 @@ def solve_on_uga(case_id: str, remote_case: str, nprocs: int):
             f'foamDictionary system/decomposeParDict -entry numberOfSubdomains -set {nprocs} && '
             f'rm -rf processor* && '
             f'decomposePar -force > /dev/null 2>&1 && '
+            f'for d in processor*/; do ln -sf ../../constant/boundaryData \\$d/constant/boundaryData; done && '
             f'mpirun --allow-run-as-root -np {nprocs} simpleFoam -parallel '
             f'> /case/log.simpleFoam 2>&1"'
         )

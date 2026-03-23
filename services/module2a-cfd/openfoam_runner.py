@@ -195,7 +195,17 @@ class OpenFOAMRunner:
         """Decompose the case for parallel running."""
         flag = "-force" if force else ""
         logger.info("decomposePar %s — case: %s", flag, self.case_dir)
-        self._docker_run(f"decomposePar {flag} 2>&1 | tee log.decomposePar")
+        # Symlink boundaryData into processor dirs (MappedFile resolves relative
+        # to processor path in OF ESI, not global case root)
+        symlink_cmd = (
+            ' && if [ -d constant/boundaryData ]; then'
+            ' for d in processor*/; do'
+            ' ln -sf ../../constant/boundaryData "$d/constant/";'
+            ' done; fi'
+        )
+        self._docker_run(
+            f"decomposePar {flag} 2>&1 | tee log.decomposePar{symlink_cmd}"
+        )
 
     def reconstruct_par(self, *, latest_time: bool = True) -> None:
         """Reconstruct the parallel case after the solver."""

@@ -139,6 +139,7 @@ print(cfg['cases'].get(cid,{}).get('nprocs',$NPROCS))
             "foamDictionary system/decomposeParDict -entry numberOfSubdomains -set $NPROCS_CASE && \
              rm -rf processor* && \
              decomposePar -force > /dev/null 2>&1 && \
+             for d in processor*/; do ln -sf ../../constant/boundaryData \${d}constant/boundaryData; done && \
              mpirun --allow-run-as-root -np $NPROCS_CASE simpleFoam -parallel > /case/log.simpleFoam 2>&1"
 
         # Reconstruct
