@@ -155,7 +155,7 @@ def scp_to_uga(local_dir: Path, remote_dir: str):
     log.info("  scp → UGA:%s", remote_dir)
     subprocess.run(
         ["scp", "-rq", str(local_dir), f"UGA:{remote_dir}"],
-        timeout=600, check=True,
+        timeout=1800, check=True,
     )
 
 

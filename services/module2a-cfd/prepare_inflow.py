@@ -561,7 +561,7 @@ def reconstruct_inlet_profile(
     z_knots   = np.concatenate([[Z_LAYER1_TOP], z_era5[era5_in_layer2]])
     spd_era5  = np.hypot(u_era5, v_era5)
     spd_knots = np.concatenate([
-        [float(log_law_speed(np.array([Z_LAYER1_TOP]), u_star, z0_eff, L_mo))],
+        [float(log_law_speed(np.array([Z_LAYER1_TOP]), u_star, z0_eff, L_mo).item())],
         spd_era5[era5_in_layer2],
     ])
 

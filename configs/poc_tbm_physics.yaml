@@ -1,0 +1,96 @@
+# PoC TBM — Physics sensitivity study
+#
+# 5 cases at L2 resolution (165k cells, ~22s on 24 cores):
+#   A: baseline (SF + T passive + Coriolis)
+#   B: + canopy (atmPlantCanopyUSource + TurbSource)
+#   C: - Coriolis (no Ekman turning)
+#   D: - T passive (no scalarTransport)
+#   E: + canopy + no Coriolis (isolate canopy effect)
+#
+# All use TBM structured mesh, L2 config (optimal grading).
+
+study:
+  name: poc_tbm_physics
+  site: perdigao
+  timestamp: "2017-05-04T22:00"
+  inflow_mode: era5
+  n_iterations: 500
+  write_interval: 100
+  mesher: terrainBlockMesher
+
+docker:
+  tbm_image: "terrainblockmesher:of24"
+  solver_image: "microfluidica/openfoam:latest"
+
+terrainBlockMesher:
+  origin: [0, 0, 0]
+  p_corner: [-1000, -1000, 100]
+  dimensions: [2000, 2000, 5000]
+  p_above: [0, 0, 10000]
+  blocks: [10, 10]
+  cells_per_block: [3, 3, 50]
+  grading: [1, 1, 15]
+  max_dist_proj: 20000
+  cylinder:
+    centre: [0, 0, 100]
+    radius: 7000
+    radial_grading: 20
+    radial_cells: 20
+    n_sections: 8
+  orthogonal_splines:
+    normal_dist: 5000
+  check_mesh: "true"
+
+cases:
+  A_baseline:
+    label: "SF + T + Coriolis (baseline)"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    nprocs: 24
+
+  B_canopy:
+    label: "SF + T + Coriolis + Canopy"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: true
+    nprocs: 24
+
+  C_noCoriolis:
+    label: "SF + T (no Coriolis)"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: false
+    canopy: false
+    nprocs: 24
+
+  D_noT:
+    label: "SF + Coriolis (no T)"
+    solver: simpleFoam
+    thermal: false
+    transport_T: false
+    coriolis: true
+    canopy: false
+    nprocs: 24
+
+  E_canopy_noCor:
+    label: "SF + T + Canopy (no Coriolis)"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: false
+    canopy: true
+    nprocs: 24
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  output_dir: "data/validation/poc_tbm_physics"
+  towers:
+    - tse04
+    - tse09
+    - tse13

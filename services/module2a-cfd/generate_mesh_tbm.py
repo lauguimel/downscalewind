@@ -201,7 +201,8 @@ def generate_mesh_tbm(
     stl_filename = stl_path.name
 
     # Work in a temporary directory to avoid polluting the case
-    with tempfile.TemporaryDirectory(prefix="tbm_") as tmp:
+    # ignore_cleanup_errors: Docker creates root-owned files in polyMesh
+    with tempfile.TemporaryDirectory(prefix="tbm_", ignore_cleanup_errors=True) as tmp:
         tmp_case = Path(tmp) / "tbm_case"
         tmp_case.mkdir()
 
