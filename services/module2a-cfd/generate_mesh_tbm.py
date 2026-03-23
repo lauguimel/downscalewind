@@ -133,7 +133,13 @@ def _run_tbm_docker(
     timeout: int = 600,
     platform: str | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run terrainBlockMesher in Docker container."""
+    """Run terrainBlockMesher in Docker container.
+
+    Runs as root (required by the OF2.4 image layout), then chowns output
+    to the calling user so that tmpdir cleanup succeeds.
+    """
+    import os
+    uid, gid = os.getuid(), os.getgid()
     cmd = ["docker", "run", "--rm"]
     if platform:
         cmd.extend(["--platform", platform])
@@ -141,7 +147,8 @@ def _run_tbm_docker(
         "-v", f"{case_dir.resolve()}:/case",
         "-w", "/case",
         image,
-        "terrainBlockMesher",
+        "bash", "-c",
+        f"terrainBlockMesher && chown -R {uid}:{gid} /case/constant/polyMesh",
     ])
     log.info("Running terrainBlockMesher in Docker [%s]", image)
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)

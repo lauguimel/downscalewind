@@ -7,7 +7,8 @@
 # Everything runs on UGA: STL generation, TBM mesh, init, solve, reconstruct.
 # No scp needed. Results stay on UGA, rsync back when needed.
 
-set -euo pipefail
+set -uo pipefail
+# NOT set -e: some Docker commands return non-zero on warnings
 
 CONFIG="${1:?Usage: $0 <config.yaml> [nprocs]}"
 NPROCS="${2:-24}"
