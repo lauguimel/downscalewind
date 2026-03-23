@@ -167,41 +167,80 @@ def ssh_run(cmd: str, timeout: int = 600) -> str:
 
 
 def solve_on_uga(case_id: str, remote_case: str, nprocs: int):
-    """Solve a case on UGA via Docker."""
+    """Solve a case on UGA via Docker.
+
+    Uses -noFunctionObjects in decomposePar to avoid neg(phi) crash
+    from scalarTransportT. Falls back to serial if decomposePar fails.
+    """
     log.info("  Solving %s on UGA (%d cores)...", case_id, nprocs)
-    cmd = (
-        f'docker run --rm --cpus={nprocs} '
-        f'-v {remote_case}:/case -w /case '
-        f'microfluidica/openfoam:latest bash -c "'
-        f'foamDictionary system/decomposeParDict -entry numberOfSubdomains -set {nprocs} && '
-        f'decomposePar -force > /dev/null 2>&1 && '
-        f'mpirun --allow-run-as-root -np {nprocs} simpleFoam -parallel '
-        f'> /case/log.simpleFoam 2>&1"'
-    )
-    ssh_run(cmd, timeout=1800)
-    # Get timing
+
+    if nprocs > 1:
+        # Parallel: decomposePar -noFunctionObjects + mpirun
+        cmd = (
+            f'docker run --rm --cpus={nprocs} --memory=16g '
+            f'-v {remote_case}:/case -w /case '
+            f'microfluidica/openfoam:latest bash -c "'
+            f'foamDictionary system/decomposeParDict -entry numberOfSubdomains -set {nprocs} && '
+            f'rm -rf processor* && '
+            f'decomposePar -noFunctionObjects -force > /dev/null 2>&1 && '
+            f'mpirun --allow-run-as-root -np {nprocs} simpleFoam -parallel '
+            f'> /case/log.simpleFoam 2>&1"'
+        )
+    else:
+        # Serial
+        cmd = (
+            f'docker run --rm --cpus=4 '
+            f'-v {remote_case}:/case -w /case '
+            f'microfluidica/openfoam:latest bash -c "'
+            f'simpleFoam > /case/log.simpleFoam 2>&1"'
+        )
+
+    ssh_run(cmd, timeout=3600)
+
+    # Verify success
     clock = ssh_run(f"grep ClockTime {remote_case}/log.simpleFoam | tail -1")
     ux = ssh_run(f"grep Ux {remote_case}/log.simpleFoam | tail -1")
-    log.info("  %s: %s | %s", case_id, clock, ux[:80] if ux else "no Ux")
+
+    if not clock:
+        log.error("  %s: solver produced no output — check log on UGA", case_id)
+    else:
+        log.info("  %s: %s | %s", case_id, clock, ux[:80] if ux else "no Ux")
 
 
-def reconstruct_on_uga(remote_case: str):
-    """Reconstruct parallel results on UGA."""
-    ssh_run(
+def reconstruct_on_uga(remote_case: str, nprocs: int):
+    """Reconstruct parallel results on UGA (if parallel)."""
+    if nprocs <= 1:
+        log.info("  Serial run — no reconstruction needed")
+        return
+    log.info("  Reconstructing on UGA...")
+    out = ssh_run(
         f"cd {remote_case} && python3 reconstruct_fields.py "
-        f"--case-dir . --time 500 --write-foam 2>/dev/null",
-        timeout=120,
+        f"--case-dir . --time 500 --write-foam 2>&1 | tail -2",
+        timeout=300,
     )
+    log.info("  %s", out)
 
 
 def rsync_results(remote_case: str, local_case: Path):
-    """Rsync solver results from UGA."""
+    """Rsync solver results + logs from UGA."""
     log.info("  rsync ← UGA")
-    for sub in ["500", "400", "log.simpleFoam"]:
+    local_case = Path(local_case)
+    # Sync time directories (500/, 400/) + log + polyMesh
+    for sub in ["500/", "log.simpleFoam"]:
+        src = f"UGA:{remote_case}/{sub}"
+        dst = local_case / sub
+        dst_parent = dst if sub.endswith("/") else dst.parent
+        dst_parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
-            ["rsync", "-az", f"UGA:{remote_case}/{sub}",
-             f"{local_case}/{sub}"],
-            capture_output=True, timeout=120,
+            ["rsync", "-az", src, str(dst)],
+            capture_output=True, timeout=300,
+        )
+    # Sync polyMesh if not present locally
+    if not (local_case / "constant" / "polyMesh" / "points").exists():
+        subprocess.run(
+            ["rsync", "-az", f"UGA:{remote_case}/constant/polyMesh/",
+             str(local_case / "constant" / "polyMesh/")],
+            capture_output=True, timeout=300,
         )
 
 
@@ -260,8 +299,7 @@ def main():
             solve_on_uga(case_id, remote_case, nprocs)
 
             # Reconstruct if parallel
-            if nprocs > 1:
-                reconstruct_on_uga(remote_case)
+            reconstruct_on_uga(remote_case, nprocs)
 
             # Rsync results back
             rsync_results(remote_case, local_case)
