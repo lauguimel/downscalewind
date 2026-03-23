@@ -62,7 +62,9 @@ def generate_local(cfg: dict, cases_dir: Path) -> dict[str, Path]:
     stl_path = cases_dir / "terrain.stl"
     if not stl_path.exists():
         log.info("Generating terrain STL...")
-        first_tbm = next(iter(cfg["cases"].values()))["tbm"]
+        # TBM config can be per-case (cases.X.tbm) or study-level (terrainBlockMesher)
+        first_case = next(iter(cfg["cases"].values()))
+        first_tbm = first_case.get("tbm", cfg.get("terrainBlockMesher", {}))
         radius = first_tbm.get("cylinder", {}).get("radius", 7000) * 1.1
         DEG_LAT = 1 / 111_000
         DEG_LON = 1 / (111_000 * np.cos(np.radians(site_lat)))
@@ -77,7 +79,7 @@ def generate_local(cfg: dict, cases_dir: Path) -> dict[str, Path]:
     case_dirs = {}
     for case_id, case_cfg in cfg["cases"].items():
         case_dir = cases_dir / f"case_{case_id}"
-        tbm_cfg = case_cfg["tbm"]
+        tbm_cfg = case_cfg.get("tbm", cfg.get("terrainBlockMesher", {}))
         log.info("=== %s: %s ===", case_id, case_cfg.get("label", case_id))
 
         # 1. TBM mesh
