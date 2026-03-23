@@ -1,0 +1,62 @@
+# PoC TBM — 25-timestamp campaign
+#
+# 25 ERA5 timestamps selected by k-means clustering (speed × direction × shear).
+# Same mesh for all cases: TBM structured hex, L2 config (~165k cells, ~22s/case).
+# SF + Coriolis + T passive (baseline physics from poc_tbm_physics case A).
+#
+# Expected total: 25 × (11 min SCP + 22s solve + 20s reconstruct) ≈ 5h
+# (dominated by SCP over slow UGA link)
+#
+# Usage:
+#   cd services/module2a-cfd
+#   python run_tbm_uga.py --config ../../configs/poc_tbm_25ts.yaml --nprocs 24
+
+study:
+  name: poc_tbm_25ts
+  site: perdigao
+  timestamps_csv: "data/campaign/sf_poc/timestamps.csv"
+  n_iterations: 500
+  write_interval: 500
+  transport_T: true
+  coriolis: true
+  mesher: terrainBlockMesher
+
+docker:
+  tbm_image: "terrainblockmesher:of24"
+  solver_image: "microfluidica/openfoam:latest"
+
+terrainBlockMesher:
+  origin: [0, 0, 0]
+  p_corner: [-1000, -1000, 100]
+  dimensions: [2000, 2000, 5000]
+  p_above: [0, 0, 10000]
+  blocks: [10, 10]
+  cells_per_block: [3, 3, 50]
+  grading: [1, 1, 15]
+  max_dist_proj: 20000
+  cylinder:
+    centre: [0, 0, 100]
+    radius: 7000
+    radial_grading: 20
+    radial_cells: 20
+    n_sections: 8
+  orthogonal_splines:
+    normal_dist: 5000
+  check_mesh: "true"
+
+# Case defaults (applied to all 25 timestamps)
+defaults:
+  solver: simpleFoam
+  thermal: false
+  transport_T: true
+  coriolis: true
+  canopy: false
+  nprocs: 24
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  output_dir: "data/validation/poc_tbm_25ts"
+  towers:
+    - tse04
+    - tse09
+    - tse13
