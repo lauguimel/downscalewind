@@ -1,0 +1,133 @@
+# PoC TBM — Passe 1: grading optimization (same cell count ~81k)
+#
+# Tests vertical grading (15/30/50) and radial grading (10/20)
+# to find optimal cell distribution without adding cells.
+#
+# All cases: 4 cores serial (small mesh, MPI overhead not worth it)
+
+study:
+  name: poc_tbm_grading
+  site: perdigao
+  timestamp: "2017-05-04T22:00"
+  inflow_mode: era5
+  n_iterations: 500
+  write_interval: 100
+  transport_T: true
+  mesher: terrainBlockMesher
+
+docker:
+  tbm_image: "terrainblockmesher:of24"
+  solver_image: "microfluidica/openfoam:latest"
+  nprocs: 1                       # serial — 81k cells too small for MPI
+
+terrainBlockMesher_base: &tbm_base
+  origin: [0, 0, 0]
+  p_corner: [-1000, -1000, 100]
+  dimensions: [2000, 2000, 5000]
+  p_above: [0, 0, 10000]
+  blocks: [10, 10]
+  cells_per_block: [3, 3, 30]
+  max_dist_proj: 20000
+  cylinder:
+    centre: [0, 0, 100]
+    radius: 7000
+    n_sections: 8
+  orthogonal_splines:
+    normal_dist: 5000
+  check_mesh: "true"
+
+cases:
+  # --- Vertical grading sweep (radial_grading=10 fixed) ---
+  gz15:
+    label: "Z grading 15 (baseline)"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    tbm:
+      <<: *tbm_base
+      grading: [1, 1, 15]
+      cylinder:
+        centre: [0, 0, 100]
+        radius: 7000
+        radial_grading: 10
+        radial_cells: 15
+        n_sections: 8
+
+  gz30:
+    label: "Z grading 30"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    tbm:
+      <<: *tbm_base
+      grading: [1, 1, 30]
+      cylinder:
+        centre: [0, 0, 100]
+        radius: 7000
+        radial_grading: 10
+        radial_cells: 15
+        n_sections: 8
+
+  gz50:
+    label: "Z grading 50"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    tbm:
+      <<: *tbm_base
+      grading: [1, 1, 50]
+      cylinder:
+        centre: [0, 0, 100]
+        radius: 7000
+        radial_grading: 10
+        radial_cells: 15
+        n_sections: 8
+
+  # --- Radial grading sweep (Z grading=15 fixed) ---
+  gr20:
+    label: "Radial grading 20"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    tbm:
+      <<: *tbm_base
+      grading: [1, 1, 15]
+      cylinder:
+        centre: [0, 0, 100]
+        radius: 7000
+        radial_grading: 20
+        radial_cells: 15
+        n_sections: 8
+
+  gr5:
+    label: "Radial grading 5"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    tbm:
+      <<: *tbm_base
+      grading: [1, 1, 15]
+      cylinder:
+        centre: [0, 0, 100]
+        radius: 7000
+        radial_grading: 5
+        radial_cells: 15
+        n_sections: 8
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  output_dir: "data/validation/poc_tbm_grading"
+  towers:
+    - tse04
+    - tse09
+    - tse13
