@@ -1,0 +1,135 @@
+# PoC TBM — Passe 2: mesh convergence (4 levels, gradings fixed)
+#
+# Convergence evaluated on 100 grid probes BETWEEN resolutions (L4 = reference).
+# Gradings fixed at optimal: Z=15, radial=20.
+
+study:
+  name: poc_tbm_convergence
+  site: perdigao
+  timestamp: "2017-05-04T22:00"
+  inflow_mode: era5
+  n_iterations: 500
+  write_interval: 100
+  transport_T: true
+  mesher: terrainBlockMesher
+
+docker:
+  tbm_image: "terrainblockmesher:of24"
+  solver_image: "microfluidica/openfoam:latest"
+
+cases:
+  L1:
+    label: "L1 81k (30x30, Nz=30, Nr=15)"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    nprocs: 24
+    tbm:
+      origin: [0, 0, 0]
+      p_corner: [-1000, -1000, 100]
+      dimensions: [2000, 2000, 5000]
+      p_above: [0, 0, 10000]
+      blocks: [10, 10]
+      cells_per_block: [3, 3, 30]
+      grading: [1, 1, 15]
+      max_dist_proj: 20000
+      cylinder:
+        centre: [0, 0, 100]
+        radius: 7000
+        radial_grading: 20
+        radial_cells: 15
+        n_sections: 8
+      orthogonal_splines:
+        normal_dist: 5000
+      check_mesh: "true"
+
+  L2:
+    label: "L2 130k (30x30, Nz=50, Nr=20)"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    nprocs: 24
+    tbm:
+      origin: [0, 0, 0]
+      p_corner: [-1000, -1000, 100]
+      dimensions: [2000, 2000, 5000]
+      p_above: [0, 0, 10000]
+      blocks: [10, 10]
+      cells_per_block: [3, 3, 50]
+      grading: [1, 1, 15]
+      max_dist_proj: 20000
+      cylinder:
+        centre: [0, 0, 100]
+        radius: 7000
+        radial_grading: 20
+        radial_cells: 20
+        n_sections: 8
+      orthogonal_splines:
+        normal_dist: 5000
+      check_mesh: "true"
+
+  L3:
+    label: "L3 350k (60x60, Nz=50, Nr=25)"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    nprocs: 24
+    tbm:
+      origin: [0, 0, 0]
+      p_corner: [-1000, -1000, 100]
+      dimensions: [2000, 2000, 5000]
+      p_above: [0, 0, 10000]
+      blocks: [20, 20]
+      cells_per_block: [3, 3, 50]
+      grading: [1, 1, 15]
+      max_dist_proj: 20000
+      cylinder:
+        centre: [0, 0, 100]
+        radius: 7000
+        radial_grading: 20
+        radial_cells: 25
+        n_sections: 8
+      orthogonal_splines:
+        normal_dist: 5000
+      check_mesh: "true"
+
+  L4:
+    label: "L4 700k (60x60, Nz=80, Nr=30)"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    canopy: false
+    nprocs: 48
+    tbm:
+      origin: [0, 0, 0]
+      p_corner: [-1000, -1000, 100]
+      dimensions: [2000, 2000, 5000]
+      p_above: [0, 0, 10000]
+      blocks: [20, 20]
+      cells_per_block: [3, 3, 80]
+      grading: [1, 1, 15]
+      max_dist_proj: 20000
+      cylinder:
+        centre: [0, 0, 100]
+        radius: 7000
+        radial_grading: 20
+        radial_cells: 30
+        n_sections: 8
+      orthogonal_splines:
+        normal_dist: 5000
+      check_mesh: "true"
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  output_dir: "data/validation/poc_tbm_convergence"
+  towers:
+    - tse04
+    - tse09
+    - tse13
