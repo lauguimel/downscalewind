@@ -750,7 +750,7 @@ def evaluate_batch(cases_dir: Path, output_root: Path | None = None) -> list[dic
         if m:
             all_metrics.append(m)
 
-    # Auto-generate comparison
+    # Auto-generate all batch plots
     if len(all_metrics) >= 2:
         study_name = cases_dir.name
         val_dir = ROOT / "data" / "validation" / study_name
@@ -758,7 +758,168 @@ def evaluate_batch(cases_dir: Path, output_root: Path | None = None) -> list[dic
         if len(metrics_files) >= 2:
             plot_comparison(metrics_files, val_dir / "comparison.png")
 
+        # Overlay field convergence (all cases on same axes)
+        try:
+            _plot_batch_field_convergence(case_dirs, val_dir / "field_convergence_overlay.png")
+        except Exception as exc:
+            logger.warning("Field convergence overlay failed: %s", exc)
+
+        # Grid probes statistical comparison
+        try:
+            _plot_batch_grid_stats(val_dir, val_dir / "grid_stats_comparison.png")
+        except Exception as exc:
+            logger.warning("Grid stats comparison failed: %s", exc)
+
     return all_metrics
+
+
+def _plot_batch_field_convergence(case_dirs: list[Path], output_path: Path):
+    """Overlay field convergence (U avg, U max, k, T, residuals) for all cases."""
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    colors = plt.cm.tab10(np.linspace(0, 1, len(case_dirs)))
+
+    for i, case_dir in enumerate(case_dirs):
+        label = case_dir.name.removeprefix("case_")
+        log_sf = case_dir / "log.simpleFoam"
+        if not log_sf.exists():
+            continue
+        text = log_sf.read_text()
+        c = colors[i]
+
+        u_avg = np.array([(float(a), float(b), float(c_))
+                          for a, b, c_ in re.findall(
+                              r'volAverage\(region0\) of U = \(([-\d.e+]+) ([-\d.e+]+) ([-\d.e+]+)\)', text)])
+        if not len(u_avg):
+            continue
+        speed_avg = np.sqrt(u_avg[:, 0]**2 + u_avg[:, 1]**2 + u_avg[:, 2]**2)
+        k_avg = np.array([float(x) for x in re.findall(r'volAverage\(region0\) of k = ([-\d.e+]+)', text)])
+        T_avg = np.array([float(x) for x in re.findall(r'volAverage\(region0\) of T = ([-\d.e+]+)', text)])
+        speed_max = np.array([float(x) for x in re.findall(r'max\(mag\(U\)\) = ([\d.e+-]+)', text)])
+        ux_res = np.array([float(x) for x in re.findall(r'Solving for Ux, Initial residual = ([\d.e+-]+)', text)])
+
+        n = len(speed_avg)
+        iters = np.arange(1, n + 1)
+
+        axes[0, 0].plot(iters, speed_avg, color=c, linewidth=1, label=label)
+        axes[0, 1].plot(iters[:len(speed_max)], speed_max, color=c, linewidth=1, label=label)
+        axes[0, 2].plot(iters[:len(k_avg)], k_avg, color=c, linewidth=1, label=label)
+        axes[1, 0].semilogy(ux_res, color=c, linewidth=1, label=label)
+        if len(T_avg):
+            axes[1, 1].plot(iters[:len(T_avg)], T_avg, color=c, linewidth=1, label=label)
+
+    axes[0, 0].set_ylabel("|U| avg [m/s]"); axes[0, 0].set_title("Speed avg")
+    axes[0, 1].set_ylabel("|U| max [m/s]"); axes[0, 1].set_title("Speed max")
+    axes[0, 2].set_ylabel("k avg [m²/s²]"); axes[0, 2].set_title("TKE avg")
+    axes[1, 0].set_ylabel("Ux residual"); axes[1, 0].set_title("Residuals")
+    axes[1, 1].set_ylabel("T avg [K]"); axes[1, 1].set_title("T avg")
+    axes[1, 2].axis("off")
+
+    for ax in axes.flat:
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlabel("Iteration")
+
+    fig.suptitle("Field convergence overlay — all cases", fontsize=13)
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    logger.info("Field convergence overlay: %s", output_path)
+
+
+def _plot_batch_grid_stats(val_dir: Path, output_path: Path):
+    """Compare grid probe statistics across cases."""
+    import matplotlib.pyplot as plt
+    import pandas as pd
+
+    csv_files = sorted(val_dir.glob("*/grid_probes.csv"))
+    if len(csv_files) < 2:
+        return
+
+    z_interp = np.array([10, 20, 50, 100, 150, 200, 300, 500])
+    colors = plt.cm.tab10(np.linspace(0, 1, len(csv_files)))
+
+    def _interp(csv_path, z_target):
+        df = pd.read_csv(csv_path)
+        records = []
+        for probe in df["probe"].unique():
+            sub = df[df["probe"] == probe].sort_values("z_agl")
+            if len(sub) < 3:
+                continue
+            for var in ["speed", "k"]:
+                vals = np.interp(z_target, sub["z_agl"].values, sub[var].values,
+                                 left=np.nan, right=np.nan)
+                for j, z in enumerate(z_target):
+                    if not np.isnan(vals[j]):
+                        records.append({"probe": probe, "z": z, "var": var, "value": vals[j]})
+        return pd.DataFrame(records)
+
+    interps = {}
+    labels = []
+    for csv_f in csv_files:
+        label = csv_f.parent.name
+        labels.append(label)
+        interps[label] = _interp(csv_f, z_interp)
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    # Speed distribution at 100m
+    ax = axes[0, 0]
+    for i, label in enumerate(labels):
+        sub = interps[label][(interps[label]["var"] == "speed") & (interps[label]["z"] == 100)]
+        if len(sub):
+            ax.hist(sub["value"], bins=15, alpha=0.4, color=colors[i],
+                    label=f'{label} (μ={sub["value"].mean():.2f})')
+    ax.set_xlabel("Speed [m/s]"); ax.set_title("Speed at 100m AGL (100 probes)")
+    ax.legend(fontsize=7)
+
+    # Mean speed profile
+    ax = axes[0, 1]
+    for i, label in enumerate(labels):
+        sub = interps[label][interps[label]["var"] == "speed"]
+        if len(sub):
+            m = sub.groupby("z")["value"].mean()
+            s = sub.groupby("z")["value"].std()
+            ax.plot(m.values, m.index, ".-", color=colors[i], label=label)
+            ax.fill_betweenx(m.index, m.values - s.values, m.values + s.values,
+                             color=colors[i], alpha=0.1)
+    ax.set_xlabel("Speed [m/s]"); ax.set_ylabel("z AGL [m]")
+    ax.set_title("Mean ± std (100 probes)"); ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3); ax.set_ylim(0, 500)
+
+    # TKE profile
+    ax = axes[1, 0]
+    for i, label in enumerate(labels):
+        sub = interps[label][interps[label]["var"] == "k"]
+        if len(sub):
+            m = sub.groupby("z")["value"].mean()
+            ax.semilogx(m.values, m.index, ".-", color=colors[i], label=label)
+    ax.set_xlabel("TKE [m²/s²]"); ax.set_ylabel("z AGL [m]")
+    ax.set_title("Mean TKE (100 probes)"); ax.legend(fontsize=7)
+    ax.grid(True, alpha=0.3); ax.set_ylim(0, 500)
+
+    # Summary table
+    ax = axes[1, 1]
+    ax.axis("off")
+    rows = []
+    for label in labels:
+        sub = interps[label][(interps[label]["var"] == "speed") & (interps[label]["z"] == 100)]
+        if len(sub):
+            rows.append([label, f'{sub["value"].mean():.2f}',
+                         f'{sub["value"].std():.2f}', f'{len(sub)}'])
+    if rows:
+        t = ax.table(cellText=rows, colLabels=["Case", "Speed μ", "Speed σ", "N"],
+                     loc="center", cellLoc="center")
+        t.scale(1, 1.5)
+    ax.set_title("Summary at 100m AGL")
+
+    fig.suptitle("Grid probes statistical comparison — all cases", fontsize=13)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    logger.info("Grid stats comparison: %s", output_path)
 
 
 # ---------------------------------------------------------------------------
