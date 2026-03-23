@@ -175,14 +175,14 @@ def solve_on_uga(case_id: str, remote_case: str, nprocs: int):
     log.info("  Solving %s on UGA (%d cores)...", case_id, nprocs)
 
     if nprocs > 1:
-        # Parallel: decomposePar -noFunctionObjects + mpirun
+        # Parallel: decomposePar + mpirun (--memory=16g prevents OOM on large meshes)
         cmd = (
             f'docker run --rm --cpus={nprocs} --memory=16g '
             f'-v {remote_case}:/case -w /case '
             f'microfluidica/openfoam:latest bash -c "'
             f'foamDictionary system/decomposeParDict -entry numberOfSubdomains -set {nprocs} && '
             f'rm -rf processor* && '
-            f'decomposePar -noFunctionObjects -force > /dev/null 2>&1 && '
+            f'decomposePar -force > /dev/null 2>&1 && '
             f'mpirun --allow-run-as-root -np {nprocs} simpleFoam -parallel '
             f'> /case/log.simpleFoam 2>&1"'
         )
