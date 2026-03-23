@@ -24,10 +24,10 @@ docker:
 
 # terrainBlockMesher parameters
 terrainBlockMesher:
-  # STL terrain coordinates — Perdigão centre
-  origin: [0, 0, 0]
-  p_corner: [2000, 2000, 100]         # inner domain: 2×2 km (centred on 0,0)
-  dimensions: [2000, 2000, 5000]      # inner block size + height
+  # STL terrain coordinates — centred on site (0,0)
+  origin: [0, 0, 0]                   # coordinate system origin
+  p_corner: [-1000, -1000, 100]       # lower-left corner of inner 2×2km block
+  dimensions: [2000, 2000, 5000]      # → block from (-1000,-1000) to (1000,1000)
   p_above: [0, 0, 10000]             # reference point above terrain
 
   # Block structure — coarse for smoke test
