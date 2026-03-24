@@ -238,22 +238,61 @@ def extract_profiles(
         z_col = z[col_mask]
         z_terrain = z_col.min()
         z_agl = z_col - z_terrain
-        idx = np.argsort(z_agl)
 
-        U_col = U[col_mask][idx]
+        U_col = U[col_mask]
+        k_col = k[col_mask]
+        eps_col = epsilon[col_mask]
+        speed_col = np.sqrt(U_col[:, 0]**2 + U_col[:, 1]**2)
+
+        # Interpolate onto fixed height levels (smooth profiles)
+        from scipy.interpolate import interp1d
+        z_levels = np.concatenate([
+            np.arange(5, 200, 5),       # 5m steps in surface layer
+            np.arange(200, 1000, 20),    # 20m steps in ABL
+            np.arange(1000, 5100, 100),  # 100m steps above
+        ])
+        z_levels = z_levels[z_levels <= z_agl.max()]
+
+        # Bin-average raw data first (many cells at similar z) then interpolate
+        z_sorted = np.argsort(z_agl)
+        z_s = z_agl[z_sorted]
+
+        def _bin_then_interp(values):
+            v_s = values[z_sorted]
+            # Bin into 5m windows for averaging duplicates
+            z_uniq, inv = [], []
+            v_uniq = []
+            bin_w = 3.0  # m
+            i = 0
+            while i < len(z_s):
+                z_lo = z_s[i]
+                j = i
+                while j < len(z_s) and z_s[j] - z_lo < bin_w:
+                    j += 1
+                z_uniq.append(z_s[i:j].mean())
+                v_uniq.append(v_s[i:j].mean())
+                i = j
+            z_u = np.array(z_uniq)
+            v_u = np.array(v_uniq)
+            if len(z_u) < 2:
+                return np.full_like(z_levels, v_u[0] if len(v_u) else 0.0)
+            f = interp1d(z_u, v_u, kind="linear", bounds_error=False,
+                         fill_value=(v_u[0], v_u[-1]))
+            return f(z_levels)
+
         prof = {
-            "z_agl": z_agl[idx],
+            "z_agl": z_levels,
             "z_terrain": float(z_terrain),
-            "speed": np.sqrt(U_col[:, 0]**2 + U_col[:, 1]**2),
-            "ux": U_col[:, 0],
-            "uy": U_col[:, 1],
-            "w": U_col[:, 2],
-            "k": k[col_mask][idx],
-            "epsilon": epsilon[col_mask][idx],
+            "speed": _bin_then_interp(speed_col),
+            "ux": _bin_then_interp(U_col[:, 0]),
+            "uy": _bin_then_interp(U_col[:, 1]),
+            "w": _bin_then_interp(U_col[:, 2]),
+            "k": _bin_then_interp(k_col),
+            "epsilon": _bin_then_interp(eps_col),
             "n_cells": int(col_mask.sum()),
         }
         if has_T:
-            prof["T"] = T[col_mask][idx]
+            prof["T"] = _bin_then_interp(T[col_mask])
         profiles[name] = prof
 
     return profiles
