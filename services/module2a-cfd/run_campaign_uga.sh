@@ -22,6 +22,7 @@ PYTHON=/home/guillaume/miniconda3/bin/python
 SCRIPTS=/home/guillaume/dsw/scripts
 ERA5=/home/guillaume/dsw/era5_perdigao.zarr
 WORLDCOVER=/home/guillaume/dsw/worldcover_perdigao.tif
+CANOPY_HEIGHT=/home/guillaume/dsw/canopy_height_perdigao.tif
 OF_IMAGE=microfluidica/openfoam:latest
 NPROCS=24
 N_ITER=500
@@ -73,7 +74,8 @@ echo "[$(date +%H:%M:%S)] === Campaign mode: $MODE ==="
 
 declare -a CASE_IDS=()
 declare -a CASE_TS=()
-declare -a CASE_Z0=()  # "uniform" or "worldcover"
+declare -a CASE_Z0=()     # "uniform" or "worldcover"
+declare -a CASE_CANOPY=() # "true" or "false"
 
 case "$MODE" in
     z0_sensitivity)
@@ -83,12 +85,25 @@ case "$MODE" in
             CASE_IDS+=("u$(printf '%02d' $i)")
             CASE_TS+=("${ALL_TS[$idx]}")
             CASE_Z0+=("uniform")
+            CASE_CANOPY+=("false")
         done
         for i in "${!SENS_INDICES[@]}"; do
             idx=${SENS_INDICES[$i]}
             CASE_IDS+=("w$(printf '%02d' $i)")
             CASE_TS+=("${ALL_TS[$idx]}")
             CASE_Z0+=("worldcover")
+            CASE_CANOPY+=("false")
+        done
+        ;;
+    canopy)
+        CASES_DIR=/home/guillaume/dsw/cases/poc_tbm_canopy
+        Z0_CANOPY=0.01  # bare ground under canopy — NOT WorldCover
+        for i in "${!SENS_INDICES[@]}"; do
+            idx=${SENS_INDICES[$i]}
+            CASE_IDS+=("c$(printf '%02d' $i)")
+            CASE_TS+=("${ALL_TS[$idx]}")
+            CASE_Z0+=("uniform")
+            CASE_CANOPY+=("true")
         done
         ;;
     25ts)
@@ -97,6 +112,7 @@ case "$MODE" in
             CASE_IDS+=("ts$(printf '%02d' $i)")
             CASE_TS+=("${ALL_TS[$i]}")
             CASE_Z0+=("uniform")
+            CASE_CANOPY+=("false")
         done
         ;;
     25ts_wc)
@@ -105,10 +121,11 @@ case "$MODE" in
             CASE_IDS+=("ts$(printf '%02d' $i)")
             CASE_TS+=("${ALL_TS[$i]}")
             CASE_Z0+=("worldcover")
+            CASE_CANOPY+=("false")
         done
         ;;
     *)
-        echo "Usage: $0 {z0_sensitivity|25ts|25ts_wc}"
+        echo "Usage: $0 {z0_sensitivity|25ts|25ts_wc|canopy}"
         exit 1
         ;;
 esac
@@ -135,7 +152,8 @@ for i in "${!CASE_IDS[@]}"; do
         continue
     fi
 
-    echo -n "[$(date +%H:%M:%S)] $CID ($TS, z0=$Z0_MODE)... "
+    CANOPY_MODE=${CASE_CANOPY[$i]:-false}
+    echo -n "[$(date +%H:%M:%S)] $CID ($TS, z0=$Z0_MODE, canopy=$CANOPY_MODE)... "
     mkdir -p "$CASE_DIR/constant" "$CASE_DIR/0"
 
     # Copy polyMesh from reference
@@ -154,8 +172,8 @@ for i in "${!CASE_IDS[@]}"; do
     # Prepare inflow
     if [ ! -f "$CASE_DIR/inflow.json" ]; then
         $PYTHON "$SCRIPTS/prepare_inflow.py" \
-            --era5-zarr "$ERA5" --timestamp "$TS" \
-            --site-lat $SITE_LAT --site-lon $SITE_LON \
+            --era5 "$ERA5" --case "$TS" \
+            --lat $SITE_LAT --lon $SITE_LON \
             --output "$CASE_DIR/inflow.json" 2>/dev/null
     fi
 
@@ -169,8 +187,20 @@ for i in "${!CASE_IDS[@]}"; do
     # Render templates
     Z0_FLAG="False"
     [ "$Z0_MODE" = "worldcover" ] && Z0_FLAG="True"
+    CANOPY_FLAG="False"
+    [ "$CANOPY_MODE" = "true" ] && CANOPY_FLAG="True"
 
     if [ ! -f "$CASE_DIR/system/controlDict" ]; then
+        # Override z0 in inflow.json for canopy cases (bare ground = 0.01m)
+        if [ "$CANOPY_MODE" = "true" ] && [ -n "${Z0_CANOPY:-}" ]; then
+            $PYTHON -c "
+import json
+with open('$CASE_DIR/inflow.json') as f: d = json.load(f)
+d['z0_eff'] = $Z0_CANOPY
+with open('$CASE_DIR/inflow.json', 'w') as f: json.dump(d, f, indent=2)
+"
+        fi
+
         $PYTHON -c "
 import sys; sys.path.insert(0, '$SCRIPTS')
 from generate_mesh import generate_mesh
@@ -184,12 +214,20 @@ generate_mesh(
     domain_km=14, domain_type='cylinder',
     solver_name='simpleFoam', thermal=False,
     coriolis=True, transport_T=True,
+    canopy_enabled=$CANOPY_FLAG,
     n_iter=$N_ITER, write_interval=$N_ITER,
     lateral_patches=['section_0','section_1','section_2','section_3',
                      'section_4','section_5','section_6','section_7'],
     z0_mapped=$Z0_FLAG,
 )
 " 2>/dev/null
+    fi
+
+    # Generate LAD + Cd fields from ETH Canopy Height (after templates, before init)
+    if [ "$CANOPY_MODE" = "true" ] && [ ! -f "$CASE_DIR/0/LAD" ]; then
+        $PYTHON "$SCRIPTS/generate_lad_field.py" \
+            --case-dir "$CASE_DIR" --landcover "$CANOPY_HEIGHT" \
+            --site-lat $SITE_LAT --site-lon $SITE_LON 2>&1 | tail -3
     fi
 
     # Ensure decomposeParDict

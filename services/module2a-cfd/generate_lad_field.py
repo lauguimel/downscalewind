@@ -219,76 +219,106 @@ def generate_lad_field(
     landcover_tif: Path,
     site_lat: float,
     site_lon: float,
+    lai: float = 4.0,
+    cd: float = 0.2,
 ) -> dict:
-    """Generate 0/LAD volScalarField from land cover raster.
+    """Generate 0/LAD and 0/Cd volScalarFields from land cover raster.
+
+    Supports two input formats:
+      - 3-band GeoTIFF (z0, d, LAD) from ingest_landcover.py
+      - 1-band GeoTIFF (canopy height [m]) from ETH Global Canopy Height 2020
+
+    For 1-band input, LAD is computed as: LAD = LAI / h_canopy  [1/m]
+    (uniform vertical distribution within canopy).
 
     Parameters
     ----------
-    case_dir : OpenFOAM case directory (with mesh generated).
-    landcover_tif : 3-band GeoTIFF from ingest_landcover.py
-                    (band 1: z0, band 2: d, band 3: LAD).
+    case_dir : OpenFOAM case directory (with mesh + Cx/Cy/Cz generated).
+    landcover_tif : GeoTIFF raster (1 or 3 bands).
     site_lat, site_lon : Site centre coordinates [degrees].
-
-    Returns
-    -------
-    dict with stats: n_canopy_cells, lad_max, z0_range, etc.
+    lai : Leaf Area Index (default 4.0, typical eucalyptus).
+    cd : Drag coefficient (default 0.2, Sogachev & Panferov 2006).
     """
+    import rasterio
+
     # Read cell centres
     centres = read_cell_centres(case_dir)
     n = len(centres)
-    x_m = centres[:, 0]
-    y_m = centres[:, 1]
-    z_m = centres[:, 2]
+    x_m, y_m, z_m = centres[:, 0], centres[:, 1], centres[:, 2]
 
-    # Sample raster bands at cell (x, y) positions
-    logger.info("Sampling land cover raster at %d cell centres", n)
-    z0_col = sample_raster_at_xy(landcover_tif, x_m, y_m, site_lat, site_lon, band=1)
-    d_col = sample_raster_at_xy(landcover_tif, x_m, y_m, site_lat, site_lon, band=2)
-    lad_col = sample_raster_at_xy(landcover_tif, x_m, y_m, site_lat, site_lon, band=3)
+    # Detect raster format
+    with rasterio.open(str(landcover_tif)) as src:
+        n_bands = src.count
+    logger.info("Raster %s: %d band(s)", landcover_tif.name, n_bands)
 
-    # Estimate canopy height from displacement height: h = 1.5 * d
-    h_canopy = 1.5 * d_col
+    if n_bands >= 3:
+        # Legacy 3-band format: z0, d, LAD
+        logger.info("Sampling 3-band land cover raster at %d cells", n)
+        d_col = sample_raster_at_xy(landcover_tif, x_m, y_m, site_lat, site_lon, band=2)
+        lad_col = sample_raster_at_xy(landcover_tif, x_m, y_m, site_lat, site_lon, band=3)
+        h_canopy = 1.5 * d_col
+    else:
+        # ETH Canopy Height: single band = h_canopy [m]
+        logger.info("Sampling ETH canopy height raster at %d cells", n)
+        h_canopy = sample_raster_at_xy(landcover_tif, x_m, y_m, site_lat, site_lon, band=1)
+        h_canopy = np.clip(h_canopy, 0, 50)  # cap at 50m
+        # LAD = LAI / h_canopy (uniform within canopy)
+        lad_col = np.where(h_canopy > 1.0, lai / h_canopy, 0.0)
 
-    # 3-D LAD: LAD > 0 only within the canopy (z_cell < h_canopy)
+    # Terrain height per column: z_terrain(x,y) = min z over cells at (x,y)
+    # Approximate: find nearest terrain face z
+    from scipy.interpolate import NearestNDInterpolator
+    from generate_z0_field import read_face_centres, read_boundary_info
+
+    terrain_patch = "terrain"
+    try:
+        fc = read_face_centres(case_dir, terrain_patch)
+        terrain_interp = NearestNDInterpolator(fc[:, :2], fc[:, 2])
+        z_terrain = terrain_interp(x_m, y_m)
+    except Exception:
+        # Fallback: use minimum z in local column
+        logger.warning("Could not read terrain faces, using column-min z")
+        z_terrain = np.full(n, z_m.min())
+
+    z_agl = z_m - z_terrain
+
+    # 3-D LAD: non-zero only within canopy (z_agl < h_canopy)
     lad_3d = np.where(
-        (z_m < h_canopy) & (lad_col > 0),
+        (z_agl < h_canopy) & (z_agl >= 0) & (lad_col > 0),
         lad_col,
         0.0,
     )
 
     n_canopy = np.count_nonzero(lad_3d > 0)
     logger.info(
-        "LAD field: %d/%d cells within canopy (%.1f%%), max LAD=%.3f 1/m",
-        n_canopy, n, 100.0 * n_canopy / n, lad_3d.max() if n_canopy > 0 else 0.0,
+        "LAD field: %d/%d cells in canopy (%.1f%%), max LAD=%.3f 1/m, max h=%.1fm",
+        n_canopy, n, 100.0 * n_canopy / n,
+        lad_3d.max() if n_canopy else 0.0,
+        h_canopy.max(),
     )
 
     # Write 0/LAD
     write_vol_scalar_field(
-        case_dir / "0" / "LAD",
-        "LAD",
-        lad_3d,
-        dimensions="[0 -1 0 0 0 0 0]",  # [1/m]
+        case_dir / "0" / "LAD", "LAD", lad_3d,
+        dimensions="[0 -1 0 0 0 0 0]",
     )
 
-    # Write 0/Cd (uniform drag coefficient, required by atmPlantCanopyUSource)
-    cd_value = 0.2  # Sogachev & Panferov (2006) default
-    cd_field = np.where(lad_3d > 0, cd_value, 0.0)
+    # Write 0/Cd (non-zero only where LAD > 0)
+    cd_field = np.where(lad_3d > 0, cd, 0.0)
     write_vol_scalar_field(
-        case_dir / "0" / "Cd",
-        "Cd",
-        cd_field,
-        dimensions="[0 0 0 0 0 0 0]",  # dimensionless
+        case_dir / "0" / "Cd", "Cd", cd_field,
+        dimensions="[0 0 0 0 0 0 0]",
     )
 
     stats = {
         "n_cells": n,
         "n_canopy_cells": int(n_canopy),
+        "canopy_fraction": float(n_canopy / n),
         "lad_max": float(lad_3d.max()),
-        "z0_range": [float(z0_col.min()), float(z0_col.max())],
         "h_canopy_max": float(h_canopy.max()),
+        "h_canopy_mean_nonzero": float(h_canopy[h_canopy > 1].mean()) if (h_canopy > 1).any() else 0,
     }
-
-    logger.info("LAD field generation complete: %s", stats)
+    logger.info("Canopy field generation complete: %s", stats)
     return stats
 
 
