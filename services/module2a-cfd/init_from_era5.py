@@ -36,6 +36,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# numpy 2.x renamed trapz → trapezoid
+_trapz = getattr(np, "trapezoid", None) or np.trapz
+
 KAPPA = 0.41
 CMU   = 0.09
 
@@ -663,7 +666,7 @@ def init_from_era5(
         z_domain_top = 5000.0  # will be refined below with actual cell centres
         mask = z_era5 <= z_domain_top
         if mask.sum() > 2:
-            T_ref = float(np.trapz(T_era5[mask], z_era5[mask]) / (z_era5[mask][-1] - z_era5[mask][0]))
+            T_ref = float(_trapz(T_era5[mask], z_era5[mask]) / (z_era5[mask][-1] - z_era5[mask][0]))
         logger.info("T_ref: surface=%.2f K → volume-average(0-%dm)=%.2f K (Δ=%.1f K)",
                     T_ref_surface, z_domain_top, T_ref, T_ref_surface - T_ref)
 
@@ -679,7 +682,7 @@ def init_from_era5(
         T_era5 = np.array(inflow["T_profile"])
         mask = z_era5 <= z_domain_top_actual
         if mask.sum() > 2:
-            T_ref = float(np.trapz(T_era5[mask], z_era5[mask]) / (z_era5[mask][-1] - z_era5[mask][0]))
+            T_ref = float(_trapz(T_era5[mask], z_era5[mask]) / (z_era5[mask][-1] - z_era5[mask][0]))
         logger.info("T_ref refined with z_top=%.0f m: T_ref=%.2f K", z_domain_top_actual, T_ref)
 
         # Update transportProperties with corrected T_ref
