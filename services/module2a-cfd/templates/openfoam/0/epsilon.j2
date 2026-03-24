@@ -68,7 +68,16 @@ boundaryField
     terrain
     {
         type            atmEpsilonWallFunction;
+{%- if physics.z0_mapped | default(false) %}
+        z0
+        {
+            type        mappedFile;
+            mapMethod   planar;
+            fieldTable  z0;
+        }
+{%- else %}
         z0              uniform {{ inflow.z0_eff | default(0.05) }};
+{%- endif %}
         value           uniform {{ "%.6e" | format(epsilon_init) }};
     }
 
