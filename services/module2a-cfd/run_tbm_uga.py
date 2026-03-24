@@ -162,7 +162,17 @@ def generate_local(cfg: dict, cases_dir: Path) -> dict[str, Path]:
             elif study_inflow.exists():
                 shutil.copy2(study_inflow, inflow_json)
 
-        # 3. Templates (always re-render — inflow differs per case)
+        # 3. z0 WorldCover (if requested, before templates)
+        z0_mapped = case_cfg.get("z0_mapped", False)
+        if z0_mapped:
+            z0_bd = case_dir / "constant" / "boundaryData" / "terrain" / "0" / "z0"
+            if not z0_bd.exists():
+                from generate_z0_field import generate_z0_field
+                wc_tif = ROOT / "data" / "raw" / f"worldcover_{study['site']}.tif"
+                log.info("  Generating z0 from WorldCover...")
+                generate_z0_field(case_dir, wc_tif, site_lat, site_lon)
+
+        # 4. Templates (always re-render — inflow differs per case)
         n_sec = tbm_cfg.get("cylinder", {}).get("n_sections", 8)
         lateral_patches = [f"section_{i}" for i in range(n_sec)]
         if not (case_dir / "system" / "controlDict").exists():
@@ -179,6 +189,7 @@ def generate_local(cfg: dict, cases_dir: Path) -> dict[str, Path]:
                 n_iter=study.get("n_iterations", 500),
                 write_interval=study.get("write_interval", 500),
                 lateral_patches=lateral_patches,
+                z0_mapped=z0_mapped,
             )
 
         # 4. Ensure decomposeParDict exists

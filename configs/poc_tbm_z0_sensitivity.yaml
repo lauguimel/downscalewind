@@ -1,0 +1,147 @@
+# PoC TBM — z0 sensitivity: uniform vs WorldCover
+#
+# 10 cases: 5 timestamps × 2 z0 configurations
+#   u00-u04: z0 = uniform 0.05 m (baseline, Parente ABL wall functions)
+#   w00-w04: z0 = WorldCover z0(x,y) (spatially-varying, mappedFile)
+#
+# All cases: SF + Coriolis + T passive + atmAmbientTurbSource (Parente 2011)
+# TBM structured mesh, L2 config (~165k cells, ~22s/case on 24 cores)
+
+study:
+  name: poc_tbm_z0_sensitivity
+  site: perdigao
+  n_iterations: 500
+  write_interval: 500
+  transport_T: true
+  coriolis: true
+  mesher: terrainBlockMesher
+
+terrainBlockMesher:
+  origin: [0, 0, 0]
+  p_corner: [-1000, -1000, 100]
+  dimensions: [2000, 2000, 5000]
+  p_above: [0, 0, 10000]
+  blocks: [10, 10]
+  cells_per_block: [3, 3, 50]
+  grading: [1, 1, 15]
+  max_dist_proj: 20000
+  cylinder:
+    centre: [0, 0, 100]
+    radius: 7000
+    radial_grading: 20
+    radial_cells: 20
+    n_sections: 8
+  orthogonal_splines:
+    normal_dist: 5000
+  check_mesh: "true"
+
+cases:
+  # --- z0 uniform (baseline) ---
+  u00:
+    timestamp: "2017-05-04 18:00:00"
+    label: "z0=uniform 0.05 | S 5.1 m/s"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    z0_mapped: false
+    nprocs: 24
+
+  u01:
+    timestamp: "2017-05-11 12:00:00"
+    label: "z0=uniform 0.05 | SW 6.3 m/s"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    z0_mapped: false
+    nprocs: 24
+
+  u02:
+    timestamp: "2017-05-29 18:00:00"
+    label: "z0=uniform 0.05 | WNW 3.7 m/s"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    z0_mapped: false
+    nprocs: 24
+
+  u03:
+    timestamp: "2017-06-05 18:00:00"
+    label: "z0=uniform 0.05 | WNW 6.3 m/s"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    z0_mapped: false
+    nprocs: 24
+
+  u04:
+    timestamp: "2017-06-28 12:00:00"
+    label: "z0=uniform 0.05 | W 6.4 m/s"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    z0_mapped: false
+    nprocs: 24
+
+  # --- z0 WorldCover (spatially-varying) ---
+  w00:
+    timestamp: "2017-05-04 18:00:00"
+    label: "z0=WorldCover | S 5.1 m/s"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    z0_mapped: true
+    nprocs: 24
+
+  w01:
+    timestamp: "2017-05-11 12:00:00"
+    label: "z0=WorldCover | SW 6.3 m/s"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    z0_mapped: true
+    nprocs: 24
+
+  w02:
+    timestamp: "2017-05-29 18:00:00"
+    label: "z0=WorldCover | WNW 3.7 m/s"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    z0_mapped: true
+    nprocs: 24
+
+  w03:
+    timestamp: "2017-06-05 18:00:00"
+    label: "z0=WorldCover | WNW 6.3 m/s"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    z0_mapped: true
+    nprocs: 24
+
+  w04:
+    timestamp: "2017-06-28 12:00:00"
+    label: "z0=WorldCover | W 6.4 m/s"
+    solver: simpleFoam
+    thermal: false
+    transport_T: true
+    coriolis: true
+    z0_mapped: true
+    nprocs: 24
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  output_dir: "data/validation/poc_tbm_z0_sensitivity"
+  towers:
+    - tse04
+    - tse09
+    - tse13

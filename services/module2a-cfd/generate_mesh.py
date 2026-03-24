@@ -1000,6 +1000,7 @@ def generate_mesh(
             "epsilon_amb":     kwargs.get("epsilon_amb", 7.208e-08),
             "l_max":           kwargs.get("l_max", min(_l_max_calc, 62.14)),
             "use_lmax_limiter": kwargs.get("use_lmax_limiter", thermal),
+            "z0_mapped":       kwargs.get("z0_mapped", False),
         },
         "solver": {
             "name":           solver_name,
