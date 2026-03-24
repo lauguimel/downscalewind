@@ -158,7 +158,7 @@ def parse_field_stats(log_path: Path) -> dict:
 def extract_profiles(
     case_dir: Path,
     probes: dict[str, tuple[float, float]],
-    search_radius: float = 300.0,
+    search_radius: float = 150.0,
 ) -> dict:
     """Extract vertical profiles at probe locations from OF fields."""
     import fluidfoam
@@ -227,72 +227,61 @@ def extract_profiles(
     if epsilon is None:
         epsilon = np.zeros(n_cells)
 
+    from scipy.interpolate import griddata
+
+    # Fixed height levels for interpolated profiles
+    z_levels = np.concatenate([
+        np.arange(5, 200, 5),       # 5m steps in surface layer
+        np.arange(200, 1000, 20),   # 20m steps in ABL
+        np.arange(1000, 5100, 100), # 100m steps above
+    ])
+
+    # Precompute speed
+    speed = np.sqrt(U[:, 0]**2 + U[:, 1]**2)
+
     profiles = {}
     for name, (px, py) in probes.items():
         dist_h = np.sqrt((x - px)**2 + (y - py)**2)
         col_mask = dist_h < search_radius
-        if col_mask.sum() < 5:
-            logger.warning("Probe %s: only %d cells within %.0fm — skipped", name, col_mask.sum(), search_radius)
+        if col_mask.sum() < 10:
+            logger.warning("Probe %s: only %d cells within %.0fm — skipped",
+                           name, col_mask.sum(), search_radius)
             continue
 
-        z_col = z[col_mask]
-        z_terrain = z_col.min()
-        z_agl = z_col - z_terrain
+        # Source points (3D cell centres within search radius)
+        pts = np.column_stack([x[col_mask], y[col_mask], z[col_mask]])
+        z_terrain = z[col_mask].min()
+        z_agl_max = z[col_mask].max() - z_terrain
 
-        U_col = U[col_mask]
-        k_col = k[col_mask]
-        eps_col = epsilon[col_mask]
-        speed_col = np.sqrt(U_col[:, 0]**2 + U_col[:, 1]**2)
-
-        # Interpolate onto fixed height levels (smooth profiles)
-        from scipy.interpolate import interp1d
-        z_levels = np.concatenate([
-            np.arange(5, 200, 5),       # 5m steps in surface layer
-            np.arange(200, 1000, 20),    # 20m steps in ABL
-            np.arange(1000, 5100, 100),  # 100m steps above
+        # Target points: vertical line at (px, py) at fixed AGL heights
+        z_tgt = z_levels[z_levels <= z_agl_max]
+        target = np.column_stack([
+            np.full(len(z_tgt), px),
+            np.full(len(z_tgt), py),
+            z_tgt + z_terrain,  # convert AGL to absolute z
         ])
-        z_levels = z_levels[z_levels <= z_agl.max()]
 
-        # Bin-average raw data first (many cells at similar z) then interpolate
-        z_sorted = np.argsort(z_agl)
-        z_s = z_agl[z_sorted]
-
-        def _bin_then_interp(values):
-            v_s = values[z_sorted]
-            # Bin into 5m windows for averaging duplicates
-            z_uniq, inv = [], []
-            v_uniq = []
-            bin_w = 3.0  # m
-            i = 0
-            while i < len(z_s):
-                z_lo = z_s[i]
-                j = i
-                while j < len(z_s) and z_s[j] - z_lo < bin_w:
-                    j += 1
-                z_uniq.append(z_s[i:j].mean())
-                v_uniq.append(v_s[i:j].mean())
-                i = j
-            z_u = np.array(z_uniq)
-            v_u = np.array(v_uniq)
-            if len(z_u) < 2:
-                return np.full_like(z_levels, v_u[0] if len(v_u) else 0.0)
-            f = interp1d(z_u, v_u, kind="linear", bounds_error=False,
-                         fill_value=(v_u[0], v_u[-1]))
-            return f(z_levels)
-
-        prof = {
-            "z_agl": z_levels,
-            "z_terrain": float(z_terrain),
-            "speed": _bin_then_interp(speed_col),
-            "ux": _bin_then_interp(U_col[:, 0]),
-            "uy": _bin_then_interp(U_col[:, 1]),
-            "w": _bin_then_interp(U_col[:, 2]),
-            "k": _bin_then_interp(k_col),
-            "epsilon": _bin_then_interp(eps_col),
-            "n_cells": int(col_mask.sum()),
+        # 3D linear interpolation (Delaunay triangulation)
+        fields_col = {
+            "speed": speed[col_mask],
+            "ux": U[col_mask, 0],
+            "uy": U[col_mask, 1],
+            "w": U[col_mask, 2],
+            "k": k[col_mask],
+            "epsilon": epsilon[col_mask],
         }
         if has_T:
-            prof["T"] = _bin_then_interp(T[col_mask])
+            fields_col["T"] = T[col_mask]
+
+        prof = {"z_agl": z_tgt, "z_terrain": float(z_terrain),
+                "n_cells": int(col_mask.sum())}
+        for key, vals in fields_col.items():
+            interp = griddata(pts, vals, target, method="linear")
+            # Fill NaN (outside convex hull) with nearest-neighbour
+            nans = np.isnan(interp)
+            if nans.any():
+                interp[nans] = griddata(pts, vals, target[nans], method="nearest")
+            prof[key] = interp
         profiles[name] = prof
 
     return profiles
