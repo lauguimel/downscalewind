@@ -10,7 +10,8 @@
  *
  * nut is a derived quantity computed from k and epsilon by the turbulence model.
  * Initial value: nut_0 = Cmu * k_0² / epsilon_0
- * All boundaries are 'calculated' except walls which use nutkWallFunction.
+ * All boundaries are 'calculated' except walls which use nutkAtmRoughWallFunction
+ * (ABL rough wall, Parente et al. 2011) with aerodynamic roughness z0.
  */
 {%- set Cmu = 0.09 %}
 {%- set k_init       = inflow.u_star ** 2 / Cmu ** 0.5 %}
@@ -49,13 +50,15 @@ boundaryField
 
     terrain
     {
-        type            nutkWallFunction;
+        type            atmNutkWallFunction;
+        z0              uniform {{ inflow.z0_eff | default(0.05) }};
         value           uniform {{ "%.6e" | format(nut_init) }};
     }
 
     bottom
     {
-        type            nutkWallFunction;
+        type            atmNutkWallFunction;
+        z0              uniform {{ inflow.z0_eff | default(0.05) }};
         value           uniform {{ "%.6e" | format(nut_init) }};
     }
 }

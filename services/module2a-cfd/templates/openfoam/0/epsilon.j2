@@ -14,7 +14,7 @@
  * BC strategy:
  *   Lateral:  uniformMixed + MappedFile (inlet: epsilon(z), outlet: zeroGradient)
  *   Top:      zeroGradient
- *   Terrain:  epsilonWallFunction
+ *   Terrain:  atmEpsilonWallFunction (Parente et al. 2011) with z0
  */
 {%- set Cmu = 0.09 %}
 {%- set k_init = inflow.u_star ** 2 / Cmu ** 0.5 %}
@@ -67,13 +67,15 @@ boundaryField
 
     terrain
     {
-        type            epsilonWallFunction;
+        type            atmEpsilonWallFunction;
+        z0              uniform {{ inflow.z0_eff | default(0.05) }};
         value           uniform {{ "%.6e" | format(epsilon_init) }};
     }
 
     bottom
     {
-        type            epsilonWallFunction;
+        type            atmEpsilonWallFunction;
+        z0              uniform {{ inflow.z0_eff | default(0.05) }};
         value           uniform {{ "%.6e" | format(epsilon_init) }};
     }
 }

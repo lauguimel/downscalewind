@@ -52,11 +52,12 @@ coriolisForce
 // via the Boussinesq equation of state in thermophysicalProperties.
 // No explicit fvOption needed — p_rgh + g provide the buoyancy coupling.
 
-{% if solver.thermal | default(false) -%}
 // -------------------------------------------------------------------------
-// Ambient turbulence source terms (k-epsilon Lim, BBSF only)
-//   Prevents k/epsilon from going to zero above the ABL in stably
-//   stratified conditions. Without these, nuT → 0 → U diverges.
+// Ambient turbulence source terms (Parente et al. 2011)
+//   Maintains ABL log-law equilibrium in k-ε by compensating for the
+//   numerical imbalance between production and dissipation.
+//   Always enabled (SF and BBSF) — without these, the inlet ABL profile
+//   degrades as it travels through the domain.
 //   Values from Venkatraman et al. (WES 2023), Table 3, k-ε Lim model:
 //     kAmb = 0.001 m²/s²  (≈ 0.1% of typical ABL peak TKE)
 //     εAmb = 7.208e-8 m²/s³ = Cμ^(3/4) * kAmb^(3/2) / Lmax
@@ -75,6 +76,7 @@ ambientTurbSource
     }
 }
 
+{% if physics.use_lmax_limiter | default(false) -%}
 // -------------------------------------------------------------------------
 // Turbulence length scale limiter (Lmax = 62.14 m)
 //   Caps the turbulent length scale L = k^(3/2)/ε to prevent unrealistic
@@ -83,7 +85,6 @@ ambientTurbSource
 //   difficulties. Enable with physics.use_lmax_limiter: true only once
 //   the ambient source terms alone produce a stable solution.
 // -------------------------------------------------------------------------
-{% if physics.use_lmax_limiter | default(false) %}
 lengthScaleLimiter
 {
     type            atmLengthScaleTurbSource;
@@ -91,10 +92,9 @@ lengthScaleLimiter
     atmLengthScaleTurbSourceCoeffs
     {
         selectionMode   all;
-        Lmax            {{ physics.l_max | default(62.14) }};
+        Lmax            {{ "%.2f" | format(physics.l_max | default(62.14)) }};
     }
 }
-{% endif -%}
 {% endif -%}
 
 {% if canopy.enabled | default(false) -%}
