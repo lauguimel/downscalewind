@@ -92,7 +92,7 @@ def filter_fine_zone(fields: dict, r_fine: float) -> dict:
     for key in ["x", "y", "z"]:
         filtered[key] = fields[key][mask]
     filtered["U"] = fields["U"][mask]
-    for key in ["k", "nut"]:
+    for key in ["k", "nut", "T", "q", "epsilon"]:
         if key in fields:
             filtered[key] = fields[key][mask]
 
@@ -119,6 +119,12 @@ def export_unstructured(
     store.create_array("U", data=fields["U"].astype(np.float32))
     store.create_array("k", data=fields.get("k", np.zeros(n)).astype(np.float32))
     store.create_array("nut", data=fields.get("nut", np.zeros(n)).astype(np.float32))
+    if "T" in fields:
+        store.create_array("T", data=fields["T"].astype(np.float32))
+    if "q" in fields:
+        store.create_array("q", data=fields["q"].astype(np.float32))
+    if "epsilon" in fields:
+        store.create_array("epsilon", data=fields["epsilon"].astype(np.float32))
 
     store.attrs["n_cells"] = n
     logger.info("Unstructured Zarr: %s (%d cells)", output_path, n)
@@ -164,6 +170,12 @@ def export_regular_grid(
     U_grid = np.full((ny, nx, nz, 3), np.nan, dtype=np.float32)
     k_grid = np.full((ny, nx, nz), np.nan, dtype=np.float32)
 
+    # Optional scalar grids
+    scalar_grids = {}
+    for sname in ["T", "q", "epsilon"]:
+        if sname in fields:
+            scalar_grids[sname] = np.full((ny, nx, nz), np.nan, dtype=np.float32)
+
     points_3d = np.column_stack([fields["x"], fields["y"], z_agl])
 
     for iz, z_level in enumerate(Z_LEVELS_AGL):
@@ -179,6 +191,10 @@ def export_regular_grid(
         if k_vals is not None:
             vals = griddata(points_3d, k_vals, target_pts, method="linear")
             k_grid[:, :, iz] = vals.reshape(ny, nx)
+
+        for sname, sgrid in scalar_grids.items():
+            vals = griddata(points_3d, fields[sname], target_pts, method="linear")
+            sgrid[:, :, iz] = vals.reshape(ny, nx)
 
     # Fill remaining NaN with nearest interpolation
     nan_mask_u = np.isnan(U_grid)
@@ -202,6 +218,8 @@ def export_regular_grid(
     store.create_array("terrain", data=terrain_2d.astype(np.float32))
     store.create_array("U", data=U_grid)
     store.create_array("k", data=k_grid)
+    for sname, sgrid in scalar_grids.items():
+        store.create_array(sname, data=sgrid)
     store.create_array("z_levels_agl", data=Z_LEVELS_AGL)
     store.create_array("x_1d", data=x_1d.astype(np.float32))
     store.create_array("y_1d", data=y_1d.astype(np.float32))

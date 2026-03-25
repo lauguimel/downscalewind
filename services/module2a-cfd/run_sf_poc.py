@@ -162,6 +162,7 @@ def generate_cases(
             canopy_enabled=case_template.get("canopy", False),
             fine_cell_size=case_template.get("fine_cell_size", study.get("fine_cell_size", 30)),
             transport_T=case_template.get("transport_T", study.get("transport_T", False)),
+            transport_q=case_template.get("transport_q", study.get("transport_q", False)),
             n_iter=study.get("n_iterations", 500),
             write_interval=study.get("write_interval", 100),
         )

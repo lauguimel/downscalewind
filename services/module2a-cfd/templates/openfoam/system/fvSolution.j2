@@ -135,6 +135,26 @@ solvers
         $T;
         relTol          0;
     }
+{% endif %}
+{% if solver.transport_q | default(false) %}
+
+    // -- Specific humidity --
+    q
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-6;
+        relTol          0.1;
+        maxIter         50;
+    }
+
+    qFinal
+    {
+        $q;
+        relTol          0;
+    }
+{% endif %}
+{% if solver.thermal | default(false) or solver.transport_T | default(false) %}
 {% if solver.name | default('simpleFoam') == 'buoyantSimpleFoam' %}
 
     // -- Enthalpy / Internal energy (buoyantSimpleFoam with heRhoThermo) --
@@ -203,6 +223,9 @@ SIMPLE
 {% if solver.thermal | default(false) or solver.transport_T | default(false) %}
         T               1e-4;
 {% endif %}
+{% if solver.transport_q | default(false) %}
+        q               1e-4;
+{% endif %}
 {% if solver.name | default('simpleFoam') == 'buoyantSimpleFoam' %}
         p_rgh           1e-4;
         h               1e-4;
@@ -237,6 +260,9 @@ relaxationFactors
         epsilon         0.7;
 {% if solver.thermal | default(false) or solver.transport_T | default(false) %}
         T               0.5;
+{% endif %}
+{% if solver.transport_q | default(false) %}
+        q               0.5;
 {% endif %}
 {% endif %}
 {% if solver.name | default('simpleFoam') == 'buoyantSimpleFoam' %}

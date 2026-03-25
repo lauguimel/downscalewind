@@ -186,6 +186,7 @@ def generate_local(cfg: dict, cases_dir: Path) -> dict[str, Path]:
                 thermal=case_cfg.get("thermal", False),
                 coriolis=case_cfg.get("coriolis", study.get("coriolis", True)),
                 transport_T=case_cfg.get("transport_T", study.get("transport_T", False)),
+                transport_q=case_cfg.get("transport_q", study.get("transport_q", False)),
                 n_iter=study.get("n_iterations", 500),
                 write_interval=study.get("write_interval", 500),
                 lateral_patches=lateral_patches,

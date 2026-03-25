@@ -154,6 +154,7 @@ def main():
                 coriolis=case_cfg.get("coriolis", True),
                 canopy_enabled=case_cfg.get("canopy", False),
                 transport_T=case_cfg.get("transport_T", study.get("transport_T", False)),
+                transport_q=case_cfg.get("transport_q", study.get("transport_q", False)),
                 n_iter=study.get("n_iterations", 500),
                 write_interval=study.get("write_interval", 100),
                 lateral_patches=lateral_patches,

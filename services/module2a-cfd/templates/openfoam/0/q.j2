@@ -1,0 +1,77 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | v2412
+    \\  /    A nd           | Web:     www.openfoam.com
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+/*
+ * 0/q.j2 — Specific humidity boundary conditions
+ *
+ * q is transported as a passive scalar by scalarTransport (controlDict).
+ * Dimensions are [0 0 0 0 0 0 0] (kg/kg, dimensionless in SI).
+ *
+ * BC strategy (identical to T.j2):
+ *   Lateral:  uniformMixed + MappedFile (inlet: q(z), outlet: zeroGradient)
+ *   Top:      inletOutlet (q_ref uniform)
+ *   Terrain:  zeroGradient (no moisture flux at surface in SF neutral)
+ *   Bottom:   zeroGradient
+ */
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       volScalarField;
+    location    "0";
+    object      q;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+// q_ref = {{ inflow.q_ref | default(0.005) }} kg/kg
+
+dimensions      [0 0 0 0 0 0 0];
+
+internalField   uniform {{ inflow.q_ref | default(0.005) }};
+
+boundaryField
+{
+{% set lateral_faces = domain.lateral_patches | default(['lateral']) if (domain is defined and domain.octagonal) else ['west', 'east', 'south', 'north'] %}
+{% for face in lateral_faces %}
+    {{ face }}
+    {
+        type            uniformMixed;
+        uniformValue
+        {
+            type        mappedFile;
+            mapMethod   planar;
+            fieldTable  q;
+        }
+        uniformGradient zero;
+        uniformValueFraction
+        {
+            type        expression;
+            expression  "neg(phi)";
+        }
+        value           uniform {{ inflow.q_ref | default(0.005) }};
+    }
+
+{% endfor %}
+    top
+    {
+        type            inletOutlet;
+        inletValue      uniform {{ inflow.q_ref | default(0.005) }};
+        value           uniform {{ inflow.q_ref | default(0.005) }};
+    }
+
+    terrain
+    {
+        // No moisture flux at surface (neutral SF)
+        type            zeroGradient;
+    }
+
+    bottom
+    {
+        type            zeroGradient;
+    }
+}
+
+// ************************************************************************* //

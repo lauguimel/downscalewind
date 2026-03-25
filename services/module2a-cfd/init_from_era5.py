@@ -320,12 +320,22 @@ def _build_interpolators(inflow: dict):
             fill_value=(p_profile[0], p_profile[-1]),
         )
 
+    q_interp = None
+    q_profile = inflow.get("q_profile")
+    if q_profile is not None and len(q_profile) == len(z_levels):
+        q_profile = np.array(q_profile)
+        q_interp = interp1d(
+            z_levels, q_profile,
+            kind="linear", bounds_error=False,
+            fill_value=(q_profile[0], q_profile[-1]),
+        )
+
     fd_x = float(inflow["flowDir_x"])
     fd_y = float(inflow["flowDir_y"])
     u_star = float(inflow["u_star"])
     z0 = float(inflow.get("z0", inflow.get("z0_eff", 0.05)))
 
-    return speed_interp, T_interp, p_interp, fd_x, fd_y, u_star, z0, ux_interp, uy_interp
+    return speed_interp, T_interp, p_interp, fd_x, fd_y, u_star, z0, ux_interp, uy_interp, q_interp
 
 
 def interpolate_profiles_at_z(
@@ -341,8 +351,9 @@ def interpolate_profiles_at_z(
     is_bbsf: bool = False,
     ux_interp=None,
     uy_interp=None,
+    q_interp=None,
 ) -> dict[str, np.ndarray]:
-    """Compute U, k, epsilon, T, p_rgh at given heights z.
+    """Compute U, k, epsilon, T, q, p_rgh at given heights z.
 
     Parameters
     ----------
@@ -351,10 +362,11 @@ def interpolate_profiles_at_z(
     ux_interp, uy_interp : optional interpolators for height-varying wind components.
         If provided, wind direction varies with height (ERA5 Ekman spiral).
         If None, falls back to speed × (fd_x, fd_y) uniform direction.
+    q_interp : optional interpolator for specific humidity q(z).
 
     Returns
     -------
-    dict with 'U' (N,3), 'k' (N,), 'epsilon' (N,), 'T' (N,), 'p_rgh' (N,).
+    dict with 'U' (N,3), 'k' (N,), 'epsilon' (N,), 'T' (N,), 'q' (N,), 'p_rgh' (N,).
     """
     n = len(z)
     z = np.maximum(z, 0.1)
@@ -388,11 +400,20 @@ def interpolate_profiles_at_z(
     else:
         T = np.full(n, T_ref)
 
+    # Specific humidity q(z)
+    if q_interp is not None:
+        q = np.maximum(q_interp(z), 0.0)  # q ≥ 0 always
+    else:
+        q = None
+
     # p_rgh is a Lagrange multiplier ≈ 0 in Boussinesq.
     # Do NOT initialise with ERA5 pressure (creates non-Boussinesq gradient).
     p_rgh = np.zeros(n)
 
-    return {"U": U, "k": k, "epsilon": epsilon, "T": T, "p_rgh": p_rgh}
+    result = {"U": U, "k": k, "epsilon": epsilon, "T": T, "p_rgh": p_rgh}
+    if q is not None:
+        result["q"] = q
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -651,7 +672,7 @@ def init_from_era5(
     logger.info("Solver: %s (BBSF=%s)", solver, is_bbsf)
 
     # Build interpolators once
-    speed_interp, T_interp, p_interp, fd_x, fd_y, u_star, z0, ux_interp, uy_interp = _build_interpolators(inflow)
+    speed_interp, T_interp, p_interp, fd_x, fd_y, u_star, z0, ux_interp, uy_interp, q_interp = _build_interpolators(inflow)
 
     # Compute T_ref as volume-average of ERA5 T profile over domain height.
     # ERA5 levels are regularly spaced in pressure → uniform weight for average.
@@ -708,13 +729,14 @@ def init_from_era5(
     cell_fields = interpolate_profiles_at_z(
         centres[:, 2], speed_interp, T_interp, p_interp,
         fd_x, fd_y, u_star, z0, T_ref, is_bbsf=is_bbsf,
-        ux_interp=ux_interp, uy_interp=uy_interp,
+        ux_interp=ux_interp, uy_interp=uy_interp, q_interp=q_interp,
     )
 
     u_path = case_dir / "0" / "U"
     k_path = case_dir / "0" / "k"
     epsilon_path = case_dir / "0" / "epsilon"
     t_path = case_dir / "0" / "T"
+    q_path = case_dir / "0" / "q"
     p_path = case_dir / "0" / "p_rgh"
 
     _patch_internal_field_vector(u_path, cell_fields["U"])
@@ -728,6 +750,8 @@ def init_from_era5(
             logger.info("neutral_T_init=True: skipping T internalField patch (keeping uniform T_ref)")
         else:
             _patch_internal_field_scalar(t_path, cell_fields["T"])
+    if q_path.exists() and "q" in cell_fields:
+        _patch_internal_field_scalar(q_path, cell_fields["q"])
     if p_path.exists():
         _patch_internal_field_scalar(p_path, cell_fields["p_rgh"])
 
@@ -750,7 +774,7 @@ def init_from_era5(
         pf = interpolate_profiles_at_z(
             face_centres[:, 2], speed_interp, T_interp, p_interp,
             fd_x, fd_y, u_star, z0, T_ref, is_bbsf=is_bbsf,
-            ux_interp=ux_interp, uy_interp=uy_interp,
+            ux_interp=ux_interp, uy_interp=uy_interp, q_interp=q_interp,
         )
 
         fields = {
@@ -761,6 +785,8 @@ def init_from_era5(
         }
         if t_path.exists():
             fields["T"] = pf["T"]
+        if q_path.exists() and "q" in pf:
+            fields["q"] = pf["q"]
 
         patch_fields[patch_name] = fields
 

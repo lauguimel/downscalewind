@@ -95,6 +95,11 @@ divSchemes
     div(phi,Ekp)                        bounded Gauss upwind;
 {% endif %}
 {% endif %}
+{% if solver.transport_q | default(false) %}
+
+    // Specific humidity — bounded linearUpwind
+    div(phi,q)                          bounded Gauss linearUpwind grad(q);
+{% endif %}
 }
 
 // ---------------------------------------------------------------------------

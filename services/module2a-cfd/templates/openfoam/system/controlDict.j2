@@ -87,7 +87,7 @@ functions
         libs            ( "libutilityFunctionObjects.so" );
         writeControl    timeStep;
         writeInterval   1;
-        fields          ( U {{ 'p_rgh' if solver.thermal | default(false) else 'p' }} k epsilon{{ ' T' if solver.thermal | default(false) or solver.transport_T | default(false) else '' }} );
+        fields          ( U {{ 'p_rgh' if solver.thermal | default(false) else 'p' }} k epsilon{{ ' T' if solver.thermal | default(false) or solver.transport_T | default(false) else '' }}{{ ' q' if solver.transport_q | default(false) else '' }} );
     }
 
     // Global min/max of key fields — catches divergence early
@@ -98,7 +98,7 @@ functions
         writeControl    timeStep;
         writeInterval   1;
         mode            magnitude;
-        fields          ( U k{{ ' T' if solver.thermal | default(false) or solver.transport_T | default(false) else '' }} );
+        fields          ( U k{{ ' T' if solver.thermal | default(false) or solver.transport_T | default(false) else '' }}{{ ' q' if solver.transport_q | default(false) else '' }} );
     }
 
     // Volume-averaged fields — convergence of global solution
@@ -111,7 +111,7 @@ functions
         operation       volAverage;
         regionType      all;
         writeFields     false;
-        fields          ( U k epsilon{{ ' T' if solver.thermal | default(false) or solver.transport_T | default(false) else '' }} );
+        fields          ( U k epsilon{{ ' T' if solver.thermal | default(false) or solver.transport_T | default(false) else '' }}{{ ' q' if solver.transport_q | default(false) else '' }} );
     }
 
 {%- if solver.transport_T | default(false) and solver.name | default("simpleFoam") == "simpleFoam" %}
@@ -122,6 +122,19 @@ functions
         type            scalarTransport;
         libs            ( "libsolverFunctionObjects.so" );
         field           T;
+        resetOnStartUp  false;
+        writeControl    writeTime;
+    }
+{%- endif %}
+
+{%- if solver.transport_q | default(false) and solver.name | default("simpleFoam") == "simpleFoam" %}
+    // Passive scalar transport for specific humidity — advected by U, diffused by nut/Prt.
+    // q does NOT affect dynamics. Prepares fog/precip post-processing (Smith-Barstad).
+    scalarTransportQ
+    {
+        type            scalarTransport;
+        libs            ( "libsolverFunctionObjects.so" );
+        field           q;
         resetOnStartUp  false;
         writeControl    writeTime;
     }

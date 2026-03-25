@@ -195,6 +195,7 @@ def step_generate_cases(
             canopy_enabled=case_cfg.get("canopy", False),
             fine_cell_size=case_cfg.get("fine_cell_size", study.get("fine_cell_size", 30)),
             transport_T=case_cfg.get("transport_T", study.get("transport_T", False)),
+            transport_q=case_cfg.get("transport_q", study.get("transport_q", False)),
             top_bc_U=case_cfg.get("top_bc_U", study.get("top_bc_U", "inletOutlet")),
             n_non_ortho_correctors=case_cfg.get("n_non_ortho_correctors", study.get("n_non_ortho_correctors", 0)),
             use_limited_grad=case_cfg.get("use_limited_grad", study.get("use_limited_grad", False)),

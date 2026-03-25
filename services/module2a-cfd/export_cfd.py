@@ -85,13 +85,15 @@ def _load_openfoam_fields(case_dir: Path) -> dict:
 
     result = {"x": x, "y": y, "z": z, "U": U}
 
-    for field_name in ["T", "k", "nut"]:
+    for field_name in ["T", "q", "k", "epsilon", "nut"]:
         try:
             val = fluidfoam.readscalar(case_str, latest, field_name)
             result[field_name] = np.asarray(val)
         except Exception as exc:
-            logger.warning("Could not read field %s: %s", field_name, exc)
-            result[field_name] = np.zeros_like(x)
+            logger.debug("Could not read field %s: %s", field_name, exc)
+            # Only create zero array for core fields, skip optional ones
+            if field_name in ("k", "nut"):
+                result[field_name] = np.zeros_like(x)
 
     return result
 

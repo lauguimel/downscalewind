@@ -333,12 +333,17 @@ def extract_era5_profile(
     corner_u = []
     corner_v = []
     corner_T = []
+    corner_q = []
+
+    has_q = "q" in era5_data and era5_data["q"] is not None
 
     for (ci, cj) in corners:
         corner_z.append(era5_data["z"][t_idx, :, ci, cj] / G)
         corner_u.append(era5_data["u"][t_idx, :, ci, cj])
         corner_v.append(era5_data["v"][t_idx, :, ci, cj])
         corner_T.append(era5_data["t"][t_idx, :, ci, cj])
+        if has_q:
+            corner_q.append(era5_data["q"][t_idx, :, ci, cj])
 
     # Step 2: Build common z grid from the bilinear-weighted z
     # Use the weighted average of corner z values as the common grid
@@ -354,6 +359,7 @@ def extract_era5_profile(
     u_out = np.zeros(n_levels)
     v_out = np.zeros(n_levels)
     T_out = np.zeros(n_levels)
+    q_out = np.zeros(n_levels) if has_q else None
 
     for k, w in enumerate(weights):
         # Sort this corner's profile by ascending z
@@ -361,12 +367,16 @@ def extract_era5_profile(
         c_order = np.argsort(cz)
         cz_sorted = cz[c_order]
 
-        # Interpolate this corner's u, v, T to the common z grid
-        for var_data, var_out in [
+        # Interpolate this corner's u, v, T (and q) to the common z grid
+        var_pairs = [
             (corner_u[k], u_out),
             (corner_v[k], v_out),
             (corner_T[k], T_out),
-        ]:
+        ]
+        if has_q:
+            var_pairs.append((corner_q[k], q_out))
+
+        for var_data, var_out in var_pairs:
             f = interp1d(
                 cz_sorted, var_data[c_order],
                 kind="linear", bounds_error=False,
@@ -385,13 +395,16 @@ def extract_era5_profile(
             np.ptp(np.array([cz[order[-1]] for cz in corner_z]))),
     )
 
-    return {
+    result = {
         "z_m":          z_common_sorted,
         "u_ms":         u_out,
         "v_ms":         v_out,
         "T_K":          T_out,
         "pressure_hPa": p_sorted,
     }
+    if q_out is not None:
+        result["q_kgkg"] = q_out
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -597,6 +610,15 @@ def reconstruct_inlet_profile(
     else:
         T_out = np.full_like(z_output, T_ref)
 
+    # Specific humidity profile (cubic spline, kg/kg)
+    q_era5 = era5_profile.get("q_kgkg")
+    if q_era5 is not None and len(z_era5) >= 2:
+        q_era5 = np.asarray(q_era5, dtype=float)
+        cs_q = CubicSpline(z_era5, q_era5, extrapolate=True)
+        q_out = np.maximum(cs_q(z_output), 0.0)  # q ≥ 0 always
+    else:
+        q_out = None
+
     # Pressure profile (cubic spline through ERA5 levels → Pa)
     p_hPa = era5_profile["pressure_hPa"]
     if len(z_era5) >= 2:
@@ -636,8 +658,9 @@ def reconstruct_inlet_profile(
         hub_mask = len(z_output) - 1
     u_hub = float(speed_out[hub_mask])
     T_hub = float(T_out[hub_mask])
+    q_hub = float(q_out[hub_mask]) if q_out is not None else None
 
-    return {
+    result = {
         "z_m":        z_output.tolist(),
         "u_ms":       u_out.tolist(),
         "v_ms":       v_out.tolist(),
@@ -652,6 +675,10 @@ def reconstruct_inlet_profile(
         "flowDir_x":  float(flow_dir_x),
         "flowDir_y":  float(flow_dir_y),
     }
+    if q_out is not None:
+        result["q_kgkg"] = q_out.tolist()
+        result["q_ref"] = q_hub
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -729,6 +756,8 @@ def prepare_inflow(
     times_int64 = np.array(store["coords/time"][:])
     times_ns = times_int64.astype("datetime64[ns]") if times_int64.dtype.kind in ("i","u") \
                else times_int64.astype("datetime64[ns]")
+    # Load q if available (specific humidity, kg/kg)
+    has_q = "q" in store["pressure"]
     era5_data = {
         "times":           times_ns.astype("datetime64[s]"),
         "pressure_levels": store["coords/level"][:],
@@ -738,6 +767,7 @@ def prepare_inflow(
         "v":               store["pressure/v"][:],
         "t":               store["pressure/t"][:],
         "z":               store["pressure/z"][:],
+        "q":               store["pressure/q"][:] if has_q else None,
     }
 
     ts = np.datetime64(timestamp, "s")
@@ -770,6 +800,9 @@ def prepare_inflow(
     result["ux_profile"] = result.pop("u_ms")   # eastward component at each z
     result["uy_profile"] = result.pop("v_ms")   # northward component at each z
     result["T_profile"] = result.pop("T_K")
+    if "q_kgkg" in result:
+        result["q_profile"] = result.pop("q_kgkg")
+        # q_ref already set by reconstruct_inlet_profile
     result["p_profile"] = result.pop("p_Pa")
 
     # Fields expected by Jinja2 templates (aliased / derived)

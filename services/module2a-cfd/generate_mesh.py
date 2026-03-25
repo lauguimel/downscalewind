@@ -710,6 +710,7 @@ def generate_mesh(
     domain_type: str = "box",
     fine_cell_size: float = 30,
     transport_T: bool = False,
+    transport_q: bool = False,
     **kwargs,
 ) -> dict:
     """Generate an OpenFOAM case directory with cfMesh mesh and BC files.
@@ -1009,6 +1010,7 @@ def generate_mesh(
             "n_cores":        n_cores,
             "thermal":        thermal,
             "transport_T":    transport_T,
+            "transport_q":    transport_q,
             "boussinesq":     kwargs.get("boussinesq", False),
             "top_bc_U":       kwargs.get("top_bc_U", "inletOutlet"),
             "n_non_ortho_correctors": kwargs.get("n_non_ortho_correctors", 0),
