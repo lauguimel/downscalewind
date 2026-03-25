@@ -209,8 +209,8 @@ solve_case() {
     $PYTHON reconstruct_fields.py --case-dir . --time $N_ITER --write-foam 2>/dev/null
     cd "$SCRIPTS"
 
-    # Clean processor dirs
-    rm -rf "$CASE_DIR"/processor*
+    # Clean processor dirs (created by Docker as root → must delete via Docker)
+    docker run --rm -v "$CASE_DIR":/case -w /case $OF_IMAGE bash -c "rm -rf processor*"
 
     local T1=$(date +%s)
     local DT=$((T1 - T0))
