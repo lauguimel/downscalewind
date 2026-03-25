@@ -26,8 +26,8 @@ log = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[3]
 OUTPUT_DIR = ROOT / "data" / "validation" / "poc_tbm_25ts_wc"
 
-# Our case
-CASE_DIR = ROOT / "data" / "cases" / "poc_tbm_25ts_wc" / "case_ts00"
+# Our case — exact same timestamp as Venkatraman: 2017-05-04 22:00 UTC
+CASE_DIR = ROOT / "data" / "cases" / "venkatraman_comparison" / "case_v22"
 
 # Venkatraman digitized data
 VENK_CSV = ROOT / "references" / "venkatraman2023_digitized.csv"
@@ -184,7 +184,7 @@ def main():
         axes[row, col].set_visible(False)
 
     fig.suptitle("Wind speed profiles: DownscaleWind (red) vs Venkatraman et al. 2023\n"
-                 "Our ts00: 2017-05-04 18:00 (S 180°) | V2023: 22:00 (SW 231°)",
+                 "Same timestamp: 2017-05-04 22:00 UTC | V2023: 88M cells | Ours: 165k cells",
                  fontsize=12, y=1.02)
     fig.tight_layout()
     fig.savefig(OUTPUT_DIR / "venkatraman_comparison.png", dpi=150, bbox_inches="tight")
