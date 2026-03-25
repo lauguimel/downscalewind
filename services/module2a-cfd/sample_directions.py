@@ -71,18 +71,28 @@ def fetch_era5_openmeteo(
         logger.debug("Cache hit: %s", cache_file)
         return pd.read_parquet(cache_file)
 
-    resp = requests.get(
-        OPEN_METEO_ERA5_URL,
-        params={
-            "latitude": lat,
-            "longitude": lon,
-            "start_date": start_date,
-            "end_date": end_date,
-            "hourly": HOURLY_VARS,
-            "timezone": "UTC",
-        },
-        timeout=120,
-    )
+    # Retry with exponential backoff on 429 Too Many Requests
+    max_retries = 5
+    for attempt in range(max_retries):
+        resp = requests.get(
+            OPEN_METEO_ERA5_URL,
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "start_date": start_date,
+                "end_date": end_date,
+                "hourly": HOURLY_VARS,
+                "timezone": "UTC",
+            },
+            timeout=120,
+        )
+        if resp.status_code == 429:
+            wait = delay * (2 ** attempt)
+            logger.warning("Rate limited, waiting %.0fs (attempt %d/%d)",
+                           wait, attempt + 1, max_retries)
+            time.sleep(wait)
+            continue
+        break
     resp.raise_for_status()
     data = resp.json()
 
@@ -288,6 +298,7 @@ def process_site(
     start_date: str,
     end_date: str,
     figures_dir: Path | None,
+    delay: float = 1.5,
 ) -> pd.DataFrame | None:
     """Process one site: fetch ERA5, cluster, select timestamps, plot."""
     try:
@@ -295,7 +306,7 @@ def process_site(
             df_wind = fetch_era5_zarr(lat, lon, era5_zarr)
         else:
             df_wind = fetch_era5_openmeteo(
-                lat, lon, start_date, end_date, cache_dir
+                lat, lon, start_date, end_date, cache_dir, delay=delay
             )
     except Exception as e:
         logger.error("Failed to fetch ERA5 for %s: %s", site_id, e)
@@ -353,6 +364,8 @@ def main():
     parser.add_argument("--max-sites", type=int, default=None,
                         help="Process only first N sites (testing)")
     parser.add_argument("--no-figures", action="store_true")
+    parser.add_argument("--delay", type=float, default=1.5,
+                        help="Delay between API requests in seconds (default: 1.5)")
 
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -395,7 +408,7 @@ def main():
                 args.n_timestamps, args.min_speed,
                 args.source, args.era5_zarr,
                 args.cache_dir, args.start_date, args.end_date,
-                figures_dir,
+                figures_dir, delay=args.delay,
             )
             if result is not None:
                 all_selected.append(result)
@@ -436,7 +449,7 @@ def main():
             args.n_timestamps, args.min_speed,
             args.source, args.era5_zarr,
             args.cache_dir, args.start_date, args.end_date,
-            figures_dir,
+            figures_dir, delay=args.delay,
         )
         if result is not None:
             csv_path = args.output_dir / f"directions_{args.site_id}.csv"
