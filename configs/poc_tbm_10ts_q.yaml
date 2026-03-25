@@ -1,0 +1,63 @@
+# PoC TBM — 10-timestamp smoke test with q transport
+#
+# Validates the full pipeline with T + q passive scalars before scaling up.
+# 10 timestamps (subset of 25 k-means selected), TBM L2 mesh (~165k cells).
+# SF + Coriolis + T passive + q passive + WorldCover z0.
+#
+# Expected: 10 × ~22s solve = ~4 min (24 cores, shared mesh)
+#
+# Usage:
+#   cd services/module2a-cfd
+#   python run_tbm_uga.py --config ../../configs/poc_tbm_10ts_q.yaml --nprocs 24
+
+study:
+  name: poc_tbm_10ts_q
+  site: perdigao
+  timestamps_csv: "data/campaign/sf_poc/timestamps_10.csv"
+  n_iterations: 500
+  write_interval: 500
+  transport_T: true
+  transport_q: true
+  coriolis: true
+  mesher: terrainBlockMesher
+
+docker:
+  tbm_image: "terrainblockmesher:of24"
+  solver_image: "microfluidica/openfoam:latest"
+
+terrainBlockMesher:
+  origin: [0, 0, 0]
+  p_corner: [-1000, -1000, 100]
+  dimensions: [2000, 2000, 5000]
+  p_above: [0, 0, 10000]
+  blocks: [10, 10]
+  cells_per_block: [3, 3, 50]
+  grading: [1, 1, 15]
+  max_dist_proj: 20000
+  cylinder:
+    centre: [0, 0, 100]
+    radius: 7000
+    radial_grading: 20
+    radial_cells: 20
+    n_sections: 8
+  orthogonal_splines:
+    normal_dist: 5000
+  check_mesh: "true"
+
+# Case defaults
+defaults:
+  solver: simpleFoam
+  thermal: false
+  transport_T: true
+  transport_q: true
+  coriolis: true
+  canopy: false
+  nprocs: 24
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  output_dir: "data/validation/poc_tbm_10ts_q"
+  towers:
+    - tse04
+    - tse09
+    - tse13
