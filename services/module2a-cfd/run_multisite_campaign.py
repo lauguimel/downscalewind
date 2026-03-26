@@ -41,8 +41,9 @@ PYTHON = sys.executable
 DOCKER_USER = f"{os.getuid()}:{os.getgid()}"
 
 # TBM mesh parameters (same as Perdigão PoC)
+# Must match PoC config (poc_tbm_25ts.yaml) → ~165k cells
 DEFAULT_MESH = {
-    "inner_size_m": 9800,
+    "inner_size_m": 2000,
     "inner_blocks": 10,
     "cells_per_block_xy": 3,
     "cylinder_radius_m": 7000,
@@ -52,8 +53,8 @@ DEFAULT_MESH = {
     "height_m": 5000,
     "cells_z": 50,
     "grading_z": 15,
-    "max_dist_proj": 12000,
-    "blend_distance_m": 3000,
+    "max_dist_proj": 20000,
+    "blend_distance_m": 5000,
     "p_above_z": 10000,
     "stl_resolution_m": 50,
 }
@@ -460,28 +461,65 @@ def solve_case(case_dir: Path, n_iter: int, n_cores: int) -> bool:
 
     t0 = time.time()
 
-    # decomposePar + symlinks + mpirun (all inside Docker)
-    solve_script = (
-        f"cd /home/ofuser/run && "
-        # turbulenceProperties alias for OF ESI v2512 compat
-        f"if [ -f constant/momentumTransport ] && [ ! -f constant/turbulenceProperties ]; then "
-        f"cp constant/momentumTransport constant/turbulenceProperties; fi && "
-        f"foamDictionary system/decomposeParDict -entry numberOfSubdomains -set {n_cores} && "
-        f"decomposePar -force > log.decomposePar 2>&1 && "
-        f"if [ -d constant/boundaryData ]; then "
-        f"for d in processor*/; do ln -sf ../../constant/boundaryData \"$d/constant/\"; done; "
-        f"fi && "
-        f"mpirun -np {n_cores} simpleFoam -parallel > log.simpleFoam 2>&1; "
-        f"chown -R {DOCKER_USER} /home/ofuser/run"
-    )
-    cmd_solve = [
-        "docker", "run", "--rm",
-        "-v", f"{case_dir.resolve()}:/home/ofuser/run",
-        "-w", "/home/ofuser/run",
-        OF_IMAGE,
-        "bash", "-c", solve_script,
-    ]
-    result = subprocess.run(cmd_solve, capture_output=True, text=True, timeout=3600)
+    # --- Pre-Docker setup (avoids entrypoint/env issues) ---
+    # turbulenceProperties alias (OF ESI v2512 compat)
+    mt = case_dir / "constant" / "momentumTransport"
+    tp = case_dir / "constant" / "turbulenceProperties"
+    if mt.exists() and not tp.exists():
+        shutil.copy2(mt, tp)
+
+    # Set numberOfSubdomains in decomposeParDict (avoid foamDictionary in Docker)
+    dpd = case_dir / "system" / "decomposeParDict"
+    if dpd.exists():
+        txt = dpd.read_text()
+        import re
+        txt = re.sub(r'numberOfSubdomains\s+\d+', f'numberOfSubdomains  {n_cores}', txt)
+        dpd.write_text(txt)
+
+    # Helper: run OF command in Docker (direct exec, no bash -c)
+    def _docker_of(cmd: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["docker", "run", "--rm",
+             "-v", f"{case_dir.resolve()}:/home/ofuser/run",
+             "-w", "/home/ofuser/run",
+             OF_IMAGE] + cmd,
+            capture_output=True, text=True, timeout=timeout,
+        )
+
+    # Clean leftover processor dirs (may be root-owned from failed runs)
+    _docker_of(["find", "/home/ofuser/run", "-maxdepth", "1",
+                "-name", "processor*", "-exec", "rm", "-rf", "{}", "+"], timeout=30)
+
+    # decomposePar
+    result = _docker_of(["decomposePar", "-force"], timeout=120)
+    (case_dir / "log.decomposePar").write_text(result.stdout + result.stderr)
+    if result.returncode != 0:
+        log.error("  decomposePar failed for %s", case_dir.name)
+        return False
+
+    # Symlink boundaryData into processor dirs
+    if (case_dir / "constant" / "boundaryData").exists():
+        for proc_dir in sorted(case_dir.glob("processor*")):
+            bd_dst = proc_dir / "constant" / "boundaryData"
+            if not bd_dst.exists():
+                try:
+                    bd_dst.symlink_to(
+                        (case_dir / "constant" / "boundaryData").resolve())
+                except PermissionError:
+                    # Root-owned proc dir — symlink via Docker
+                    _docker_of(["bash", "-c",
+                        f"ln -sf ../../constant/boundaryData "
+                        f"/home/ofuser/run/{proc_dir.name}/constant/"],
+                        timeout=10)
+
+    # mpirun simpleFoam (direct exec — entrypoint sets OF env)
+    result = _docker_of(
+        ["mpirun", "-np", str(n_cores), "simpleFoam", "-parallel"],
+        timeout=3600)
+    (case_dir / "log.simpleFoam").write_text(result.stdout + result.stderr)
+
+    # chown all files back to user
+    _docker_of(["chown", "-R", DOCKER_USER, "/home/ofuser/run"], timeout=60)
 
     wall = time.time() - t0
 
@@ -556,6 +594,11 @@ def export_site(site_dir: Path, n_iter: int) -> bool:
     if result.returncode != 0:
         log.error("  export_campaign_zarr failed for %s: %s",
                   site_dir.name, (result.stderr or "")[-300:])
+        return False
+
+    if not zarr_path.exists():
+        log.error("  Zarr NOT created for %s (export returned 0 but no output)",
+                  site_dir.name)
         return False
 
     log.info("  Zarr exported: %s", zarr_path)
