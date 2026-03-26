@@ -300,20 +300,35 @@ def run_tbm_mesh(mesh_dir: Path, mesh_cfg: dict) -> bool:
 
 
 def run_write_cell_centres(mesh_dir: Path) -> bool:
-    """Run postProcess -func writeCellCentres via OF Docker."""
+    """Run postProcess -func writeCellCentres ONCE on mesh_dir.
+
+    Needs a minimal 0/p file so OF recognises time=0.
+    """
     cx = mesh_dir / "0" / "Cx"
     if cx.exists():
         return True
+
+    # Create minimal 0/p so writeCellCentres has a time directory
+    zero_dir = mesh_dir / "0"
+    zero_dir.mkdir(exist_ok=True)
+    (zero_dir / "p").write_text(
+        "FoamFile { version 2.0; format ascii; class volScalarField; object p; }\n"
+        "dimensions [0 2 -2 0 0 0 0];\n"
+        "internalField uniform 0;\n"
+        "boundaryField { \".*\" { type zeroGradient; } }\n"
+    )
 
     cmd = [
         "docker", "run", "--rm",
         "-v", f"{mesh_dir.resolve()}:/home/ofuser/run",
         "-w", "/home/ofuser/run",
         OF_IMAGE,
-        "bash", "-c", "cd /home/ofuser/run && postProcess -func writeCellCentres -time 0",
+        "bash", "-c",
+        f"cd /home/ofuser/run && postProcess -func writeCellCentres -time 0; "
+        f"chown -R {DOCKER_USER} /home/ofuser/run/0",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    if result.returncode != 0:
+    if result.returncode != 0 or not cx.exists():
         log.error("  writeCellCentres failed: %s", (result.stderr or "")[-200:])
         return False
     return True
@@ -339,12 +354,17 @@ def setup_case(
     """
     case_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Copy shared mesh ---
+    # --- Copy shared mesh + cell centres ---
     dst_poly = case_dir / "constant" / "polyMesh"
     if not dst_poly.exists():
         src_poly = mesh_dir / "constant" / "polyMesh"
         shutil.copytree(src_poly, dst_poly)
-
+    for fname in ("Cx", "Cy", "Cz"):
+        src = mesh_dir / "0" / fname
+        dst = case_dir / "0" / fname
+        if src.exists() and not dst.exists():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
 
     # --- Prepare inflow ---
     inflow_json = case_dir / "inflow.json"
@@ -409,23 +429,6 @@ def setup_case(
         rendered = tmpl.render(**jinja_ctx)
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text(rendered)
-
-    # --- writeCellCentres (needs templates rendered for 0/ fields) ---
-    cx_path = case_dir / "0" / "Cx"
-    if not cx_path.exists():
-        cmd = [
-            "docker", "run", "--rm",
-            "-v", f"{case_dir.resolve()}:/home/ofuser/run",
-            "-w", "/home/ofuser/run",
-            OF_IMAGE,
-            "bash", "-c",
-            f"cd /home/ofuser/run && postProcess -func writeCellCentres -time 0; "
-            f"chown -R {DOCKER_USER} /home/ofuser/run/0",
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-        if result.returncode != 0 or not cx_path.exists():
-            log.error("  writeCellCentres failed for %s", case_dir.name)
-            return False
 
     # --- Init from ERA5 ---
     init_script = SCRIPTS_DIR / "init_from_era5.py"
@@ -639,6 +642,10 @@ def process_site(
     write_tbm_dict(mesh_cfg, "terrain.stl", mesh_dir, terrain_z_min)
     if not run_tbm_mesh(mesh_dir, mesh_cfg):
         log.error("  Mesh FAILED for %s — skipping site", site_id)
+        return status
+
+    if not run_write_cell_centres(mesh_dir):
+        log.error("  writeCellCentres FAILED for %s — skipping site", site_id)
         return status
 
     status["mesh_ok"] = True
