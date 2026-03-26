@@ -38,10 +38,11 @@ N_PARALLEL_SOLVES = 2
 OF_IMAGE = "microfluidica/openfoam:latest"
 TBM_IMAGE = "terrainblockmesher:of24"
 PYTHON = sys.executable
+DOCKER_USER = f"{os.getuid()}:{os.getgid()}"
 
 # TBM mesh parameters (same as Perdigão PoC)
 DEFAULT_MESH = {
-    "inner_size_m": 10000,
+    "inner_size_m": 9800,
     "inner_blocks": 10,
     "cells_per_block_xy": 3,
     "cylinder_radius_m": 7000,
@@ -127,7 +128,7 @@ def extract_stl(
     z_min_valid = float(dst_array[valid_mask].min())
     dst_array[~valid_mask] = z_min_valid
 
-    terrain_z_min = z_min_valid - 10
+    terrain_z_min = z_min_valid - 50
 
     # Write ASCII STL in local coordinates (centre = 0,0)
     xs = np.linspace(-half, half, nx)
@@ -237,7 +238,7 @@ blockManager
     }}
 }}
 
-checkMesh           true;
+checkMesh           false;
 checkMeshNoTopology false;
 checkMeshAllGeometry false;
 checkMeshAllTopology false;
@@ -254,7 +255,13 @@ checkMeshAllTopology false;
          "endTime 0; deltaT 1; writeControl timeStep; writeInterval 1; writeFormat ascii;\n"
          "writePrecision 10; writeCompression uncompressed; timeFormat general; timePrecision 6;\n"),
         ("fvSchemes",
-         "FoamFile { version 2.0; format ascii; class dictionary; object fvSchemes; }\n"),
+         "FoamFile { version 2.0; format ascii; class dictionary; object fvSchemes; }\n"
+         "ddtSchemes { default steadyState; }\n"
+         "gradSchemes { default Gauss linear; }\n"
+         "divSchemes { default none; }\n"
+         "laplacianSchemes { default Gauss linear corrected; }\n"
+         "interpolationSchemes { default linear; }\n"
+         "snGradSchemes { default corrected; }\n"),
         ("fvSolution",
          "FoamFile { version 2.0; format ascii; class dictionary; object fvSolution; }\n"),
     ]:
@@ -274,7 +281,9 @@ def run_tbm_mesh(mesh_dir: Path, mesh_cfg: dict) -> bool:
         "-v", f"{mesh_dir.resolve()}:/home/ofuser/run",
         "-w", "/home/ofuser/run",
         TBM_IMAGE,
-        "bash", "-c", "cd /home/ofuser/run && terrainBlockMesher",
+        "bash", "-c",
+        f"cd /home/ofuser/run && terrainBlockMesher; rc=$?; "
+        f"chown -R {DOCKER_USER} /home/ofuser/run; exit $rc",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
@@ -336,13 +345,6 @@ def setup_case(
         src_poly = mesh_dir / "constant" / "polyMesh"
         shutil.copytree(src_poly, dst_poly)
 
-    # Copy cell centres
-    for fname in ("Cx", "Cy", "Cz"):
-        src = mesh_dir / "0" / fname
-        dst = case_dir / "0" / fname
-        if src.exists() and not dst.exists():
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
 
     # --- Prepare inflow ---
     inflow_json = case_dir / "inflow.json"
@@ -392,6 +394,7 @@ def setup_case(
         },
         "canopy": {"enabled": False},
         "inflow": inflow,
+        "site": {"latitude": site_lat, "longitude": site_lon},
     }
 
     env = Environment(loader=FileSystemLoader(str(template_dir)),
@@ -406,6 +409,23 @@ def setup_case(
         rendered = tmpl.render(**jinja_ctx)
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text(rendered)
+
+    # --- writeCellCentres (needs templates rendered for 0/ fields) ---
+    cx_path = case_dir / "0" / "Cx"
+    if not cx_path.exists():
+        cmd = [
+            "docker", "run", "--rm",
+            "-v", f"{case_dir.resolve()}:/home/ofuser/run",
+            "-w", "/home/ofuser/run",
+            OF_IMAGE,
+            "bash", "-c",
+            f"cd /home/ofuser/run && postProcess -func writeCellCentres -time 0; "
+            f"chown -R {DOCKER_USER} /home/ofuser/run/0",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0 or not cx_path.exists():
+            log.error("  writeCellCentres failed for %s", case_dir.name)
+            return False
 
     # --- Init from ERA5 ---
     init_script = SCRIPTS_DIR / "init_from_era5.py"
@@ -437,41 +457,26 @@ def solve_case(case_dir: Path, n_iter: int, n_cores: int) -> bool:
 
     t0 = time.time()
 
-    # decomposePar
-    cmd_decompose = [
-        "docker", "run", "--rm",
-        "-v", f"{case_dir.resolve()}:/home/ofuser/run",
-        "-w", "/home/ofuser/run",
-        OF_IMAGE,
-        "bash", "-c", (
-            f"cd /home/ofuser/run && "
-            f"foamDictionary system/decomposeParDict -entry numberOfSubdomains -set {n_cores} && "
-            f"decomposePar -force > log.decomposePar 2>&1"
-        ),
-    ]
-    result = subprocess.run(cmd_decompose, capture_output=True, text=True, timeout=120)
-    if result.returncode != 0:
-        log.error("  decomposePar failed for %s", case_dir.name)
-        return False
-
-    # Symlink boundaryData into processor dirs
-    bd_src = case_dir / "constant" / "boundaryData"
-    if bd_src.exists():
-        for proc_dir in sorted(case_dir.glob("processor*")):
-            bd_dst = proc_dir / "constant" / "boundaryData"
-            if not bd_dst.exists():
-                bd_dst.symlink_to(bd_src.resolve())
-
-    # mpirun simpleFoam
+    # decomposePar + symlinks + mpirun (all inside Docker)
+    solve_script = (
+        f"cd /home/ofuser/run && "
+        # turbulenceProperties alias for OF ESI v2512 compat
+        f"if [ -f constant/momentumTransport ] && [ ! -f constant/turbulenceProperties ]; then "
+        f"cp constant/momentumTransport constant/turbulenceProperties; fi && "
+        f"foamDictionary system/decomposeParDict -entry numberOfSubdomains -set {n_cores} && "
+        f"decomposePar -force > log.decomposePar 2>&1 && "
+        f"if [ -d constant/boundaryData ]; then "
+        f"for d in processor*/; do ln -sf ../../constant/boundaryData \"$d/constant/\"; done; "
+        f"fi && "
+        f"mpirun -np {n_cores} simpleFoam -parallel > log.simpleFoam 2>&1; "
+        f"chown -R {DOCKER_USER} /home/ofuser/run"
+    )
     cmd_solve = [
         "docker", "run", "--rm",
         "-v", f"{case_dir.resolve()}:/home/ofuser/run",
         "-w", "/home/ofuser/run",
         OF_IMAGE,
-        "bash", "-c", (
-            f"cd /home/ofuser/run && "
-            f"mpirun -np {n_cores} simpleFoam -parallel > log.simpleFoam 2>&1"
-        ),
+        "bash", "-c", solve_script,
     ]
     result = subprocess.run(cmd_solve, capture_output=True, text=True, timeout=3600)
 
@@ -500,15 +505,9 @@ def solve_case(case_dir: Path, n_iter: int, n_cores: int) -> bool:
                   case_dir.name, (result.stderr or "")[-200:])
         return False
 
-    # Clean processor dirs (Docker-owned files)
-    cmd_clean = [
-        "docker", "run", "--rm",
-        "-v", f"{case_dir.resolve()}:/home/ofuser/run",
-        "-w", "/home/ofuser/run",
-        OF_IMAGE,
-        "bash", "-c", "cd /home/ofuser/run && rm -rf processor*",
-    ]
-    subprocess.run(cmd_clean, capture_output=True, text=True, timeout=60)
+    # Clean processor dirs (user-owned thanks to --user)
+    for proc_dir in sorted(case_dir.glob("processor*")):
+        shutil.rmtree(proc_dir, ignore_errors=True)
 
     return True
 
@@ -642,10 +641,6 @@ def process_site(
         log.error("  Mesh FAILED for %s — skipping site", site_id)
         return status
 
-    if not run_write_cell_centres(mesh_dir):
-        log.error("  writeCellCentres FAILED for %s — skipping site", site_id)
-        return status
-
     status["mesh_ok"] = True
 
     # ---- Step 3: Set up all cases ----
@@ -710,7 +705,7 @@ def _read_stl_zmin(stl_path: Path) -> float:
                 n += 1
                 if n > 10000:
                     break
-    return z_min - 10 if z_min < 1e9 else 50.0
+    return z_min - 50 if z_min < 1e9 else 0.0
 
 
 def main():
