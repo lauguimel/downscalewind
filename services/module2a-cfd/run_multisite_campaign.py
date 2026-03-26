@@ -2,7 +2,7 @@
 run_multisite_campaign.py — 100 sites × 15 timestamps = 1500-case campaign.
 
 Runs entirely on UGA. Each site: extract STL → TBM mesh → 15 timestamps
-(4 parallel solves × 24 cores) → export Zarr → delete raw OF to free disk.
+(2 parallel solves × 24 cores) → export Zarr → delete raw OF to free disk.
 
 Usage
 -----
@@ -34,7 +34,7 @@ log = logging.getLogger("campaign")
 SCRIPTS_DIR = Path(__file__).resolve().parent
 N_ITER = 500
 N_CORES_PER_SOLVE = 24
-N_PARALLEL_SOLVES = 4
+N_PARALLEL_SOLVES = 2
 OF_IMAGE = "microfluidica/openfoam:latest"
 TBM_IMAGE = "terrainblockmesher:of24"
 PYTHON = sys.executable
