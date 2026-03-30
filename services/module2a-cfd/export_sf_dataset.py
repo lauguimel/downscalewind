@@ -321,45 +321,70 @@ def export_regular_grid(
         z0_interp = griddata(z0_xy, z0_vals, (xg, yg), method="nearest")
         z0_2d = z0_interp.astype(np.float32)
 
-    # ── 3D field interpolation ──
+    # ── 3D field interpolation (precomputed Delaunay for speed) ──
+    from scipy.spatial import Delaunay
+    from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+
     points_3d = np.column_stack([fields["x"], fields["y"], z_agl])
+
+    logger.info("  Building Delaunay triangulation for %d points...", len(points_3d))
+    tri = Delaunay(points_3d)
+    logger.info("  Delaunay done.")
+
+    # Precompute nearest-neighbour interpolator for NaN filling
+    nn_interps = {}
 
     U_grid = np.full((ny, nx, nz, 3), np.nan, dtype=np.float32)
     k_grid = np.full((ny, nx, nz), np.nan, dtype=np.float32)
     T_grid = np.full((ny, nx, nz), np.nan, dtype=np.float32) if "T" in fields else None
     q_grid = np.full((ny, nx, nz), np.nan, dtype=np.float32) if "q" in fields else None
 
+    # Build linear interpolators (reuses Delaunay)
+    U_interps = [LinearNDInterpolator(tri, fields["U"][:, c]) for c in range(3)]
+    k_interp = LinearNDInterpolator(tri, fields["k"]) if fields.get("k") is not None else None
+    T_interp = LinearNDInterpolator(tri, fields["T"]) if "T" in fields else None
+    q_interp = LinearNDInterpolator(tri, fields["q"]) if "q" in fields else None
+
+    # Build nearest interpolators for NaN filling
+    U_nn = [NearestNDInterpolator(points_3d, fields["U"][:, c]) for c in range(3)]
+    k_nn = NearestNDInterpolator(points_3d, fields["k"]) if fields.get("k") is not None else None
+    T_nn = NearestNDInterpolator(points_3d, fields["T"]) if "T" in fields else None
+    q_nn = NearestNDInterpolator(points_3d, fields["q"]) if "q" in fields else None
+
     for iz, z_level in enumerate(z_levels):
         z_target = np.full_like(xg, z_level)
         target_pts = np.column_stack([xg.ravel(), yg.ravel(), z_target.ravel()])
 
         for comp in range(3):
-            vals = griddata(points_3d, fields["U"][:, comp], target_pts, method="linear")
-            U_grid[:, :, iz, comp] = vals.reshape(ny, nx)
+            vals = U_interps[comp](target_pts).reshape(ny, nx)
+            nan_mask = np.isnan(vals)
+            if nan_mask.any():
+                vals[nan_mask] = U_nn[comp](target_pts[nan_mask.ravel()])
+            U_grid[:, :, iz, comp] = vals
 
-        if fields.get("k") is not None:
-            vals = griddata(points_3d, fields["k"], target_pts, method="linear")
-            k_grid[:, :, iz] = vals.reshape(ny, nx)
+        if k_interp is not None:
+            vals = k_interp(target_pts).reshape(ny, nx)
+            nan_mask = np.isnan(vals)
+            if nan_mask.any():
+                vals[nan_mask] = k_nn(target_pts[nan_mask.ravel()])
+            k_grid[:, :, iz] = vals
 
-        if T_grid is not None:
-            vals = griddata(points_3d, fields["T"], target_pts, method="linear")
-            T_grid[:, :, iz] = vals.reshape(ny, nx)
+        if T_interp is not None:
+            vals = T_interp(target_pts).reshape(ny, nx)
+            nan_mask = np.isnan(vals)
+            if nan_mask.any():
+                vals[nan_mask] = T_nn(target_pts[nan_mask.ravel()])
+            T_grid[:, :, iz] = vals
 
-        if q_grid is not None:
-            vals = griddata(points_3d, fields["q"], target_pts, method="linear")
-            q_grid[:, :, iz] = vals.reshape(ny, nx)
+        if q_interp is not None:
+            vals = q_interp(target_pts).reshape(ny, nx)
+            nan_mask = np.isnan(vals)
+            if nan_mask.any():
+                vals[nan_mask] = q_nn(target_pts[nan_mask.ravel()])
+            q_grid[:, :, iz] = vals
 
         if iz % 8 == 0:
             logger.info("  Interpolated level %d/%d (z_agl=%.0fm)", iz + 1, nz, z_level)
-
-    # Fill NaN with nearest
-    _fill_nan_3d(U_grid, points_3d, fields["U"], z_levels, xg, yg)
-    if fields.get("k") is not None:
-        _fill_nan_3d(k_grid, points_3d, fields["k"], z_levels, xg, yg)
-    if T_grid is not None:
-        _fill_nan_3d(T_grid, points_3d, fields["T"], z_levels, xg, yg)
-    if q_grid is not None:
-        _fill_nan_3d(q_grid, points_3d, fields["q"], z_levels, xg, yg)
 
     nan_pct = np.isnan(U_grid).sum() / U_grid.size * 100
     if nan_pct > 0:

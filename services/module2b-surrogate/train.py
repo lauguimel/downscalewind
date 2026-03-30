@@ -172,11 +172,14 @@ def train_unet(args):
         variant=variant, use_residual=use_residual,
     )
 
+    n_workers = getattr(args, "num_workers", 4)
     train_loader = DataLoader(
-        train_ds, batch_size=args.batch_size, shuffle=True, num_workers=0,
+        train_ds, batch_size=args.batch_size, shuffle=True,
+        num_workers=n_workers, pin_memory=True, prefetch_factor=2,
     )
     val_loader = DataLoader(
-        val_ds, batch_size=args.batch_size, num_workers=0,
+        val_ds, batch_size=args.batch_size,
+        num_workers=n_workers, pin_memory=True, prefetch_factor=2,
     )
 
     # Model setup depends on variant
@@ -266,7 +269,7 @@ def train_unet(args):
         val_loss /= max(n_val, 1)
         val_metrics = {k: v / n_val for k, v in val_metrics_sum.items()}
 
-        if (epoch + 1) % 10 == 0 or epoch == 0:
+        if (epoch + 1) % 5 == 0 or epoch == 0:
             metrics_str = "  ".join(f"{k}={v:.4f}" for k, v in val_metrics.items())
             logger.info(
                 "Epoch %3d/%d  train=%.6f  val=%.6f  %s",
@@ -391,6 +394,10 @@ def main():
     parser.add_argument(
         "--inner-pad", type=int, default=32,
         help="Context pixels to exclude from loss (default: 32 for 128→64 inner zone)",
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=4,
+        help="DataLoader workers for parallel I/O (default: 4)",
     )
     args = parser.parse_args()
 

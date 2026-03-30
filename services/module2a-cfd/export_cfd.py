@@ -45,27 +45,98 @@ MAST_HEIGHTS_M   = [10, 20, 40, 60, 80, 100]
 # fluidfoam helpers
 # ---------------------------------------------------------------------------
 
+def _read_of_internal_vector(filepath: Path) -> np.ndarray:
+    """Parse OpenFOAM volVectorField internalField → (N, 3) array.
+
+    Works even when boundaryField is empty (reconstruct_fields.py output).
+    """
+    import re
+
+    text = filepath.read_text()
+    # Find "internalField   nonuniform List<vector>" followed by N and data
+    m = re.search(r"internalField\s+nonuniform\s+List<vector>\s*\n(\d+)\s*\n\(", text)
+    if not m:
+        raise ValueError(f"Cannot parse vector field: {filepath}")
+
+    n = int(m.group(1))
+    start = m.end()
+    end = text.index("\n)", start)
+    block = text[start:end]
+
+    pattern = re.compile(r"\(([^)]+)\)")
+    vecs = []
+    for match in pattern.finditer(block):
+        parts = match.group(1).split()
+        vecs.append([float(parts[0]), float(parts[1]), float(parts[2])])
+
+    arr = np.array(vecs, dtype=np.float64)
+    if len(arr) != n:
+        raise ValueError(f"Expected {n} vectors, got {len(arr)} in {filepath}")
+    return arr
+
+
+def _read_of_internal_scalar(filepath: Path) -> np.ndarray | None:
+    """Parse OpenFOAM volScalarField internalField → (N,) array.
+
+    Returns None if the field is uniform or cannot be parsed.
+    """
+    import re
+
+    if not filepath.exists():
+        return None
+
+    text = filepath.read_text()
+
+    # Try nonuniform first
+    m = re.search(r"internalField\s+nonuniform\s+List<scalar>\s*\n(\d+)\s*\n\(", text)
+    if m:
+        n = int(m.group(1))
+        start = m.end()
+        end = text.index("\n)", start)
+        block = text[start:end]
+        vals = [float(v) for v in block.split()]
+        arr = np.array(vals, dtype=np.float64)
+        if len(arr) != n:
+            return None
+        return arr
+
+    # Try uniform
+    m = re.search(r"internalField\s+uniform\s+([-+eE.\d]+)", text)
+    if m:
+        return None  # uniform field — caller should handle
+
+    return None
+
+
+def _read_mesh_centres(case_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Read cell centres from 0/Cx, 0/Cy, 0/Cz or constant/polyMesh via fluidfoam."""
+    # Try pre-computed cell centres first (faster, always available after writeCellCentres)
+    cx_path = case_dir / "0" / "Cx"
+    if cx_path.exists():
+        cx = _read_of_internal_scalar(cx_path)
+        cy = _read_of_internal_scalar(case_dir / "0" / "Cy")
+        cz = _read_of_internal_scalar(case_dir / "0" / "Cz")
+        if cx is not None and cy is not None and cz is not None:
+            return cx, cy, cz
+
+    # Fallback to fluidfoam mesh reader
+    import fluidfoam
+    return fluidfoam.readmesh(str(case_dir))
+
+
 def _load_openfoam_fields(case_dir: Path) -> dict:
     """Read the latest time-step fields from an OpenFOAM case.
+
+    Uses direct ASCII parsing (handles empty boundaryField from reconstruct_fields.py).
+    Falls back to fluidfoam if direct parsing fails.
 
     Returns
     -------
     dict with keys:
         x, y, z : 1-D coordinate arrays [m] (cell centres)
         U        : (N,3) velocity [m/s]
-        T        : (N,) temperature [K]
-        k        : (N,) TKE [m²/s²]
-        nut      : (N,) turbulent viscosity [m²/s]
+        T, q, k, epsilon, nut : (N,) scalar fields (if available)
     """
-    try:
-        import fluidfoam
-    except ImportError as exc:
-        raise ImportError(
-            "fluidfoam is required: pip install fluidfoam"
-        ) from exc
-
-    case_str = str(case_dir)
-
     # Find latest time directory
     time_dirs = sorted(
         [d for d in case_dir.iterdir() if d.is_dir() and _is_time_dir(d.name)],
@@ -76,22 +147,37 @@ def _load_openfoam_fields(case_dir: Path) -> dict:
     latest = time_dirs[-1].name
     logger.info("Reading time step: %s from %s", latest, case_dir)
 
+    time_dir = case_dir / latest
+
     # Cell centre coordinates
-    x, y, z = fluidfoam.readmesh(case_str)
+    x, y, z = _read_mesh_centres(case_dir)
 
-    # Velocity
-    U = fluidfoam.readvector(case_str, latest, "U")      # shape (3, N) → transpose
-    U = np.asarray(U).T if np.asarray(U).shape[0] == 3 else np.asarray(U)
+    # Velocity — try direct parser first (handles empty boundaryField)
+    U_path = time_dir / "U"
+    try:
+        U = _read_of_internal_vector(U_path)
+    except Exception:
+        import fluidfoam
+        U = fluidfoam.readvector(str(case_dir), latest, "U")
+        U = np.asarray(U).T if np.asarray(U).shape[0] == 3 else np.asarray(U)
 
-    result = {"x": x, "y": y, "z": z, "U": U}
+    result = {"x": np.asarray(x), "y": np.asarray(y), "z": np.asarray(z), "U": U}
 
+    # Scalar fields — try direct parser, fallback to fluidfoam
     for field_name in ["T", "q", "k", "epsilon", "nut"]:
-        try:
-            val = fluidfoam.readscalar(case_str, latest, field_name)
-            result[field_name] = np.asarray(val)
-        except Exception as exc:
-            logger.debug("Could not read field %s: %s", field_name, exc)
-            # Only create zero array for core fields, skip optional ones
+        field_path = time_dir / field_name
+        val = _read_of_internal_scalar(field_path)
+        if val is not None:
+            result[field_name] = val
+        elif field_path.exists():
+            try:
+                import fluidfoam
+                val = fluidfoam.readscalar(str(case_dir), latest, field_name)
+                result[field_name] = np.asarray(val)
+            except Exception:
+                if field_name in ("k", "nut"):
+                    result[field_name] = np.zeros_like(x)
+        else:
             if field_name in ("k", "nut"):
                 result[field_name] = np.zeros_like(x)
 

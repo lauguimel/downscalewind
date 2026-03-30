@@ -40,7 +40,9 @@ def assemble_dataset(
     """
     case_dirs = sorted([
         d for d in input_dir.iterdir()
-        if d.is_dir() and d.name.startswith("ts_") and (d / "unstructured.zarr").exists()
+        if d.is_dir()
+        and (d.name.startswith("ts_") or d.name.startswith("case_") or d.name.startswith("site_"))
+        and (d / "unstructured.zarr").exists()
     ])
 
     if not case_dirs:
@@ -66,7 +68,7 @@ def assemble_dataset(
         # Read n_cells from unstructured Zarr
         import zarr
         store = zarr.open_group(str(case_dir / "unstructured.zarr"), mode="r")
-        meta["n_cells"] = int(store.attrs.get("n_cells", len(store["x"])))
+        meta["n_cells"] = int(store.attrs.get("n_cells", store["x"].shape[0]))
 
         records.append(meta)
 
@@ -108,7 +110,7 @@ def compute_norm_stats(input_dir: Path, df: pd.DataFrame) -> dict:
 
     for case_id in train_cases:
         store = zarr.open_group(str(input_dir / case_id / "unstructured.zarr"), mode="r")
-        n = len(store["x"])
+        n = store["x"].shape[0]
         n_total += n
 
         for var in variables:
