@@ -123,6 +123,105 @@ def train_mlp(args):
 # U-Net 3D training loop
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Physics losses (PINN)
+# ---------------------------------------------------------------------------
+
+# Z-levels for dz computation (must match export_sf_dataset.py)
+_Z_LEVELS = np.geomspace(5, 5000, 32).astype(np.float32)
+
+
+def divergence_loss(
+    pred: torch.Tensor, inner_pad: int, dx: float = 31.25,
+) -> torch.Tensor:
+    """Penalize ∇·U ≠ 0 on the predicted velocity field.
+
+    pred: (B, 5, Ny, Nx, Nz) — channels u, v, w, T, q (normalized)
+    dx: horizontal grid spacing [m] (4000m / 128 = 31.25m)
+
+    Computes du/dx + dv/dy + dw/dz using central differences.
+    """
+    # Extract velocity channels and denormalize
+    u = pred[:, 0] * 20.0   # (B, Ny, Nx, Nz) in m/s
+    v = pred[:, 1] * 20.0
+    w = pred[:, 2] * 20.0
+
+    # Crop to inner zone (but keep 1-pixel border for finite differences)
+    p = max(inner_pad - 1, 0)
+    if p > 0:
+        u = u[:, p:-p, p:-p, :]
+        v = v[:, p:-p, p:-p, :]
+        w = w[:, p:-p, p:-p, :]
+
+    # du/dx: central differences along Nx (dim=2)
+    du_dx = (u[:, :, 2:, :] - u[:, :, :-2, :]) / (2.0 * dx)
+    # dv/dy: central differences along Ny (dim=1)
+    dv_dy = (v[:, 2:, :, :] - v[:, :-2, :, :]) / (2.0 * dx)
+
+    # dw/dz: non-uniform spacing along Nz (dim=3)
+    z_levels = torch.from_numpy(_Z_LEVELS).to(pred.device)
+    dz = z_levels[2:] - z_levels[:-2]  # (Nz-2,)
+    dw_dz = (w[:, :, :, 2:] - w[:, :, :, :-2]) / dz[None, None, None, :]
+
+    # Align dimensions (trim to common inner size)
+    ny = min(du_dx.shape[1], dv_dy.shape[1], dw_dz.shape[1])
+    nx = min(du_dx.shape[2], dv_dy.shape[2], dw_dz.shape[2])
+    nz = min(du_dx.shape[3], dv_dy.shape[3], dw_dz.shape[3])
+
+    div = (
+        du_dx[:, :ny, :nx, :nz]
+        + dv_dy[:, :ny, :nx, :nz]
+        + dw_dz[:, :ny, :nx, :nz]
+    )
+    return div.pow(2).mean()
+
+
+def terrain_bc_loss(
+    pred: torch.Tensor, inp: torch.Tensor, inner_pad: int,
+) -> torch.Tensor:
+    """Penalize vertical velocity inconsistent with terrain slope at ground level.
+
+    At z_agl ≈ 5m (lowest level), w should satisfy:
+        w ≈ u * dz_terrain/dx + v * dz_terrain/dy
+
+    pred: (B, 5, Ny, Nx, Nz)
+    inp:  (B, C, Ny, Nx, Nz) — channel 0 is terrain/TERRAIN_SCALE
+    """
+    dx = 31.25  # m
+    TERRAIN_SCALE = 500.0
+
+    # Terrain elevation: (B, Ny, Nx)
+    terrain = inp[:, 0, :, :, 0] * TERRAIN_SCALE  # any z-slice, terrain is constant
+
+    # Terrain gradients via central differences
+    dz_dx = (terrain[:, :, 2:] - terrain[:, :, :-2]) / (2.0 * dx)  # (B, Ny, Nx-2)
+    dz_dy = (terrain[:, 2:, :] - terrain[:, :-2, :]) / (2.0 * dx)  # (B, Ny-2, Nx)
+
+    # Predicted velocities at lowest level (iz=0), denormalized
+    if inner_pad > 0:
+        u0 = pred[:, 0, inner_pad:-inner_pad, inner_pad:-inner_pad, 0] * 20.0
+        v0 = pred[:, 1, inner_pad:-inner_pad, inner_pad:-inner_pad, 0] * 20.0
+        w0 = pred[:, 2, inner_pad:-inner_pad, inner_pad:-inner_pad, 0] * 20.0
+        dz_dx = dz_dx[:, inner_pad:-inner_pad, inner_pad-1:-(inner_pad+1)]
+        dz_dy = dz_dy[:, inner_pad-1:-(inner_pad+1), inner_pad:-inner_pad]
+    else:
+        u0 = pred[:, 0, :, :, 0] * 20.0
+        v0 = pred[:, 1, :, :, 0] * 20.0
+        w0 = pred[:, 2, :, :, 0] * 20.0
+
+    # Align shapes
+    ny = min(u0.shape[1], dz_dy.shape[1])
+    nx = min(u0.shape[2], dz_dx.shape[2])
+
+    w_expected = (
+        u0[:, :ny, :nx] * dz_dx[:, :ny, :nx]
+        + v0[:, :ny, :nx] * dz_dy[:, :ny, :nx]
+    )
+    w_actual = w0[:, :ny, :nx]
+
+    return (w_actual - w_expected).pow(2).mean()
+
+
 def masked_mse(pred: torch.Tensor, target: torch.Tensor, inner_pad: int) -> torch.Tensor:
     """MSE loss computed only on the inner prediction zone.
 
@@ -156,7 +255,7 @@ def per_variable_metrics(
 
 def train_unet(args):
     from src.dataset_sf import SFGridDataset
-    from src.model_unet3d import UNet3D, ProfileEncoder
+    from src.model_unet3d import UNet3D, ProfileEncoder, GlobalEncoder
 
     device = get_device()
     variant = getattr(args, "variant", "volume")
@@ -183,20 +282,29 @@ def train_unet(args):
     )
 
     # Model setup depends on variant
-    cond_dim = 128 if variant == "terrain_only" else 0
+    n_global_scalars = 4  # u_hub, dir_sin, dir_cos, Ri_b
+    cond_dim = 128
+    base_features = getattr(args, "base_features", 32)
     model = UNet3D(
         in_channels=train_ds.n_input_channels,
         out_channels=train_ds.n_output_channels,
-        base_features=32,
+        base_features=base_features,
         cond_dim=cond_dim,
     ).to(device)
 
     profile_encoder = None
+    global_encoder = None
     if variant == "terrain_only":
-        profile_encoder = ProfileEncoder(n_vars=5, n_levels=32, cond_dim=cond_dim).to(device)
+        profile_encoder = ProfileEncoder(
+            n_vars=5, n_levels=32, cond_dim=cond_dim, n_scalars=n_global_scalars,
+        ).to(device)
         params = list(model.parameters()) + list(profile_encoder.parameters())
     else:
-        params = model.parameters()
+        # Volume variant: use GlobalEncoder for Ri_b/stability conditioning
+        global_encoder = GlobalEncoder(
+            n_scalars=n_global_scalars, cond_dim=cond_dim,
+        ).to(device)
+        params = list(model.parameters()) + list(global_encoder.parameters())
 
     optimizer = AdamW(params, lr=args.lr, weight_decay=1e-4)
     scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
@@ -204,38 +312,64 @@ def train_unet(args):
     n_params = sum(p.numel() for p in model.parameters())
     if profile_encoder:
         n_params += sum(p.numel() for p in profile_encoder.parameters())
+    if global_encoder:
+        n_params += sum(p.numel() for p in global_encoder.parameters())
     logger.info("Model: %d parameters", n_params)
 
     # Inner pad: context pixels to exclude from loss (grid_size - grid_size//2) // 2
     # For 128×128 grid with 2×2 km prediction in 4×4 km: pad = 32
     inner_pad = getattr(args, "inner_pad", 32)
 
+    # Physics loss config
+    use_physics = getattr(args, "physics", False)
+    lambda_div = getattr(args, "lambda_div", 0.1)
+    lambda_bc = getattr(args, "lambda_bc", 0.05)
+    if use_physics:
+        logger.info("PINN mode: lambda_div=%.3f, lambda_bc=%.3f", lambda_div, lambda_bc)
+        suffix = f"{variant}_pinn"
+    else:
+        suffix = variant
+
     best_val_loss = float("inf")
-    output_dir = Path(args.output) / f"unet_{variant}"
+    output_dir = Path(args.output) / f"unet_{suffix}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(args.epochs):
         model.train()
         if profile_encoder:
             profile_encoder.train()
+        if global_encoder:
+            global_encoder.train()
 
         train_loss = 0.0
+        train_loss_phys = 0.0
         n_batches = 0
         for batch in train_loader:
             inp = batch["input"].to(device)
             target = batch["target"].to(device)
+            scalars = batch["global_scalars"].to(device)
 
             cond = None
             if profile_encoder and "era5_profile" in batch:
-                cond = profile_encoder(batch["era5_profile"].to(device))
+                cond = profile_encoder(batch["era5_profile"].to(device), scalars)
+            elif global_encoder:
+                cond = global_encoder(scalars)
 
             pred = model(inp, cond=cond)
-            loss = masked_mse(pred, target, inner_pad)
+            loss_data = masked_mse(pred, target, inner_pad)
+
+            if use_physics:
+                loss_div = divergence_loss(pred, inner_pad)
+                loss_bc = terrain_bc_loss(pred, inp, inner_pad)
+                loss = loss_data + lambda_div * loss_div + lambda_bc * loss_bc
+                train_loss_phys += (lambda_div * loss_div + lambda_bc * loss_bc).item()
+            else:
+                loss = loss_data
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            train_loss += loss.item()
+            train_loss += loss_data.item()
             n_batches += 1
 
         train_loss /= max(n_batches, 1)
@@ -245,6 +379,8 @@ def train_unet(args):
         model.eval()
         if profile_encoder:
             profile_encoder.eval()
+        if global_encoder:
+            global_encoder.eval()
 
         val_loss = 0.0
         val_metrics_sum = {}
@@ -253,14 +389,161 @@ def train_unet(args):
             for batch in val_loader:
                 inp = batch["input"].to(device)
                 target = batch["target"].to(device)
+                scalars = batch["global_scalars"].to(device)
 
                 cond = None
                 if profile_encoder and "era5_profile" in batch:
-                    cond = profile_encoder(batch["era5_profile"].to(device))
+                    cond = profile_encoder(batch["era5_profile"].to(device), scalars)
+                elif global_encoder:
+                    cond = global_encoder(scalars)
 
                 pred = model(inp, cond=cond)
                 val_loss += masked_mse(pred, target, inner_pad).item()
 
+                metrics = per_variable_metrics(pred, target, inner_pad)
+                for k, v in metrics.items():
+                    val_metrics_sum[k] = val_metrics_sum.get(k, 0.0) + v
+                n_val += 1
+
+        val_loss /= max(n_val, 1)
+        val_metrics = {k: v / n_val for k, v in val_metrics_sum.items()}
+
+        if (epoch + 1) % 5 == 0 or epoch == 0:
+            metrics_str = "  ".join(f"{k}={v:.4f}" for k, v in val_metrics.items())
+            phys_str = ""
+            if use_physics:
+                phys_str = f"  phys={train_loss_phys / max(n_batches, 1):.6f}"
+            logger.info(
+                "Epoch %3d/%d  train=%.6f  val=%.6f%s  %s",
+                epoch + 1, args.epochs, train_loss, val_loss, phys_str, metrics_str,
+            )
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            state = {"model": model.state_dict()}
+            if profile_encoder:
+                state["profile_encoder"] = profile_encoder.state_dict()
+            if global_encoder:
+                state["global_encoder"] = global_encoder.state_dict()
+            torch.save(state, output_dir / "best_model.pt")
+
+    state = {"model": model.state_dict()}
+    if profile_encoder:
+        state["profile_encoder"] = profile_encoder.state_dict()
+    if global_encoder:
+        state["global_encoder"] = global_encoder.state_dict()
+    torch.save(state, output_dir / "final_model.pt")
+    logger.info("U-Net training done. Best val_loss=%.6f", best_val_loss)
+    return best_val_loss
+
+
+# ---------------------------------------------------------------------------
+# Generic grid model training (FNO, Factored)
+# ---------------------------------------------------------------------------
+
+def train_grid_model(args, model_type: str = "fno"):
+    """Train FNO or Factored model — same data pipeline as U-Net."""
+    from src.dataset_sf import SFGridDataset
+
+    device = get_device()
+    logger.info("Training %s on %s", model_type.upper(), device)
+
+    train_ds = SFGridDataset(
+        args.data_dir, args.dataset, split="train",
+        variant="volume", use_residual=True,
+    )
+    val_ds = SFGridDataset(
+        args.data_dir, args.dataset, split="val",
+        variant="volume", use_residual=True,
+    )
+
+    n_workers = getattr(args, "num_workers", 4)
+    train_loader = DataLoader(
+        train_ds, batch_size=args.batch_size, shuffle=True,
+        num_workers=n_workers, pin_memory=True, prefetch_factor=2,
+    )
+    val_loader = DataLoader(
+        val_ds, batch_size=args.batch_size,
+        num_workers=n_workers, pin_memory=True, prefetch_factor=2,
+    )
+
+    # Build model
+    if model_type == "fno":
+        from src.model_fno3d import FNO3D
+        modes = tuple(getattr(args, "fno_modes", [16, 16, 8]))
+        model = FNO3D(
+            in_channels=train_ds.n_input_channels,
+            out_channels=train_ds.n_output_channels,
+            width=getattr(args, "fno_width", 32),
+            modes=modes,
+            n_layers=getattr(args, "fno_layers", 4),
+        ).to(device)
+    elif model_type == "factored":
+        from src.model_factored import FactoredUNet
+        model = FactoredUNet(
+            in_channels=train_ds.n_input_channels,
+            out_channels=train_ds.n_output_channels,
+            base_features=getattr(args, "base_features", 32),
+            vertical_layers=4,
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}")
+
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
+
+    n_params = sum(p.numel() for p in model.parameters())
+    logger.info("Model: %d parameters", n_params)
+
+    inner_pad = getattr(args, "inner_pad", 32)
+
+    # Physics losses
+    use_physics = getattr(args, "physics", False)
+    lambda_div = getattr(args, "lambda_div", 0.1)
+    lambda_bc = getattr(args, "lambda_bc", 0.05)
+    if use_physics:
+        logger.info("PINN mode: lambda_div=%.3f, lambda_bc=%.3f", lambda_div, lambda_bc)
+
+    best_val_loss = float("inf")
+    output_dir = Path(args.output) / model_type
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for epoch in range(args.epochs):
+        model.train()
+        train_loss = 0.0
+        n_batches = 0
+        for batch in train_loader:
+            inp = batch["input"].to(device)
+            target = batch["target"].to(device)
+
+            pred = model(inp)
+            loss_data = masked_mse(pred, target, inner_pad)
+
+            if use_physics:
+                loss = loss_data + lambda_div * divergence_loss(pred, inner_pad) + lambda_bc * terrain_bc_loss(pred, inp, inner_pad)
+            else:
+                loss = loss_data
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            train_loss += loss_data.item()
+            n_batches += 1
+
+        train_loss /= max(n_batches, 1)
+        scheduler.step()
+
+        # Validate
+        model.eval()
+        val_loss = 0.0
+        val_metrics_sum = {}
+        n_val = 0
+        with torch.no_grad():
+            for batch in val_loader:
+                inp = batch["input"].to(device)
+                target = batch["target"].to(device)
+                pred = model(inp)
+                val_loss += masked_mse(pred, target, inner_pad).item()
                 metrics = per_variable_metrics(pred, target, inner_pad)
                 for k, v in metrics.items():
                     val_metrics_sum[k] = val_metrics_sum.get(k, 0.0) + v
@@ -278,16 +561,10 @@ def train_unet(args):
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            state = {"model": model.state_dict()}
-            if profile_encoder:
-                state["profile_encoder"] = profile_encoder.state_dict()
-            torch.save(state, output_dir / "best_model.pt")
+            torch.save({"model": model.state_dict()}, output_dir / "best_model.pt")
 
-    state = {"model": model.state_dict()}
-    if profile_encoder:
-        state["profile_encoder"] = profile_encoder.state_dict()
-    torch.save(state, output_dir / "final_model.pt")
-    logger.info("U-Net training done. Best val_loss=%.6f", best_val_loss)
+    torch.save({"model": model.state_dict()}, output_dir / "final_model.pt")
+    logger.info("%s training done. Best val_loss=%.6f", model_type.upper(), best_val_loss)
     return best_val_loss
 
 
@@ -380,7 +657,7 @@ def main():
     )
 
     parser = argparse.ArgumentParser(description="Train wind downscaling model")
-    parser.add_argument("--model", required=True, choices=["mlp", "unet", "gnn"])
+    parser.add_argument("--model", required=True, choices=["mlp", "unet", "gnn", "fno", "factored"])
     parser.add_argument("--data-dir", required=True, help="Exported CFD data directory")
     parser.add_argument("--dataset", required=True, help="dataset.yaml from assembler")
     parser.add_argument("--output", required=True, help="Output directory for checkpoints")
@@ -399,6 +676,34 @@ def main():
         "--num-workers", type=int, default=4,
         help="DataLoader workers for parallel I/O (default: 4)",
     )
+    parser.add_argument(
+        "--physics", action="store_true", default=False,
+        help="Enable PINN physics losses (divergence-free + terrain BC)",
+    )
+    parser.add_argument(
+        "--lambda-div", type=float, default=0.1,
+        help="Weight for divergence loss (default: 0.1)",
+    )
+    parser.add_argument(
+        "--lambda-bc", type=float, default=0.05,
+        help="Weight for terrain BC loss (default: 0.05)",
+    )
+    parser.add_argument(
+        "--base-features", type=int, default=32,
+        help="Base feature width for U-Net/Factored (default: 32)",
+    )
+    parser.add_argument(
+        "--fno-width", type=int, default=32,
+        help="FNO hidden width (default: 32)",
+    )
+    parser.add_argument(
+        "--fno-modes", type=int, nargs=3, default=[16, 16, 8],
+        help="FNO Fourier modes (ny nx nz, default: 16 16 8)",
+    )
+    parser.add_argument(
+        "--fno-layers", type=int, default=4,
+        help="FNO number of spectral layers (default: 4)",
+    )
     args = parser.parse_args()
 
     t0 = time.time()
@@ -409,6 +714,10 @@ def main():
         best_loss = train_unet(args)
     elif args.model == "gnn":
         best_loss = train_gnn(args)
+    elif args.model == "fno":
+        best_loss = train_grid_model(args, model_type="fno")
+    elif args.model == "factored":
+        best_loss = train_grid_model(args, model_type="factored")
 
     elapsed = time.time() - t0
     logger.info(

@@ -88,7 +88,7 @@ class GNNSpeedup(nn.Module):
     def __init__(
         self,
         n_node_features: int = 5,
-        n_global: int = 128,
+        n_global: int = 4,
         hidden: int = 64,
         n_heads: int = 4,
         n_layers: int = 6,

@@ -37,8 +37,8 @@ class SFUnstructuredDataset(Dataset):
     Features (per cell, 5D):
         x_norm, y_norm, z_agl_norm, elev_norm, slope_proxy
 
-    Global conditioning (3D):
-        speed_norm, dir_sin, dir_cos
+    Global conditioning (4D):
+        speed_norm, dir_sin, dir_cos, Ri_b_norm
 
     Target (per cell, 3D):
         u, v, w velocity components
@@ -89,8 +89,10 @@ class SFUnstructuredDataset(Dataset):
 
         u_hub = float(case.get("u_hub", 5.0))
         wind_dir = float(case.get("wind_dir", 270.0))
+        ri_b = float(case.get("Ri_b", 0.0))
+        ri_b = np.clip(ri_b, -2.0, 2.0) / 2.0  # normalize to [-1, 1]
         global_features = np.array(
-            [u_hub / 20.0, np.sin(np.radians(wind_dir)), np.cos(np.radians(wind_dir))],
+            [u_hub / 20.0, np.sin(np.radians(wind_dir)), np.cos(np.radians(wind_dir)), ri_b],
             dtype=np.float32,
         )
 
@@ -270,9 +272,20 @@ class SFGridDataset(Dataset):
                     profiles.append(np.zeros(nz, dtype=np.float32))
             era5_profile = np.stack(profiles, axis=0)  # (5, nz)
 
+        # ── Global scalars for conditioning ──
+        u_hub = float(case.get("u_hub", 5.0))
+        wind_dir = float(case.get("wind_dir", 270.0))
+        ri_b = float(case.get("Ri_b", 0.0))
+        ri_b = np.clip(ri_b, -2.0, 2.0) / 2.0  # normalize to [-1, 1]
+        global_scalars = np.array(
+            [u_hub / 20.0, np.sin(np.radians(wind_dir)), np.cos(np.radians(wind_dir)), ri_b],
+            dtype=np.float32,
+        )
+
         result = {
             "input": torch.from_numpy(input_tensor),  # (C_in, ny, nx, nz)
             "target": torch.from_numpy(target_tensor),  # (5, ny, nx, nz)
+            "global_scalars": torch.from_numpy(global_scalars),  # (4,)
             "case_id": case_id,
         }
 

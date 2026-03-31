@@ -48,27 +48,64 @@ class FiLMLayer3D(nn.Module):
 
 
 class ProfileEncoder(nn.Module):
-    """Encode 1D ERA5 profiles into a conditioning vector.
+    """Encode 1D ERA5 profiles + optional global scalars into a conditioning vector.
 
-    Input:  (B, n_vars, n_levels) — e.g., (B, 5, 32)
+    Input:  profiles (B, n_vars, n_levels) — e.g., (B, 5, 32)
+            scalars  (B, n_scalars)        — e.g., (B, 4) [u_hub, dir_sin, dir_cos, Ri_b]
     Output: (B, cond_dim)
     """
 
-    def __init__(self, n_vars: int = 5, n_levels: int = 32, cond_dim: int = 128):
+    def __init__(
+        self,
+        n_vars: int = 5,
+        n_levels: int = 32,
+        cond_dim: int = 128,
+        n_scalars: int = 0,
+    ):
         super().__init__()
-        self.net = nn.Sequential(
+        self.n_scalars = n_scalars
+        self.conv = nn.Sequential(
             nn.Conv1d(n_vars, 32, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv1d(32, 64, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
             nn.AdaptiveAvgPool1d(1),
             nn.Flatten(),
+        )
+        self.proj = nn.Linear(64 + n_scalars, cond_dim)
+
+    def forward(
+        self,
+        profiles: torch.Tensor,
+        scalars: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """profiles: (B, n_vars, n_levels), scalars: (B, n_scalars) → (B, cond_dim)"""
+        h = self.conv(profiles)
+        if scalars is not None and self.n_scalars > 0:
+            h = torch.cat([h, scalars], dim=-1)
+        return self.proj(h)
+
+
+class GlobalEncoder(nn.Module):
+    """Encode global scalars (no profiles) into a conditioning vector.
+
+    For use with the 'volume' variant where ERA5 is already in the input channels
+    but we still want Ri_b/stability conditioning via FiLM.
+
+    Input:  (B, n_scalars) — e.g., (B, 4)
+    Output: (B, cond_dim)
+    """
+
+    def __init__(self, n_scalars: int = 4, cond_dim: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_scalars, 64),
+            nn.ReLU(inplace=True),
             nn.Linear(64, cond_dim),
         )
 
-    def forward(self, profiles: torch.Tensor) -> torch.Tensor:
-        """profiles: (B, n_vars, n_levels) → (B, cond_dim)"""
-        return self.net(profiles)
+    def forward(self, scalars: torch.Tensor) -> torch.Tensor:
+        return self.net(scalars)
 
 
 class ConvBlock3D(nn.Module):

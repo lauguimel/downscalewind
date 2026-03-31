@@ -1,23 +1,26 @@
 """
-ingest_srtm.py — Ingestion topographie COP-DEM GLO-30 (30m) pour DownscaleWind.
+ingest_srtm.py — Ingestion topographie COP-DEM pour DownscaleWind.
 
-Télécharge les tuiles Copernicus DEM Global-30m (COP-DEM GLO-30) depuis le
-registre AWS Open Data (public, sans authentification).
-
-Qualité : COP-DEM GLO-30 est supérieur à SRTM1 pour l'Europe — résolution
-identique (1 arc-seconde ≈ 30m) mais moins d'artefacts radar sur les flancs boisés.
+Télécharge les tuiles Copernicus DEM depuis le registre AWS Open Data
+(public, sans authentification). Supporte deux résolutions :
+    - GLO-30 : 30m (~1 arc-seconde), tiles ~40 MB
+    - GLO-10 : 10m (~1/3 arc-seconde), tiles ~140 MB
 
 Usage :
     python ingest_srtm.py --site perdigao \\
                           --output ../../data/raw/srtm_perdigao_30m.tif
 
+    # 10m resolution for super-resolution downscaling
+    python ingest_srtm.py --site perdigao --resolution 10 \\
+                          --output ../../data/raw/dem_perdigao_10m.tif
+
 Sortie :
-    - GeoTIFF 30m en EPSG:4326 couvrant le domaine du site
+    - GeoTIFF en EPSG:4326 couvrant le domaine du site (native resolution)
     - Métadonnées : source, date de téléchargement, SHA256
     - Log JSON par tuile téléchargée (checkpointing)
 
 Le resampling à la résolution CFD cible est fait dans generate_mesh.py,
-pas ici. Ce script sauvegarde à la résolution native (30m).
+pas ici. Ce script sauvegarde à la résolution native.
 """
 
 from __future__ import annotations
@@ -44,12 +47,16 @@ log = get_logger("ingest_srtm")
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
-# COP-DEM GLO-30 sur AWS Open Data (public, sans auth)
-# Format : https://copernicus-dem-30m.s3.amazonaws.com/{tile_name}/{tile_name}.tif
-COPDEM_BASE_URL = "https://copernicus-dem-30m.s3.amazonaws.com"
+# COP-DEM on AWS Open Data (public, no auth)
+# GLO-30: https://copernicus-dem-30m.s3.amazonaws.com/{tile_name}/{tile_name}.tif
+# GLO-10: https://copernicus-dem-10m.s3.amazonaws.com/{tile_name}/{tile_name}.tif
+COPDEM_BASE_URLS = {
+    30: "https://copernicus-dem-30m.s3.amazonaws.com",
+    10: "https://copernicus-dem-10m.s3.amazonaws.com",
+}
 
-# Table de correspondance classe CGLS-LC100 → z₀ (utilisée aussi dans ingest_landcover)
-# Définie ici pour référence, utilisée par ingest_landcover.py
+# Legacy CGLS-LC100 z₀ table (replaced by WorldCover 2021 in ingest_landcover.py)
+# Kept here for reference only — not used in the current pipeline
 LC100_Z0_TABLE: dict[int, float] = {
     10: 1.00,   # forêt dense
     20: 0.10,   # arbustes
@@ -88,10 +95,11 @@ def _tile_name(lat: int, lon: int) -> str:
     return f"Copernicus_DSM_COG_10_{lat_hemi}{lat_str}_00_{lon_hemi}{lon_str}_00_DEM"
 
 
-def _tile_url(lat: int, lon: int) -> str:
-    """Retourne l'URL de téléchargement d'une tuile COP-DEM GLO-30."""
+def _tile_url(lat: int, lon: int, resolution: int = 30) -> str:
+    """Retourne l'URL de téléchargement d'une tuile COP-DEM."""
     name = _tile_name(lat, lon)
-    return f"{COPDEM_BASE_URL}/{name}/{name}.tif"
+    base = COPDEM_BASE_URLS[resolution]
+    return f"{base}/{name}/{name}.tif"
 
 
 def _tiles_for_domain(north: float, west: float, south: float, east: float) -> list[tuple[int, int]]:
@@ -139,21 +147,26 @@ def _download_tile(url: str, dest: Path, timeout: int = 120) -> None:
 
 @click.command()
 @click.option("--site",       required=True, help="Identifiant du site (ex: perdigao)")
-@click.option("--output",     required=True, help="GeoTIFF de sortie (30m)")
+@click.option("--output",     required=True, help="GeoTIFF de sortie")
+@click.option("--resolution", type=click.Choice(["10", "30"]), default="30",
+              help="DEM resolution: 30m (GLO-30) or 10m (GLO-10)")
 @click.option("--config-dir",
               default=str(Path(__file__).resolve().parents[2] / "configs" / "sites"),
               help="Répertoire des configurations de sites")
 @click.option("--checkpoint-dir", default=None,
               help="Répertoire des sentinelles (défaut: output_dir/.checkpoints)")
 @click.option("--dry-run",    is_flag=True, help="Affiche les URLs sans télécharger")
-def main(site, output, config_dir, checkpoint_dir, dry_run):
+def main(site, output, resolution, config_dir, checkpoint_dir, dry_run):
     """
-    Télécharge le COP-DEM GLO-30 pour le domaine d'un site et exporte en GeoTIFF.
+    Télécharge le COP-DEM pour le domaine d'un site et exporte en GeoTIFF.
 
-    Source : Copernicus DEM GLO-30 via AWS Open Data (public, sans authentification).
-    Résolution : ~30m (1 arc-seconde).
+    Source : Copernicus DEM via AWS Open Data (public, sans authentification).
+    Supports GLO-30 (~30m) and GLO-10 (~10m, from TanDEM-X).
     """
-    log.info("Démarrage ingestion DEM", extra={"site": site, "output": output})
+    resolution = int(resolution)
+    log.info("Démarrage ingestion DEM", extra={
+        "site": site, "output": output, "resolution_m": resolution,
+    })
 
     # ── Configuration du site ─────────────────────────────────────────────────
     config_path = Path(config_dir) / f"{site}.yaml"
@@ -180,13 +193,13 @@ def main(site, output, config_dir, checkpoint_dir, dry_run):
 
     if dry_run:
         for lat, lon in tiles:
-            print(f"  {_tile_url(lat, lon)}")
+            print(f"  {_tile_url(lat, lon, resolution)}")
         return
 
     # ── Checkpointer ─────────────────────────────────────────────────────────
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cp_dir = checkpoint_dir or str(output_path.parent / ".checkpoints_srtm")
+    cp_dir = checkpoint_dir or str(output_path.parent / f".checkpoints_dem{resolution}")
     cp = Checkpointer(cp_dir)
 
     # ── Téléchargement des tuiles ─────────────────────────────────────────────
@@ -196,9 +209,9 @@ def main(site, output, config_dir, checkpoint_dir, dry_run):
         tmpdir = Path(tmpdir)
 
         for lat, lon in tiles:
-            tile_key = f"copdem_{lat}_{lon}"
+            tile_key = f"copdem{resolution}_{lat}_{lon}"
             tile_file = tmpdir / f"{_tile_name(lat, lon)}.tif"
-            url = _tile_url(lat, lon)
+            url = _tile_url(lat, lon, resolution)
 
             if cp.is_done(tile_key):
                 log.info("Tuile déjà téléchargée", extra={"key": tile_key})
@@ -293,10 +306,10 @@ def main(site, output, config_dir, checkpoint_dir, dry_run):
         with rasterio.open(str(output_path), "w", **profile) as dst:
             dst.write(clipped[0].astype(np.float32), 1)
             dst.update_tags(
-                source="Copernicus DEM GLO-30 (AWS Open Data)",
+                source=f"Copernicus DEM GLO-{resolution} (AWS Open Data)",
                 site=site,
                 domain=f"N{north}/W{-west}/S{south}/E{east}",
-                resolution_m="~30 (1 arc-second)",
+                resolution_m=f"~{resolution}",
                 n_tiles=str(len(tile_paths)),
             )
 
@@ -304,7 +317,7 @@ def main(site, output, config_dir, checkpoint_dir, dry_run):
         log.info("DEM exporté", extra={
             "output": str(output_path),
             "shape": f"{clipped.shape[1]}×{clipped.shape[2]}",
-            "resolution_m": "~30",
+            "resolution_m": f"~{resolution}",
             "sha256": sha_out[:16] + "...",
             "size_mb": round(output_path.stat().st_size / 1e6, 1),
         })
