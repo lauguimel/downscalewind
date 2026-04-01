@@ -202,14 +202,18 @@ def _parse_isfs_daily(raw_dir: Path) -> dict:
                 u_std_arr[:, s_idx, h_idx] = np.sqrt(np.abs(uu_vals))
 
             # Temperature — try T_ then t_ (case variations in ISFS files)
-            t_vals = _load_1d(f"T_{h}m_{site}") or _load_1d(f"t_{h}m_{site}")
+            t_vals = _load_1d(f"T_{h}m_{site}")
+            if t_vals is None:
+                t_vals = _load_1d(f"t_{h}m_{site}")
             if t_vals is not None:
                 t_arr[:, s_idx, h_idx] = t_vals
 
             # Relative humidity — try RH_ then rh_ then Rh_
-            rh_vals = (_load_1d(f"RH_{h}m_{site}")
-                       or _load_1d(f"rh_{h}m_{site}")
-                       or _load_1d(f"Rh_{h}m_{site}"))
+            rh_vals = _load_1d(f"RH_{h}m_{site}")
+            if rh_vals is None:
+                rh_vals = _load_1d(f"rh_{h}m_{site}")
+            if rh_vals is None:
+                rh_vals = _load_1d(f"Rh_{h}m_{site}")
             if rh_vals is not None:
                 rh_arr[:, s_idx, h_idx] = rh_vals
 
