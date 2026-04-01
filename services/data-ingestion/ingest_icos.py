@@ -1,8 +1,12 @@
 """
-ingest_icos.py — ICOS atmospheric station data ingestion for fire weather validation.
+ingest_icos.py — ICOS/FLUXNET station data ingestion for fire weather validation.
 
-Downloads hourly meteorological data from ICOS Carbon Portal
-(https://data.icos-cp.eu/) for target stations in southern Europe.
+Downloads half-hourly meteorological data from ICOS Carbon Portal
+(https://data.icos-cp.eu/) for target ecosystem stations in southern Europe.
+
+These are ICOS *ecosystem* stations (eddy-covariance flux towers) that also
+record standard meteorological variables (T, RH, wind speed, pressure, precip).
+Data is packaged as FLUXNET Product (half-hourly CSVs inside ZIP archives).
 
 Target stations (fire weather validation):
   - FR-Pue  Puéchabon          43.7414°N,  3.5958°E  Mediterranean holm oak
@@ -10,14 +14,18 @@ Target stations (fire weather validation):
   - ES-Arn  El Arenosillo       37.1047°N, -6.7333°E  SW Spain
 
 Data access:
-  Uses the `icoscp` Python package (pip install icoscp) for metadata and
-  data object retrieval. Falls back to direct SPARQL queries if not available.
+  Uses `icoscp_core` for authenticated downloads from the ICOS Carbon Portal.
+  Requires a one-time authentication setup:
+    1. Create an account at https://cpauth.icos-cp.eu/
+    2. Run: python -c "from icoscp_core.icos import auth; auth.init_config_file()"
+    3. Enter your email and password when prompted.
+  Config stored at ~/.icoscp/cpauthToken_auth_conf.json
 
 Output Zarr schema:
   icos_{station_id}.zarr/
     meteo/
       T        [time]  float32  °C
-      RH       [time]  float32  %
+      RH       [time]  float32  %  (computed from VPD + T if RH not direct)
       ws       [time]  float32  m/s
       wd       [time]  float32  degrees
       p        [time]  float32  hPa (if available)
@@ -28,7 +36,7 @@ Output Zarr schema:
 Also produces daily FWI CSV at data/validation/fwi/icos_{station_id}_fwi.csv.
 
 Usage:
-    python ingest_icos.py --stations FR-Pue FR-OHP ES-Arn \\
+    python ingest_icos.py --stations FR-Pue --stations FR-OHP --stations ES-Arn \\
         --start 2017-06-01 --end 2017-08-31 \\
         --output-dir ../../data/raw
 """
@@ -120,44 +128,48 @@ VARIABLE_MAP = {
 
 SPARQL_ENDPOINT = "https://meta.icos-cp.eu/sparql"
 
-SPARQL_QUERY_TEMPLATE = """
+# Station URI prefix for ecosystem stations in ICOS
+STATION_URI_PREFIX = "http://meta.icos-cp.eu/resources/stations/ES_"
+
+
+# ── SPARQL: find Fluxnet Product data objects ──────────────────────────────
+
+SPARQL_FLUXNET_QUERY = """
 PREFIX cpmeta: <http://meta.icos-cp.eu/ontologies/cpmeta/>
 PREFIX prov: <http://www.w3.org/ns/prov#>
 
-SELECT ?dobj ?spec ?fileName ?timeStart ?timeEnd
+SELECT ?dobj ?specLabel ?fileName ?timeStart ?timeEnd ?size ?nRows
 WHERE {{
   ?dobj cpmeta:hasObjectSpec ?spec .
   ?dobj cpmeta:hasName ?fileName .
   ?dobj cpmeta:hasSizeInBytes ?size .
   ?dobj cpmeta:wasAcquiredBy [
-    prov:wasAssociatedWith ?station ;
+    prov:wasAssociatedWith <{station_uri}> ;
     prov:startedAtTime ?timeStart ;
     prov:endedAtTime ?timeEnd
   ] .
-  ?station cpmeta:hasStationId "{station_id}" .
+  ?spec rdfs:label ?specLabel .
+  OPTIONAL {{ ?dobj cpmeta:hasNumberOfRows ?nRows }}
+  FILTER(?specLabel IN ('Fluxnet Product', 'ETC L2 Fluxnet (half-hourly)', 'Fluxnet Archive Product'))
   FILTER(?timeStart <= "{end_date}T23:59:59Z"^^xsd:dateTime)
   FILTER(?timeEnd   >= "{start_date}T00:00:00Z"^^xsd:dateTime)
-  FILTER(CONTAINS(LCASE(STR(?spec)), "atmo"))
 }}
 ORDER BY DESC(?timeEnd)
-LIMIT 20
+LIMIT 5
 """
 
 
-def _query_sparql(station_id: str, start_date: str, end_date: str) -> list[dict]:
-    """Query ICOS SPARQL endpoint for data object URIs."""
-    try:
-        import requests
-    except ImportError:
-        log.error("requests package required for SPARQL fallback")
-        return []
+def _find_fluxnet_dobj(station_id: str, start_date: str, end_date: str) -> list[dict]:
+    """Find FLUXNET data object URIs for a station via SPARQL."""
+    import requests
 
-    query = SPARQL_QUERY_TEMPLATE.format(
-        station_id=station_id,
+    station_uri = STATION_URI_PREFIX + station_id
+    query = SPARQL_FLUXNET_QUERY.format(
+        station_uri=station_uri,
         start_date=start_date,
         end_date=end_date,
     )
-    log.info("Querying ICOS SPARQL endpoint", extra={"station": station_id})
+    log.info("Querying ICOS SPARQL for FLUXNET products", extra={"station": station_id})
     try:
         resp = requests.post(
             SPARQL_ENDPOINT,
@@ -166,16 +178,27 @@ def _query_sparql(station_id: str, start_date: str, end_date: str) -> list[dict]
             timeout=30,
         )
         resp.raise_for_status()
-        results = resp.json().get("results", {}).get("bindings", [])
-        return [
-            {
+        bindings = resp.json().get("results", {}).get("bindings", [])
+        results = []
+        for r in bindings:
+            results.append({
                 "dobj": r["dobj"]["value"],
+                "specLabel": r["specLabel"]["value"],
                 "fileName": r["fileName"]["value"],
                 "timeStart": r["timeStart"]["value"],
                 "timeEnd": r["timeEnd"]["value"],
-            }
-            for r in results
-        ]
+                "size": int(r["size"]["value"]),
+            })
+        log.info(
+            "Found FLUXNET data objects",
+            extra={"station": station_id, "n_objects": len(results)},
+        )
+        for r in results:
+            log.info(
+                "  Data object",
+                extra={"spec": r["specLabel"], "file": r["fileName"], "size_mb": round(r["size"] / 1e6, 1)},
+            )
+        return results
     except Exception as e:
         log.warning("SPARQL query failed", extra={"error": str(e)})
         return []
@@ -184,156 +207,183 @@ def _query_sparql(station_id: str, start_date: str, end_date: str) -> list[dict]
 # ── Data fetching ────────────────────────────────────────────────────────────
 
 
-def _try_icoscp_download(
-    station_id: str, start_date: str, end_date: str
-) -> pd.DataFrame | None:
-    """Attempt to download data using the icoscp package.
+def _download_fluxnet_zip(dobj_url: str) -> bytes | None:
+    """Download a FLUXNET ZIP archive from ICOS CP.
 
-    Returns a DataFrame with columns: time, T, RH, ws, wd, p (where available).
-    Returns None if icoscp is not installed or data retrieval fails.
+    Requires authentication via icoscp_core. If auth is not configured,
+    falls back to unauthenticated download (will fail for most data).
     """
     try:
-        from icoscp.station import station as icos_station  # type: ignore[import]
-    except ImportError:
-        log.info("icoscp not installed, will use SPARQL fallback")
+        from icoscp_core.icos import data as icos_data
+        stream = icos_data.get_csv_byte_stream(dobj_url)
+        content = stream.read()
+        log.info("Downloaded via icoscp_core", extra={"size_mb": round(len(content) / 1e6, 1)})
+        return content
+    except Exception as e:
+        log.warning("icoscp_core download failed (auth configured?)", extra={"error": str(e)})
+
+    # Fallback: try direct HTTP (usually returns HTML license page)
+    import requests
+    try:
+        resp = requests.get(
+            dobj_url.replace("/meta/", "/objects/") if "/meta/" in dobj_url else dobj_url,
+            timeout=300,
+            stream=True,
+        )
+        resp.raise_for_status()
+        content = resp.content
+        # Check if it's actually a ZIP (starts with PK) or HTML
+        if content[:2] == b"PK":
+            log.info("Downloaded via direct HTTP", extra={"size_mb": round(len(content) / 1e6, 1)})
+            return content
+        else:
+            log.warning("Direct download returned HTML (license page), not ZIP. "
+                       "Please configure icoscp_core authentication.")
+            return None
+    except Exception as e:
+        log.warning("Direct HTTP download failed", extra={"error": str(e)})
         return None
+
+
+def _extract_hh_csv_from_zip(zip_bytes: bytes) -> pd.DataFrame | None:
+    """Extract the half-hourly CSV from a FLUXNET ZIP archive.
+
+    FLUXNET ZIPs contain multiple CSVs at different time resolutions.
+    We want the HH (half-hourly) or HR (hourly) file with FULLSET or FLUXMET.
+    """
+    import zipfile
+    from io import BytesIO
 
     try:
-        log.info("Fetching via icoscp", extra={"station": station_id})
-        st = icos_station.get(station_id)
-        if st is None:
-            log.warning("Station not found via icoscp", extra={"station": station_id})
+        with zipfile.ZipFile(BytesIO(zip_bytes)) as zf:
+            names = zf.namelist()
+            log.info("ZIP contents", extra={"n_files": len(names), "files": names[:10]})
+
+            # Priority order for file selection
+            hh_candidates = [n for n in names if "_HH_" in n and n.endswith(".csv")]
+            hr_candidates = [n for n in names if "_HR_" in n and n.endswith(".csv")]
+
+            # Prefer FULLSET or FLUXMET over other variants
+            for candidates in [hh_candidates, hr_candidates]:
+                for preferred in ["FULLSET", "FLUXMET"]:
+                    for c in candidates:
+                        if preferred in c:
+                            log.info("Selected CSV", extra={"file": c})
+                            with zf.open(c) as f:
+                                return pd.read_csv(f)
+
+            # Fallback: any HH or HR CSV
+            for candidates in [hh_candidates, hr_candidates]:
+                if candidates:
+                    csv_name = candidates[0]
+                    log.info("Selected CSV (fallback)", extra={"file": csv_name})
+                    with zf.open(csv_name) as f:
+                        return pd.read_csv(f)
+
+            # Last resort: any CSV
+            csv_files = [n for n in names if n.endswith(".csv")]
+            if csv_files:
+                csv_name = csv_files[0]
+                log.info("Selected CSV (last resort)", extra={"file": csv_name})
+                with zf.open(csv_name) as f:
+                    return pd.read_csv(f)
+
+            log.warning("No CSV files found in ZIP", extra={"files": names})
             return None
-
-        # List available data objects for the station
-        data_objects = st.data()
-        if data_objects is None or (hasattr(data_objects, "empty") and data_objects.empty):
-            log.warning("No data objects found", extra={"station": station_id})
-            return None
-
-        log.info(
-            "Found data objects via icoscp",
-            extra={"station": station_id, "n_objects": len(data_objects)},
-        )
-
-        # Filter to atmospheric meteorological data overlapping the period
-        t_start = pd.Timestamp(start_date)
-        t_end = pd.Timestamp(end_date)
-
-        # Try to load data objects that cover our period
-        from icoscp.cpb.dobj import Dobj  # type: ignore[import]
-
-        frames: list[pd.DataFrame] = []
-        for _, row in data_objects.iterrows():
-            try:
-                dobj_uri = row.get("dobj", row.get("uri", ""))
-                if not dobj_uri:
-                    continue
-                d = Dobj(dobj_uri)
-                if d.data is not None:
-                    df = d.data
-                    if isinstance(df, pd.DataFrame) and not df.empty:
-                        frames.append(df)
-            except Exception as e:
-                log.debug("Could not load data object", extra={"error": str(e)})
-                continue
-
-        if not frames:
-            log.warning("No data frames loaded via icoscp", extra={"station": station_id})
-            return None
-
-        df_all = pd.concat(frames, ignore_index=True)
-        return _harmonize_dataframe(df_all, t_start, t_end)
-
-    except Exception as e:
-        log.warning("icoscp download failed", extra={"station": station_id, "error": str(e)})
+    except zipfile.BadZipFile:
+        log.warning("Invalid ZIP file")
         return None
 
 
-def _try_sparql_download(
+def _fetch_station_data(
     station_id: str, start_date: str, end_date: str
 ) -> pd.DataFrame | None:
-    """Attempt to download data via SPARQL + direct CSV/NetCDF download.
+    """Fetch FLUXNET data for an ICOS ecosystem station.
+
+    Strategy:
+    1. Find FLUXNET Product data objects via SPARQL
+    2. Download the ZIP archive (requires icoscp_core auth)
+    3. Extract the half-hourly CSV
+    4. Harmonize variable names and filter to requested period
 
     Returns a harmonized DataFrame or None.
     """
-    results = _query_sparql(station_id, start_date, end_date)
+    results = _find_fluxnet_dobj(station_id, start_date, end_date)
     if not results:
-        log.warning("No SPARQL results", extra={"station": station_id})
+        log.warning("No FLUXNET data objects found", extra={"station": station_id})
         return None
 
-    try:
-        import requests
-    except ImportError:
-        log.error("requests package required for direct download")
-        return None
+    t_start = pd.Timestamp(start_date, tz="UTC")
+    t_end = pd.Timestamp(end_date, tz="UTC")
 
-    t_start = pd.Timestamp(start_date)
-    t_end = pd.Timestamp(end_date)
-
-    frames: list[pd.DataFrame] = []
+    # Try each data object (prefer Fluxnet Product over Archive)
     for r in results:
-        dobj_url = r["dobj"]
-        # ICOS data portal provides CSV download at /csv endpoint
-        csv_url = dobj_url.replace("/meta/", "/objects/") if "/meta/" in dobj_url else dobj_url
-        log.info("Downloading data object", extra={"url": csv_url, "file": r["fileName"]})
+        log.info("Trying data object", extra={
+            "station": station_id,
+            "spec": r["specLabel"],
+            "file": r["fileName"],
+        })
 
-        try:
-            resp = requests.get(csv_url, timeout=120, stream=True)
-            resp.raise_for_status()
+        # Get the access URL
+        access_url = r["dobj"].replace("meta.icos-cp.eu", "data.icos-cp.eu")
 
-            # Try CSV parse (most ICOS Level 2 are CSV)
-            from io import StringIO
-
-            content = resp.text
-            # Skip ICOS header lines (start with #)
-            lines = content.split("\n")
-            data_lines = [l for l in lines if not l.startswith("#")]
-            if not data_lines:
-                continue
-
-            df = pd.read_csv(StringIO("\n".join(data_lines)), sep=None, engine="python")
-            if not df.empty:
-                frames.append(df)
-        except Exception as e:
-            log.debug("Failed to download/parse data object", extra={"error": str(e)})
+        zip_bytes = _download_fluxnet_zip(access_url)
+        if zip_bytes is None:
             continue
 
-    if not frames:
-        return None
+        df = _extract_hh_csv_from_zip(zip_bytes)
+        if df is None:
+            continue
 
-    df_all = pd.concat(frames, ignore_index=True)
-    return _harmonize_dataframe(df_all, t_start, t_end)
+        return _harmonize_dataframe(df, t_start, t_end)
+
+    return None
 
 
 def _harmonize_dataframe(
     df: pd.DataFrame, t_start: pd.Timestamp, t_end: pd.Timestamp
 ) -> pd.DataFrame | None:
-    """Harmonize column names and filter to time range.
+    """Harmonize FLUXNET column names and filter to time range.
 
-    Maps ICOS variable names to standard names (T, RH, ws, wd, p).
-    Resamples to hourly if needed.
+    FLUXNET standard columns:
+      TIMESTAMP_START / TIMESTAMP — YYYYMMDDHHmm format
+      TA_F / TA_F_MDS — air temperature (°C)
+      RH — relative humidity (%)  (not always present)
+      VPD_F / VPD_F_MDS — vapor pressure deficit (hPa)
+      WS_F / WS — wind speed (m/s)
+      WD — wind direction (degrees)
+      PA_F / PA — atmospheric pressure (kPa)
+      P_F / P — precipitation (mm per timestep)
+
+    If RH is missing, computes it from VPD and TA using Buck equation.
+    Resamples to hourly.
     """
     if df.empty:
         return None
 
-    # Identify time column
+    log.info("Harmonizing dataframe", extra={
+        "shape": list(df.shape),
+        "columns": list(df.columns)[:30],
+    })
+
+    # ── Parse timestamps ────────────────────────────────────────────────
     time_col = None
-    for candidate in ["TIMESTAMP", "timestamp", "time", "Time", "datetime", "date"]:
+    for candidate in ["TIMESTAMP_START", "TIMESTAMP", "timestamp", "time", "datetime"]:
         if candidate in df.columns:
             time_col = candidate
             break
     if time_col is None:
-        # Try first column if it looks like a timestamp
-        first_col = df.columns[0]
-        try:
-            pd.to_datetime(df[first_col].iloc[:5])
-            time_col = first_col
-        except (ValueError, TypeError):
-            log.warning("No time column found in dataframe", extra={"columns": list(df.columns)})
-            return None
+        log.warning("No time column found", extra={"columns": list(df.columns)[:20]})
+        return None
 
-    df["time"] = pd.to_datetime(df[time_col], utc=True, errors="coerce")
+    # FLUXNET timestamps are in YYYYMMDDHHmm format (int64)
+    ts_raw = df[time_col]
+    if ts_raw.dtype in (np.int64, np.int32, np.float64):
+        # Convert YYYYMMDDHHmm to datetime
+        df["time"] = pd.to_datetime(ts_raw.astype(np.int64).astype(str), format="%Y%m%d%H%M", utc=True, errors="coerce")
+    else:
+        df["time"] = pd.to_datetime(ts_raw, utc=True, errors="coerce")
+
     df = df.dropna(subset=["time"])
     df = df.set_index("time").sort_index()
 
@@ -343,20 +393,78 @@ def _harmonize_dataframe(
         log.warning("No data in requested period after filtering")
         return None
 
-    # Map variable names
+    # ── Map variables ───────────────────────────────────────────────────
     result = pd.DataFrame(index=df.index)
-    for std_name, info in VARIABLE_MAP.items():
-        for icos_name in info["icos_names"]:
-            if icos_name in df.columns:
-                result[std_name] = pd.to_numeric(df[icos_name], errors="coerce").astype(np.float32)
+
+    # Temperature
+    for col in ["TA_F", "TA_F_MDS", "TA", "air_temperature"]:
+        if col in df.columns:
+            vals = pd.to_numeric(df[col], errors="coerce")
+            vals = vals.where(vals > -9990)  # FLUXNET missing value = -9999
+            result["T"] = vals.astype(np.float32)
+            break
+
+    # Relative humidity — direct or from VPD
+    rh_found = False
+    for col in ["RH", "rh", "relative_humidity"]:
+        if col in df.columns:
+            vals = pd.to_numeric(df[col], errors="coerce")
+            vals = vals.where(vals > -9990)
+            result["RH"] = vals.astype(np.float32)
+            rh_found = True
+            break
+
+    if not rh_found and "T" in result.columns:
+        # Compute RH from VPD: RH = 100 * (1 - VPD / e_s(T))
+        # Buck equation: e_s(T) = 0.61121 * exp((18.678 - T/234.5) * T/(257.14 + T)) [kPa]
+        for vpd_col in ["VPD_F", "VPD_F_MDS", "VPD"]:
+            if vpd_col in df.columns:
+                vpd = pd.to_numeric(df[vpd_col], errors="coerce")
+                vpd = vpd.where(vpd > -9990)
+                t_c = result["T"]
+                # FLUXNET VPD is in hPa, convert to kPa
+                vpd_kpa = vpd * 0.1
+                e_sat = 0.61121 * np.exp((18.678 - t_c / 234.5) * t_c / (257.14 + t_c))
+                rh = 100.0 * (1.0 - vpd_kpa / e_sat)
+                result["RH"] = np.clip(rh, 0, 100).astype(np.float32)
+                log.info("Computed RH from VPD", extra={"vpd_col": vpd_col})
                 break
+
+    # Wind speed
+    for col in ["WS_F", "WS", "wind_speed"]:
+        if col in df.columns:
+            vals = pd.to_numeric(df[col], errors="coerce")
+            vals = vals.where(vals > -9990)
+            result["ws"] = vals.astype(np.float32)
+            break
+
+    # Wind direction
+    for col in ["WD", "wd", "wind_direction"]:
+        if col in df.columns:
+            vals = pd.to_numeric(df[col], errors="coerce")
+            vals = vals.where(vals > -9990)
+            result["wd"] = vals.astype(np.float32)
+            break
+
+    # Pressure (FLUXNET: PA in kPa → convert to hPa)
+    for col in ["PA_F", "PA", "air_pressure"]:
+        if col in df.columns:
+            vals = pd.to_numeric(df[col], errors="coerce")
+            vals = vals.where(vals > -9990)
+            # FLUXNET PA is in kPa, convert to hPa
+            result["p"] = (vals * 10.0).astype(np.float32)
+            break
 
     if result.empty or len(result.columns) == 0:
         log.warning(
             "No recognized variables found",
-            extra={"available_columns": list(df.columns)[:20]},
+            extra={"available_columns": list(df.columns)[:30]},
         )
         return None
+
+    available = list(result.columns)
+    n_valid = {v: int(result[v].notna().sum()) for v in available}
+    log.info("Variables mapped", extra={"variables": available, "valid_counts": n_valid})
 
     # Resample to hourly (mean)
     result = result.resample("1h").mean()
@@ -562,16 +670,17 @@ def main(
     fwi_dir: str,
     skip_fwi: bool,
 ):
-    """Download ICOS atmospheric station data for fire weather validation.
+    """Download ICOS/FLUXNET station data for fire weather validation.
 
     Fetches hourly T, RH, wind speed/direction, and pressure from the
-    ICOS Carbon Portal. Saves as Zarr stores and optionally computes
-    daily FWI indices.
+    ICOS Carbon Portal (ecosystem stations with FLUXNET data products).
+    Saves as Zarr stores and optionally computes daily FWI indices.
 
-    Tries the `icoscp` Python package first, falls back to SPARQL queries.
+    Requires icoscp_core authentication. Setup:
 
-    Install icoscp:
+    \b
         pip install icoscp
+        python -c "from icoscp_core.icos import auth; auth.init_config_file()"
     """
     output_path = Path(output_dir)
     fwi_path = Path(fwi_dir)
@@ -598,15 +707,13 @@ def main(
         meta = ICOS_STATIONS[sid]
         log.info("Processing station", extra={
             "station": sid,
-            "name": meta["name"],
+            "station_name": meta["name"],
             "lat": meta["lat"],
             "lon": meta["lon"],
         })
 
-        # Try icoscp first, then SPARQL fallback
-        df = _try_icoscp_download(sid, start, end)
-        if df is None:
-            df = _try_sparql_download(sid, start, end)
+        # Fetch FLUXNET data via SPARQL + icoscp_core download
+        df = _fetch_station_data(sid, start, end)
 
         if df is None or df.empty:
             log.warning(
@@ -668,7 +775,8 @@ def main(
     if n_ok == 0:
         log.warning(
             "No stations were successfully ingested. "
-            "Try installing icoscp: pip install icoscp"
+            "Check that icoscp_core authentication is configured: "
+            "python -c 'from icoscp_core.icos import auth; auth.init_config_file()'"
         )
         sys.exit(1)
 
