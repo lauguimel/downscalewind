@@ -13,6 +13,8 @@ Variable naming convention:
   u_{h}m_{site}     — East wind component at height h (m), site name
   v_{h}m_{site}     — North wind component
   u_u__{h}m_{site}  — Variance of u → u_std = sqrt(abs(u_u__))
+  T_{h}m_{site}     — Temperature (°C)
+  RH_{h}m_{site}    — Relative humidity (%)
 
 Coordinates:
   latitude_{site}, longitude_{site}, altitude_{site}  — scalar per site
@@ -23,6 +25,8 @@ Output Zarr schema:
       u      [time, site_id, height]  float32  m/s East
       v      [time, site_id, height]  float32  m/s North
       u_std  [time, site_id, height]  float32  m/s (turbulence)
+      T      [time, site_id, height]  float32  °C
+      RH     [time, site_id, height]  float32  %
     coords/
       time       [time]      int64   ns since epoch UTC
       site_id    [site_id]   bytes   site name (e.g. b"tnw01")
@@ -68,7 +72,7 @@ def _parse_isfs_daily(raw_dir: Path) -> dict:
     Parse NCAR/EOL ISFS daily NetCDF files.
 
     Discovers sites and heights from variable names (regex on u_{h}m_{site}).
-    Extracts u, v, u_std (= sqrt(|u_u__|)) for all site × height combinations.
+    Extracts u, v, u_std (= sqrt(|u_u__|)), T, RH for all site × height combinations.
 
     Returns:
         dict with keys:
@@ -78,6 +82,8 @@ def _parse_isfs_daily(raw_dir: Path) -> dict:
           u         — float32 [n_times, n_sites, n_heights]
           v         — float32 [n_times, n_sites, n_heights]
           u_std     — float32 [n_times, n_sites, n_heights]
+          T         — float32 [n_times, n_sites, n_heights]  °C
+          RH        — float32 [n_times, n_sites, n_heights]  %
           lat       — float32 [n_sites]
           lon       — float32 [n_sites]
           altitude_m — float32 [n_sites]
@@ -108,13 +114,21 @@ def _parse_isfs_daily(raw_dir: Path) -> dict:
     # Discover sites and available heights from variable names
     # Pattern: u_{height}m_{site}  e.g. u_10m_tnw01
     var_pattern = re.compile(r"^u_(\d+)m_(.+)$")
+    t_pattern   = re.compile(r"^[Tt]_(\d+)m_(.+)$")
+    rh_pattern  = re.compile(r"^[Rr][Hh]_(\d+)m_(.+)$")
     sites_heights: dict[str, set[int]] = {}
+    t_available: set[str] = set()   # variable names with T data
+    rh_available: set[str] = set()  # variable names with RH data
     for var in ds.data_vars:
         m = var_pattern.match(var)
         if m:
             height = int(m.group(1))
             site = m.group(2)
             sites_heights.setdefault(site, set()).add(height)
+        if t_pattern.match(var):
+            t_available.add(var)
+        if rh_pattern.match(var):
+            rh_available.add(var)
 
     if not sites_heights:
         sample_vars = list(ds.data_vars)[:15]
@@ -133,6 +147,8 @@ def _parse_isfs_daily(raw_dir: Path) -> dict:
         "n_sites": len(sites),
         "heights_m": heights,
         "n_times": len(ds.time),
+        "n_T_vars": len(t_available),
+        "n_RH_vars": len(rh_available),
     })
 
     times = ds.time.values.astype("datetime64[ns]")
@@ -144,6 +160,8 @@ def _parse_isfs_daily(raw_dir: Path) -> dict:
     u_arr     = np.full((n_times, n_sites, n_heights), np.nan, dtype=np.float32)
     v_arr     = np.full((n_times, n_sites, n_heights), np.nan, dtype=np.float32)
     u_std_arr = np.full((n_times, n_sites, n_heights), np.nan, dtype=np.float32)
+    t_arr     = np.full((n_times, n_sites, n_heights), np.nan, dtype=np.float32)
+    rh_arr    = np.full((n_times, n_sites, n_heights), np.nan, dtype=np.float32)
     lats      = np.full(n_sites, np.nan, dtype=np.float32)
     lons      = np.full(n_sites, np.nan, dtype=np.float32)
     alts      = np.full(n_sites, np.nan, dtype=np.float32)
@@ -183,6 +201,18 @@ def _parse_isfs_daily(raw_dir: Path) -> dict:
                 # u_std = sqrt(|variance|) — abs() handles float precision < 0
                 u_std_arr[:, s_idx, h_idx] = np.sqrt(np.abs(uu_vals))
 
+            # Temperature — try T_ then t_ (case variations in ISFS files)
+            t_vals = _load_1d(f"T_{h}m_{site}") or _load_1d(f"t_{h}m_{site}")
+            if t_vals is not None:
+                t_arr[:, s_idx, h_idx] = t_vals
+
+            # Relative humidity — try RH_ then rh_ then Rh_
+            rh_vals = (_load_1d(f"RH_{h}m_{site}")
+                       or _load_1d(f"rh_{h}m_{site}")
+                       or _load_1d(f"Rh_{h}m_{site}"))
+            if rh_vals is not None:
+                rh_arr[:, s_idx, h_idx] = rh_vals
+
         n_valid = int(np.sum(np.isfinite(u_arr[:, s_idx, :])))
         log.debug("Site extracted", extra={"site": site, "n_valid_u": n_valid})
 
@@ -204,6 +234,8 @@ def _parse_isfs_daily(raw_dir: Path) -> dict:
         "u":          u_arr,
         "v":          v_arr,
         "u_std":      u_std_arr,
+        "T":          t_arr,
+        "RH":         rh_arr,
         "lat":        lats,
         "lon":        lons,
         "altitude_m": alts,
@@ -319,6 +351,8 @@ def main(site: str, raw_dir: str, output: str, config_dir: str, iop_only: bool):
         "u":     data["u"],
         "v":     data["v"],
         "u_std": data["u_std"],
+        "T":     data["T"],
+        "RH":    data["RH"],
     })
 
     # ── Filter to IOP ─────────────────────────────────────────────────────────
@@ -401,6 +435,16 @@ def main(site: str, raw_dir: str, output: str, config_dir: str, iop_only: bool):
         "long_name": "u standard deviation (turbulence)",
         "units": "m s-1",
     })
+
+    arr = sites_grp.create_array("T", shape=shape, dtype=np.float32,
+                                 chunks=chunks, overwrite=True)
+    arr[...] = data_30min["T"]
+    arr.attrs.update({"long_name": "temperature", "units": "degC"})
+
+    arr = sites_grp.create_array("RH", shape=shape, dtype=np.float32,
+                                 chunks=chunks, overwrite=True)
+    arr[...] = data_30min["RH"]
+    arr.attrs.update({"long_name": "relative humidity", "units": "%"})
 
     # Global attributes
     root.attrs.update({
