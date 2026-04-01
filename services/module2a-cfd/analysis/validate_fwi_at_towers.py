@@ -116,6 +116,11 @@ def compute_daily_noon_fwi(times, T_C, RH, ws_ms, rain_mm=None):
     Aggregates to daily noon values (12:00 UTC ± 1h), then runs FWI system.
     Returns dict with dates and FWI components.
     """
+    # Mask aberrant sensor values before aggregation
+    T_C = np.where((T_C > -50) & (T_C < 60), T_C, np.nan)
+    RH = np.where((RH >= 0) & (RH <= 105), RH, np.nan)
+    ws_ms = np.where((ws_ms >= 0) & (ws_ms < 60), ws_ms, np.nan)
+
     # Find noon timesteps (11:00-13:00 UTC)
     hours = (times - times.astype("datetime64[D]")).astype("timedelta64[h]").astype(int)
     dates = np.unique(times.astype("datetime64[D]"))
@@ -264,11 +269,16 @@ def plot_fwi_scatter(obs_fwi_by_site, era5_fwi, output_dir):
     # Histogram of differences
     ax = axes[1]
     diff = obs_vals - era5_vals
-    ax.hist(diff, bins=30, color="steelblue", alpha=0.7, edgecolor="white")
+    finite_diff = diff[np.isfinite(diff)]
+    if len(finite_diff) > 0:
+        ax.hist(finite_diff, bins=30, color="steelblue", alpha=0.7, edgecolor="white")
+        diff_mean, diff_std = np.mean(finite_diff), np.std(finite_diff)
+    else:
+        diff_mean, diff_std = 0.0, 0.0
     ax.axvline(0, color="k", lw=1, ls="--")
     ax.set_xlabel("FWI difference (Obs - ERA5)")
     ax.set_ylabel("Count")
-    ax.set_title(f"FWI difference distribution\nmean={np.mean(diff):.1f}, std={np.std(diff):.1f}")
+    ax.set_title(f"FWI difference distribution\nmean={diff_mean:.1f}, std={diff_std:.1f}")
 
     # Per-tower spread: for each day, show range of obs FWI vs single ERA5
     ax = axes[2]
@@ -331,7 +341,15 @@ def plot_input_validation(obs_data, era5_data, output_dir):
                 obs_val = obs_data["RH"][t_idx, :]
                 era5_val = era5_data["RH"][j]
 
-            valid = np.isfinite(obs_val)
+            # Physical range filter: reject sensor errors
+            if var == "RH":
+                valid = np.isfinite(obs_val) & (obs_val >= 0) & (obs_val <= 105)
+            elif var == "T_C":
+                valid = np.isfinite(obs_val) & (obs_val > -50) & (obs_val < 60)
+            elif var == "ws_kmh":
+                valid = np.isfinite(obs_val) & (obs_val >= 0) & (obs_val < 200)
+            else:
+                valid = np.isfinite(obs_val)
             for v in obs_val[valid]:
                 obs_all.append(v)
                 era5_all.append(float(era5_val))
