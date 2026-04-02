@@ -1,0 +1,36 @@
+# Module 3 — Precipitation correction training config
+
+data:
+  bbox: [-10, 35, 30, 60]   # Europe: lon_min, lat_min, lon_max, lat_max
+  year: 2022                 # training year
+  max_stations: 500          # limit for dev/testing (set to null for all)
+  min_days_per_station: 300  # reject stations with <300 days/year
+  gee_project: "ee-guillaumemaitrejean"
+
+stations:
+  ghcnd: true                # NOAA GHCN-D (~2000 stn Europe)
+  ecad: false                # ECA&D (~3500 stn, bulk download)
+  mf_synop: true             # Météo-France SYNOP (61 stn, open)
+  mf_clim: false             # MF climatological network (~3000 stn)
+
+terrain_features:
+  elevation: true
+  slope: true
+  aspect: true               # encoded as sin/cos
+  tpi_radius_m: 5000         # Topographic Position Index radius
+  distance_coast_km: false   # optional, slow to compute
+
+model:
+  type: "xgboost"
+  n_estimators: 300
+  max_depth: 6
+  learning_rate: 0.1
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_child_weight: 5
+  reg_alpha: 0.1
+  cv_folds: 5               # spatial cross-validation folds
+
+output:
+  dir: "../../data/models/precip_correction"
+  cache_dir: "../../data/raw/precip_correction_cache"
