@@ -1,0 +1,88 @@
+#!/bin/bash -l
+#PBS -N setup_ml_env
+#PBS -l select=1:ncpus=6:ngpus=1:mem=34GB
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -m n
+
+# Set up Python (conda + PyTorch CUDA) and Julia (CUDA.jl) environments
+# for FuXi-CFD transport surrogate training on Aqua.
+#
+# IMPORTANT: Must run on a GPU node to install GPU packages correctly.
+#
+# Run once:
+#   qsub configs/hpc/setup_aqua_ml_env.pbs
+
+cd $PBS_O_WORKDIR
+
+# --- Pre-flight GPU check ---
+nvidia-smi || { echo "ERROR: GPU not available"; exit 1; }
+
+# ── Python: Conda + PyTorch CUDA ─────────────────────────────────────────────
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+
+ENV_NAME="fuxicfd"
+
+echo "Creating conda env $ENV_NAME on GPU node..."
+conda create -n "$ENV_NAME" -y python=3.11
+conda activate "$ENV_NAME"
+
+# Install PyTorch with CUDA on the GPU node
+conda install -y -c conda-forge cudatoolkit=11.8.0
+python -m pip install torch torchvision
+python -m pip install huggingface_hub tensorboard numpy
+
+echo ""
+echo "=== Python Verification ==="
+python -c "
+import torch
+print(f'PyTorch: {torch.__version__}')
+print(f'CUDA available: {torch.cuda.is_available()}')
+if torch.cuda.is_available():
+    print(f'GPU: {torch.cuda.get_device_name(0)}')
+print('OK')
+"
+
+# ── Julia: CUDA.jl + NPZ.jl ─────────────────────────────────────────────────
+
+echo ""
+echo "Setting up Julia..."
+
+export PATH="$HOME/.juliaup/bin:$PATH"
+export JULIA_CUDA_USE_COMPAT=false
+
+# Install juliaup if not present
+if ! command -v julia &> /dev/null; then
+    echo "Installing juliaup..."
+    curl -fsSL https://install.julialang.org | sh -s -- -y
+    export PATH="$HOME/.juliaup/bin:$PATH"
+fi
+
+julia --version
+
+# Instantiate the transport project (downloads + precompiles CUDA.jl)
+TRANSPORT_DIR="$HOME/dsw/services/module2b-surrogate/transport"
+echo "Instantiating Julia project at $TRANSPORT_DIR..."
+julia --project="$TRANSPORT_DIR" -e '
+    using Pkg
+    Pkg.instantiate()
+    Pkg.precompile()
+    using CUDA
+    if !CUDA.functional()
+        error("CUDA not functional")
+    end
+    println("GPU: ", CUDA.name(CUDA.device()))
+    println("VRAM: ", round(CUDA.totalmem(CUDA.device()) / 1e9, digits=1), " GB")
+    using NPZ
+    using ArgParse
+    using ProgressMeter
+    using JSON3
+    println("Julia setup OK")
+'
+
+echo ""
+echo "=== Setup Complete ==="
+echo "Python env: $ENV_NAME"
+echo "Julia project: $TRANSPORT_DIR"

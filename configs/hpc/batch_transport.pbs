@@ -1,0 +1,62 @@
+#!/bin/bash -l
+#PBS -N batch_transport
+#PBS -l select=1:ncpus=4:ngpus=1:mem=32GB:gpu_id=H100
+#PBS -l walltime=2:00:00
+#PBS -j oe
+#PBS -m ae
+
+# Run passive scalar transport (T, q) on all FuXi-CFD wind fields.
+# Uses Julia + CUDA.jl for GPU-accelerated solving.
+#
+# Expected: ~0.2s/case on H100 -> 12k cases in ~40 min.
+#
+# Usage:
+#   qsub configs/hpc/batch_transport.pbs
+
+cd $PBS_O_WORKDIR
+
+DATA_DIR="/scratch/maitreje/fuxicfd/extracted"
+TRANSPORT_DIR="$HOME/dsw/services/module2b-surrogate/transport"
+
+# ── Julia environment ────────────────────────────────────────────────────────
+export PATH="$HOME/.juliaup/bin:$PATH"
+export JULIA_CUDA_USE_COMPAT=false
+
+# ── Pre-flight GPU check ────────────────────────────────────────────────────
+nvidia-smi || { echo "ERROR: GPU not available"; exit 1; }
+
+echo "=== Batch Transport ==="
+echo "Data: $DATA_DIR"
+echo "Julia project: $TRANSPORT_DIR"
+echo "GPU: $CUDA_VISIBLE_DEVICES"
+
+# Ensure dependencies are up-to-date
+julia --project="$TRANSPORT_DIR" -e 'using Pkg; Pkg.instantiate()'
+
+# Run transport solver on all cases
+julia --project="$TRANSPORT_DIR" "$TRANSPORT_DIR/batch_transport.jl" \
+    --data-dir "$DATA_DIR" \
+    --max-iter 500 \
+    --tol 1e-5 \
+    --kappa-T 5.0 \
+    --kappa-q 5.0
+
+echo ""
+echo "=== Batch Transport Complete ==="
+echo "Summary: $DATA_DIR/transport_summary.json"
+
+# Quick stats via Python
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+
+python -c "
+import json
+with open('$DATA_DIR/transport_summary.json') as f:
+    s = json.load(f)
+print(f'Processed: {s[\"n_processed\"]}')
+print(f'Converged: {s[\"n_converged\"]}')
+print(f'Failed: {s[\"n_failed\"]}')
+print(f'Total time: {s[\"total_time_s\"]:.0f}s')
+print(f'Avg/case: {s[\"avg_time_per_case_s\"]:.3f}s')
+"

@@ -1,0 +1,80 @@
+#!/bin/bash -l
+#PBS -N download_fuxicfd
+#PBS -l select=1:ncpus=4:mem=16GB
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -m ae
+
+# Download FuXi-CFD dataset (250 GB, 13 tar files) from HuggingFace
+# and extract all cases.
+#
+# Run once:
+#   qsub configs/hpc/download_fuxicfd.pbs
+
+cd $PBS_O_WORKDIR
+
+DATA_DIR="/scratch/maitreje/fuxicfd"
+RAW_DIR="$DATA_DIR/raw"
+EXTRACTED_DIR="$DATA_DIR/extracted"
+
+mkdir -p "$RAW_DIR" "$EXTRACTED_DIR"
+
+# ── Activate conda env ───────────────────────────────────────────────────────
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+
+# ── Download ─────────────────────────────────────────────────────────────────
+echo "Downloading FuXi-CFD dataset to $RAW_DIR..."
+huggingface-cli download linchensen/FuXi-CFD-dataset \
+    --local-dir "$RAW_DIR" \
+    --repo-type dataset
+
+echo "Download complete."
+ls -lh "$RAW_DIR"
+
+# ── Extract ──────────────────────────────────────────────────────────────────
+echo ""
+echo "Extracting tar files to $EXTRACTED_DIR..."
+
+# Find all tar files and extract in parallel (4 at a time)
+find "$RAW_DIR" -name "*.tar" -print0 | \
+    xargs -0 -P 4 -I {} tar -xf {} -C "$EXTRACTED_DIR"
+
+echo "Extraction complete."
+
+# ── Verify ───────────────────────────────────────────────────────────────────
+N_CASES=$(find "$EXTRACTED_DIR" -maxdepth 1 -type d -name "case_*" | wc -l)
+echo ""
+echo "=== Verification ==="
+echo "Cases extracted: $N_CASES"
+
+# Create manifest (list of case directories)
+find "$EXTRACTED_DIR" -maxdepth 1 -type d -name "case_*" | sort > "$DATA_DIR/manifest.txt"
+echo "Manifest: $DATA_DIR/manifest.txt"
+
+# Spot-check one case
+FIRST_CASE=$(head -1 "$DATA_DIR/manifest.txt")
+if [ -n "$FIRST_CASE" ]; then
+    echo "Spot-checking $FIRST_CASE..."
+    python -c "
+import numpy as np
+inp = np.load('$FIRST_CASE/inputs.npz')
+out = np.load('$FIRST_CASE/outputs.npz')
+print('inputs.npz keys:', list(inp.keys()))
+print('  dem:', inp['dem'].shape, inp['dem'].dtype)
+print('  roughness:', inp['roughness'].shape)
+print('  u_100m:', inp['u_100m'].shape)
+print('outputs.npz keys:', list(out.keys()))
+print('  u:', out['u'].shape, out['u'].dtype)
+print('  v:', out['v'].shape)
+print('  w:', out['w'].shape)
+print('  k:', out['k'].shape)
+print('OK')
+"
+fi
+
+echo ""
+echo "=== Download & Extract Complete ==="
+echo "Data dir: $EXTRACTED_DIR"
+echo "Cases: $N_CASES"

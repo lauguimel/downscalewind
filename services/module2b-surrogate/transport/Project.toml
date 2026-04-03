@@ -1,0 +1,10 @@
+[deps]
+ArgParse = "c7e460c6-2fb9-53a9-8c5b-16f535851c63"
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
+NPZ = "15e1cf62-19b3-5cfa-8e77-841668bca605"
+ProgressMeter = "92933f4c-e287-5a05-a399-4b506bd553cd"
+StructTypes = "856f2bd8-1abb-4b0e-9bbb-12415ad1bffa"
+
+[compat]
+julia = "1.10"

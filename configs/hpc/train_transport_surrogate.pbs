@@ -1,0 +1,61 @@
+#!/bin/bash -l
+#PBS -N train_transport
+#PBS -l select=1:ncpus=8:ngpus=1:mem=64GB:gpu_id=H100
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -m ae
+
+# Train transport surrogate model (UNet3D or FNO) on FuXi-CFD dataset.
+#
+# Prerequisite: batch_transport.pbs must have completed (outputs_Tq.npz exist).
+#
+# Usage:
+#   qsub configs/hpc/train_transport_surrogate.pbs
+#   qsub -v MODEL=fno configs/hpc/train_transport_surrogate.pbs
+
+cd $PBS_O_WORKDIR
+
+DATA_DIR="/scratch/maitreje/fuxicfd/extracted"
+OUTPUT_DIR="/scratch/maitreje/fuxicfd/models"
+SCRIPT_DIR="$HOME/dsw/services/module2b-surrogate"
+
+# Default model: unet (override with -v MODEL=fno)
+MODEL="${MODEL:-unet}"
+BATCH_SIZE="${BATCH_SIZE:-2}"
+EPOCHS="${EPOCHS:-100}"
+LR="${LR:-1e-3}"
+
+# ── Pre-flight GPU check ────────────────────────────────────────────────────
+nvidia-smi || { echo "ERROR: GPU not available"; exit 1; }
+
+echo "=== Transport Surrogate Training ==="
+echo "Model: $MODEL"
+echo "Data: $DATA_DIR"
+echo "Output: $OUTPUT_DIR"
+echo "Batch size: $BATCH_SIZE"
+echo "Epochs: $EPOCHS"
+echo "GPU: $CUDA_VISIBLE_DEVICES"
+
+# Activate conda env
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+
+# Verify PyTorch GPU
+python -c "import torch; print(f'CUDA: {torch.cuda.is_available()}, Device: {torch.cuda.get_device_name(0)}')"
+
+cd "$SCRIPT_DIR"
+
+python train_transport_surrogate.py \
+    --data-dir "$DATA_DIR" \
+    --output "$OUTPUT_DIR" \
+    --model "$MODEL" \
+    --epochs "$EPOCHS" \
+    --batch-size "$BATCH_SIZE" \
+    --lr "$LR" \
+    --num-workers 4
+
+echo ""
+echo "=== Training Complete ==="
+echo "Model saved to: $OUTPUT_DIR/$MODEL/"
+ls -lh "$OUTPUT_DIR/$MODEL/"
