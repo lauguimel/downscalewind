@@ -208,8 +208,8 @@ def main(
     click.echo(f"Training complete in {elapsed:.0f}s")
     click.echo(f"  Stations:    {n_stations}")
     click.echo(f"  Samples:     {len(dataset_df)}")
-    click.echo(f"  CV MAE:      {cv_results['mae_mean']:.2f} +/- {cv_results['mae_std']:.2f} mm/day")
-    click.echo(f"  CV bias:     {cv_results['bias_mean']:.2f} mm/day")
+    click.echo(f"  CV RMSE:     {cv_results['mean_rmse']:.2f} +/- {cv_results['std_rmse']:.2f} mm/day")
+    click.echo(f"  CV bias:     {cv_results['mean_bias']:.2f} mm/day")
     click.echo(f"  Model saved: {output_dir}")
     click.echo("=" * 60)
 

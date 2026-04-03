@@ -28,6 +28,10 @@ def build_dataset(
     pd.DataFrame
         Merged DataFrame with temporal and aspect encodings, ready for model.
     """
+    # Normalize column names
+    if "rain_mm" in station_data.columns and "rain_station" not in station_data.columns:
+        station_data = station_data.rename(columns={"rain_mm": "rain_station"})
+
     # Inner join station + IMERG on (station_id, date)
     df = station_data.merge(imerg_data, on=["station_id", "date"], how="inner")
 
