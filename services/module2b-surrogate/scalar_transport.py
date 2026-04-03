@@ -222,24 +222,51 @@ def _diffusion(phi: np.ndarray, dx: float, dy: float, dz: np.ndarray,
 # ── Boundary conditions ─────────────────────────────────────────────────────
 
 def _apply_bcs(phi: np.ndarray, bc_profile: np.ndarray,
+               u: np.ndarray, v: np.ndarray, w: np.ndarray | None = None,
                terrain_mask: np.ndarray | None = None,
                lapse_rate: float = 0.0) -> None:
     """Apply boundary conditions in-place.
 
-    Lateral + top: Dirichlet from ERA5 profile.
-    Bottom: zero-gradient (if lapse_rate=0) or imposed gradient.
+    All boundaries use phi-based inlet/outlet (like OpenFOAM exprMixed):
+      - Inflow (flux enters domain): Dirichlet = ERA5 profile
+      - Outflow (flux leaves domain): zero-gradient (Neumann)
+    Top: phi-based on w (Dirichlet for subsidence, Neumann for updrafts).
+    Bottom: zero-gradient or imposed lapse rate.
     Terrain: zero-flux (copy from cell above).
     """
     nz = phi.shape[0]
 
-    # Lateral Dirichlet (all 4 faces)
-    phi[:, :, 0] = bc_profile[:, None]
-    phi[:, :, -1] = bc_profile[:, None]
-    phi[:, 0, :] = bc_profile[:, None]
-    phi[:, -1, :] = bc_profile[:, None]
+    # West face (x=0): inflow if u > 0, outflow if u < 0
+    inflow_w = u[:, :, 0] > 0  # (nz, ny) — wind entering from west
+    for k in range(nz):
+        phi[k, inflow_w[k], 0] = bc_profile[k]
+        phi[k, ~inflow_w[k], 0] = phi[k, ~inflow_w[k], 1]  # zero-gradient
 
-    # Top: Dirichlet
-    phi[-1, :, :] = bc_profile[-1]
+    # East face (x=-1): inflow if u < 0
+    inflow_e = u[:, :, -1] < 0
+    for k in range(nz):
+        phi[k, inflow_e[k], -1] = bc_profile[k]
+        phi[k, ~inflow_e[k], -1] = phi[k, ~inflow_e[k], -2]
+
+    # South face (y=0): inflow if v > 0
+    inflow_s = v[:, 0, :] > 0
+    for k in range(nz):
+        phi[k, 0, inflow_s[k]] = bc_profile[k]
+        phi[k, 0, ~inflow_s[k]] = phi[k, 1, ~inflow_s[k]]
+
+    # North face (y=-1): inflow if v < 0
+    inflow_n = v[:, -1, :] < 0
+    for k in range(nz):
+        phi[k, -1, inflow_n[k]] = bc_profile[k]
+        phi[k, -1, ~inflow_n[k]] = phi[k, -2, ~inflow_n[k]]
+
+    # Top: phi-based on w — Dirichlet if subsidence or calm (w <= 0), Neumann if updraft (w > 0)
+    if w is not None:
+        updraft = w[-1, :, :] > 0.01  # clear updraft only (threshold avoids float noise)
+        phi[-1][~updraft] = bc_profile[-1]  # subsidence or calm → Dirichlet
+        phi[-1][updraft] = phi[-2][updraft]  # updraft → let it flow out
+    else:
+        phi[-1, :, :] = bc_profile[-1]
 
     # Bottom: zero-gradient or lapse rate
     if abs(lapse_rate) < 1e-10:
@@ -331,8 +358,8 @@ def solve_scalar_transport(
         # Update
         phi_new = phi + dt * rhs
 
-        # BCs
-        _apply_bcs(phi_new, bc_profile, terrain_3d, lapse_rate)
+        # BCs (phi-based inlet/outlet on all boundaries)
+        _apply_bcs(phi_new, bc_profile, u, v, w, terrain_3d, lapse_rate)
 
         # Convergence
         change = np.abs(phi_new - phi).max()
