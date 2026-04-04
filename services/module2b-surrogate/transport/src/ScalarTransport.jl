@@ -6,6 +6,7 @@ Solves the steady advection-diffusion equation for a passive scalar phi:
 
 Designed for FuXi-CFD wind fields (300x300x27 @ 30m).
 All operations use CUDA.jl CuArrays for GPU execution.
+No scalar indexing — all operations are vectorized broadcast or sliced views.
 
 Reference:
     Ferziger, Peric (2002). Computational Methods for Fluid Dynamics.
@@ -56,28 +57,11 @@ end
     advection_x!(rhs, phi, u, dx)
 
 Compute -d(u*phi)/dx using first-order upwind. In-place on GPU arrays.
-Arrays are (nz, ny, nx) — Julia column-major, last index varies fastest.
+Arrays are (nz, ny, nx).
 """
 function advection_x!(rhs::CuArray{Float64,3}, phi::CuArray{Float64,3},
                       u::CuArray{Float64,3}, dx::Float64)
     nz, ny, nx = size(phi)
-
-    # Flux at right face (i+1/2): upwind
-    # phi_L = phi[:,:,1:end-1], phi_R = phi[:,:,2:end], vel = u[:,:,1:end-1]
-    flux_pos = @views u[:,:,1:end-1] .* phi[:,:,1:end-1]   # u > 0
-    flux_neg = @views u[:,:,1:end-1] .* phi[:,:,2:end]      # u < 0
-    flux = @. ifelse(u[:,:,1:end-1] > 0, flux_pos, flux_neg)
-
-    # Flux at left face (i-1/2)
-    flux_pos_m = @views u[:,:,2:end] .* phi[:,:,1:end-1]    # shifted
-    flux_neg_m = @views u[:,:,2:end] .* phi[:,:,2:end]
-
-    # Actually we need consistent face fluxes. Simpler approach:
-    # Compute face flux at face i+1/2 for all interior faces
-    # Then rhs[k,j,i] = -(flux[i+1/2] - flux[i-1/2]) / dx
-
-    # Allocate face flux array: (nz, ny, nx+1) faces, but we only need interior
-    # For simplicity, compute flux at each face and difference
 
     # Face flux at i+1/2 for i=1..nx-1
     face = CUDA.zeros(Float64, nz, ny, nx - 1)
@@ -88,7 +72,6 @@ function advection_x!(rhs::CuArray{Float64,3}, phi::CuArray{Float64,3},
     # rhs for interior cells (i=2..nx-1)
     @views @. rhs[:,:,2:end-1] += -(face[:,:,2:end] - face[:,:,1:end-1]) / dx
 
-    # Boundary cells: handled by BC application (skip)
     return nothing
 end
 
@@ -114,7 +97,6 @@ end
     advection_z!(rhs, phi, w, dz)
 
 Compute -d(w*phi)/dz using first-order upwind with non-uniform spacing.
-dz is a Vector on CPU (broadcast to GPU via reshape).
 """
 function advection_z!(rhs::CuArray{Float64,3}, phi::CuArray{Float64,3},
                       w::CuArray{Float64,3}, dz_gpu::CuArray{Float64,1})
@@ -131,10 +113,10 @@ function advection_z!(rhs::CuArray{Float64,3}, phi::CuArray{Float64,3},
     @views @. rhs[2:end-1,:,:] += -(face[2:end,:,:] - face[1:end-1,:,:]) / dz3[2:end-1,:,:]
 
     # Bottom (k=1): only top face
-    @views @. rhs[1,:,:] += -face[1,:,:] / dz3[1,:,:]
+    @views @. rhs[1:1,:,:] += -face[1:1,:,:] / dz3[1:1,:,:]
 
     # Top (k=nz): only bottom face
-    @views @. rhs[end,:,:] += face[end,:,:] / dz3[end,:,:]
+    @views @. rhs[end:end,:,:] += face[end:end,:,:] / dz3[end:end,:,:]
 
     return nothing
 end
@@ -154,7 +136,7 @@ function diffusion!(rhs::CuArray{Float64,3}, phi::CuArray{Float64,3},
     nz, ny, nx = size(phi)
     dz3 = reshape(dz_gpu, nz, 1, 1)
 
-    # x-direction (interior only, boundaries handled by BCs)
+    # x-direction (interior only)
     @views @. rhs[:,:,2:end-1] += kappa * (phi[:,:,3:end] - 2*phi[:,:,2:end-1] + phi[:,:,1:end-2]) / dx^2
 
     # y-direction
@@ -163,9 +145,9 @@ function diffusion!(rhs::CuArray{Float64,3}, phi::CuArray{Float64,3},
     # z-direction (interior)
     @views @. rhs[2:end-1,:,:] += kappa * (phi[3:end,:,:] - 2*phi[2:end-1,:,:] + phi[1:end-2,:,:]) / dz3[2:end-1,:,:]^2
 
-    # z-boundaries: zero-gradient Laplacian
-    @views @. rhs[1,:,:] += kappa * (phi[2,:,:] - phi[1,:,:]) / dz3[1,:,:]^2
-    @views @. rhs[end,:,:] += kappa * (phi[end-1,:,:] - phi[end,:,:]) / dz3[end,:,:]^2
+    # z-boundaries: zero-gradient Laplacian (use 1:1 range to avoid scalar indexing)
+    @views @. rhs[1:1,:,:] += kappa * (phi[2:2,:,:] - phi[1:1,:,:]) / dz3[1:1,:,:]^2
+    @views @. rhs[end:end,:,:] += kappa * (phi[end-1:end-1,:,:] - phi[end:end,:,:]) / dz3[end:end,:,:]^2
 
     return nothing
 end
@@ -174,24 +156,22 @@ end
 # ── Boundary conditions ──────────────────────────────────────────────────────
 
 """
-    apply_bcs!(phi, bc_profile, u, v, w; lapse_rate=0.0, terrain_mask=nothing)
+    apply_bcs!(phi, bc3, bc_top, u, v, w, dz0, lapse_rate, terrain_mask)
 
-Phi-based inlet/outlet BCs on all boundaries:
-  - Inflow (flux enters domain): Dirichlet = profile value
-  - Outflow (flux leaves domain): zero-gradient (Neumann)
-Top: Dirichlet for subsidence (w <= 0), Neumann for updraft.
-Bottom: zero-gradient or imposed lapse rate.
-Terrain: copy from cell above.
+Phi-based inlet/outlet BCs on all boundaries. All args are CuArrays.
+bc3: (nz, 1, 1) profile for broadcasting.
+bc_top: (1, 1) scalar broadcast for top BC (avoids scalar indexing on bc_profile[end]).
 """
 function apply_bcs!(phi::CuArray{Float64,3},
-                    bc_profile::CuArray{Float64,1},
+                    bc3::CuArray{Float64,3},
+                    bc_top::CuArray{Float64,2},
                     u::CuArray{Float64,3},
                     v::CuArray{Float64,3},
-                    w::CuArray{Float64,3};
-                    lapse_rate::Float64=0.0,
-                    terrain_mask::Union{Nothing,CuArray{Bool,3}}=nothing)
+                    w::CuArray{Float64,3},
+                    dz0::Float64,
+                    lapse_rate::Float64,
+                    terrain_mask::Union{Nothing,CuArray{Bool,3}})
     nz, ny, nx = size(phi)
-    bc3 = reshape(bc_profile, nz, 1, 1)  # (nz, 1, 1) for broadcasting
 
     # West face (x=1): inflow if u > 0
     @views @. phi[:,:,1] = ifelse(u[:,:,1] > 0, bc3[:,:,1], phi[:,:,2])
@@ -206,24 +186,28 @@ function apply_bcs!(phi::CuArray{Float64,3},
     @views @. phi[:,end,:] = ifelse(v[:,end,:] < 0, bc3[:,1,:], phi[:,end-1,:])
 
     # Top: Dirichlet for subsidence/calm, Neumann for updraft
-    @views @. phi[end,:,:] = ifelse(w[end,:,:] > 0.01,
-                                     phi[end-1,:,:],  # updraft → zero-gradient
-                                     bc_profile[end])  # subsidence → Dirichlet
+    # bc_top is (1,1) CuArray to avoid scalar indexing
+    @views @. phi[end:end,:,:] = ifelse(w[end:end,:,:] > 0.01,
+                                         phi[end-1:end-1,:,:],
+                                         bc_top)
 
     # Bottom: zero-gradient or lapse rate
     if abs(lapse_rate) < 1e-10
-        @views @. phi[1,:,:] = phi[2,:,:]
+        @views @. phi[1:1,:,:] = phi[2:2,:,:]
     else
-        dz0 = HF_Z_LEVELS[2] - HF_Z_LEVELS[1]
-        @views @. phi[1,:,:] = phi[2,:,:] + lapse_rate * dz0
+        @views @. phi[1:1,:,:] = phi[2:2,:,:] + lapse_rate * dz0
     end
 
-    # Terrain mask: copy from cell above
+    # Terrain mask: vectorized — for each masked cell, copy from cell above.
+    # We process bottom-up so each level sees the updated level above.
+    # Use shifted mask+phi pairs (no scalar indexing, each iteration is a broadcast).
     if terrain_mask !== nothing
         for k in 1:nz-1
-            @views @. phi[k,:,:] = ifelse(terrain_mask[k,:,:],
-                                           phi[min(k+1,nz),:,:],
-                                           phi[k,:,:])
+            # This is a broadcast over (ny, nx) — no scalar indexing
+            kp = min(k + 1, nz)
+            @views @. phi[k:k,:,:] = ifelse(terrain_mask[k:k,:,:],
+                                             phi[kp:kp,:,:],
+                                             phi[k:k,:,:])
         end
     end
 
@@ -237,16 +221,16 @@ end
     build_terrain_mask(dem, z_levels) -> CuArray{Bool,3}
 
 Build 3D terrain mask: true where z_level < DEM elevation.
-dem: (ny, nx) CPU array in meters ASL.
+dem: (ny, nx) CPU array in meters ASL. Built on CPU, transferred to GPU.
 """
 function build_terrain_mask(dem::AbstractMatrix{<:Real},
                             z_levels::AbstractVector{Float64})
     ny, nx = size(dem)
     nz = length(z_levels)
-    mask = falses(nz, ny, nx)
-    for k in 1:nz
-        @views mask[k,:,:] .= z_levels[k] .< dem
-    end
+    # Vectorized on CPU: reshape z to (nz,1,1), broadcast against dem (1,ny,nx)
+    z3 = reshape(z_levels, nz, 1, 1)
+    dem3 = reshape(Float64.(dem), 1, ny, nx)
+    mask = z3 .< dem3  # (nz, ny, nx) BitArray
     return CuArray(mask)
 end
 
@@ -279,11 +263,19 @@ function solve_transport(u::CuArray{Float64,3},
     nz, ny, nx = size(u)
     dz_gpu = CuArray(dz)
 
+    # Precompute BC arrays to avoid scalar indexing in the loop
+    bc3 = reshape(bc_profile, nz, 1, 1)  # (nz, 1, 1) for broadcasting
+    bc_top = reshape(bc_profile[end:end], 1, 1)  # (1, 1) — no scalar index
+    dz0 = HF_Z_LEVELS[2] - HF_Z_LEVELS[1]  # CPU scalar, fine
+
     # Initialize: broadcast profile everywhere
     phi = repeat(reshape(bc_profile, nz, 1, 1), 1, ny, nx)
 
-    # Stable pseudo-timestep
-    u_max = max(maximum(abs.(u)), maximum(abs.(v)), maximum(abs.(w)), 0.01)
+    # Stable pseudo-timestep (reduce on GPU, collect to CPU)
+    u_max = max(CUDA.@allowscalar(maximum(abs.(u))),
+                CUDA.@allowscalar(maximum(abs.(v))),
+                CUDA.@allowscalar(maximum(abs.(w))),
+                0.01)
     cfl_adv = min(dx, dy, minimum(dz)) / u_max
     cfl_diff = min(dx^2, dy^2, minimum(dz)^2) / (2 * kappa + 1e-30)
     dt = 0.25 * min(cfl_adv, cfl_diff)
@@ -304,11 +296,10 @@ function solve_transport(u::CuArray{Float64,3},
         phi_new = phi .+ dt .* rhs
 
         # BCs
-        apply_bcs!(phi_new, bc_profile, u, v, w;
-                   lapse_rate=lapse_rate, terrain_mask=terrain_mask)
+        apply_bcs!(phi_new, bc3, bc_top, u, v, w, dz0, lapse_rate, terrain_mask)
 
-        # Convergence check
-        change = maximum(abs.(phi_new .- phi))
+        # Convergence check — CUDA.@allowscalar for the single reduction
+        change = CUDA.@allowscalar maximum(abs.(phi_new .- phi))
         push!(history, change)
         phi = phi_new
 

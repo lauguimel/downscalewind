@@ -20,7 +20,7 @@ nvidia-smi || { echo "ERROR: GPU not available"; exit 1; }
 
 # ── Python: Conda + PyTorch CUDA ─────────────────────────────────────────────
 
-module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+module load Miniconda3 || module load Anaconda3
 eval "$(conda shell.bash hook)"
 
 ENV_NAME="fuxicfd"

@@ -46,7 +46,7 @@ echo "=== Batch Transport Complete ==="
 echo "Summary: $DATA_DIR/transport_summary.json"
 
 # Quick stats via Python
-module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+module load Miniconda3 || module load Anaconda3
 eval "$(conda shell.bash hook)"
 conda activate fuxicfd
 
