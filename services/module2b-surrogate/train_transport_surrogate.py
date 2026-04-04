@@ -34,6 +34,130 @@ from src.model_fno3d import FNO3D
 
 logger = logging.getLogger(__name__)
 
+# FuXi-CFD grid constants
+HF_Z_LEVELS = np.array([
+    5, 10, 15, 20, 25, 30, 35, 40, 45, 50,
+    55, 60, 65, 70, 75, 80, 85, 90, 95, 100,
+    106.5, 114.95, 125.94, 140.22, 158.78, 182.91, 214.29,
+], dtype=np.float64)
+DX = 30.0  # meters
+
+
+# ── Physics losses (PINO) ────────────────────────────────────────────────────
+
+def transport_residual_loss(
+    pred: torch.Tensor,
+    inp: torch.Tensor,
+    kappa: float = 5.0,
+) -> torch.Tensor:
+    """PDE residual loss: U·∇φ - κ∇²φ ≈ 0 for passive scalar transport.
+
+    pred: (B, 2, nz, ny, nx) — normalized T/T_SCALE, q/Q_SCALE
+    inp:  (B, 8, nz, ny, nx) — channels [u/15, v/15, w/5, k/5, dem/500, z0, T_prof/300, q_prof/0.01]
+
+    Computes the steady-state residual R = U·∇φ - κ∇²φ using central differences.
+    Penalizes R² averaged over interior cells.
+    """
+    from src.dataset_fuxicfd import WIND_UV_SCALE, WIND_W_SCALE, T_SCALE, Q_SCALE
+
+    # Denormalize velocity (from input channels 0-2)
+    u = inp[:, 0] * WIND_UV_SCALE   # (B, nz, ny, nx) m/s
+    v = inp[:, 1] * WIND_UV_SCALE
+    w = inp[:, 2] * WIND_W_SCALE
+
+    # Denormalize predicted scalar fields
+    scales = [T_SCALE, Q_SCALE]
+    dx = DX
+    dy = DX
+    z_levels = torch.from_numpy(HF_Z_LEVELS).to(pred.device, dtype=pred.dtype)
+
+    total_loss = torch.tensor(0.0, device=pred.device)
+
+    for ch, scale in enumerate(scales):
+        phi = pred[:, ch] * scale  # (B, nz, ny, nx)
+
+        # ∂φ/∂x: central differences along nx (dim=3)
+        dphi_dx = (phi[:, :, :, 2:] - phi[:, :, :, :-2]) / (2.0 * dx)
+        # ∂φ/∂y: central differences along ny (dim=2)
+        dphi_dy = (phi[:, :, 2:, :] - phi[:, :, :-2, :]) / (2.0 * dy)
+        # ∂φ/∂z: central differences along nz (dim=1), non-uniform
+        dz = (z_levels[2:] - z_levels[:-2])  # (nz-2,)
+        dphi_dz = (phi[:, 2:, :, :] - phi[:, :-2, :, :]) / dz[None, :, None, None]
+
+        # ∂²φ/∂x²
+        d2phi_dx2 = (phi[:, :, :, 2:] - 2 * phi[:, :, :, 1:-1] + phi[:, :, :, :-2]) / dx**2
+        # ∂²φ/∂y²
+        d2phi_dy2 = (phi[:, :, 2:, :] - 2 * phi[:, :, 1:-1, :] + phi[:, :, :-2, :]) / dy**2
+        # ∂²φ/∂z²
+        dz_sq = ((z_levels[2:] - z_levels[1:-1]) * (z_levels[1:-1] - z_levels[:-2]))
+        d2phi_dz2 = (phi[:, 2:, :, :] - 2 * phi[:, 1:-1, :, :] + phi[:, :-2, :, :]) / dz_sq[None, :, None, None]
+
+        # Trim all to common interior (nz-2, ny-2, nx-2)
+        nz = min(dphi_dx.shape[1], dphi_dy.shape[1], dphi_dz.shape[1])
+        ny = min(dphi_dx.shape[2], dphi_dy.shape[2], dphi_dz.shape[2])
+        nx = min(dphi_dx.shape[3], dphi_dy.shape[3], dphi_dz.shape[3])
+
+        # Advection: U·∇φ
+        advection = (
+            u[:, 1:nz+1, 1:ny+1, 1:nx+1] * dphi_dx[:, :nz, :ny, :nx]
+            + v[:, 1:nz+1, 1:ny+1, 1:nx+1] * dphi_dy[:, :nz, :ny, :nx]
+            + w[:, 1:nz+1, 1:ny+1, 1:nx+1] * dphi_dz[:, :nz, :ny, :nx]
+        )
+
+        # Diffusion: κ∇²φ
+        diffusion = kappa * (
+            d2phi_dx2[:, 1:nz+1, 1:ny+1, :][:, :, :, :nx]
+            + d2phi_dy2[:, 1:nz+1, :, 1:nx+1][:, :, :ny, :]
+            + d2phi_dz2[:, :, 1:ny+1, 1:nx+1][:, :nz, :, :][:, :, :ny, :nx]
+        )
+
+        # Residual: R = advection - diffusion ≈ 0
+        residual = advection - diffusion
+        total_loss = total_loss + residual.pow(2).mean()
+
+    return total_loss
+
+
+def boundary_consistency_loss(
+    pred: torch.Tensor,
+    inp: torch.Tensor,
+) -> torch.Tensor:
+    """Penalize predicted T/q deviating from BC profiles at inflow boundaries.
+
+    At inflow faces, the scalar should equal the BC profile value.
+    pred: (B, 2, nz, ny, nx)
+    inp:  (B, 8, nz, ny, nx) — ch 0-1: u/15, v/15; ch 6-7: T_prof/300, q_prof/0.01
+    """
+    from src.dataset_fuxicfd import WIND_UV_SCALE
+
+    u = inp[:, 0] * WIND_UV_SCALE
+    v = inp[:, 1] * WIND_UV_SCALE
+
+    loss = torch.tensor(0.0, device=pred.device)
+
+    for ch, prof_ch in [(0, 6), (1, 7)]:  # T→ch6, q→ch7
+        phi = pred[:, ch]         # (B, nz, ny, nx) normalized
+        prof = inp[:, prof_ch]    # (B, nz, ny, nx) same normalization
+
+        # West (x=0): inflow where u > 0
+        mask_w = (u[:, :, :, 0] > 0).float()
+        loss = loss + (mask_w * (phi[:, :, :, 0] - prof[:, :, :, 0]).pow(2)).mean()
+
+        # East (x=-1): inflow where u < 0
+        mask_e = (u[:, :, :, -1] < 0).float()
+        loss = loss + (mask_e * (phi[:, :, :, -1] - prof[:, :, :, -1]).pow(2)).mean()
+
+        # South (y=0): inflow where v > 0
+        mask_s = (v[:, :, 0, :] > 0).float()
+        loss = loss + (mask_s * (phi[:, :, 0, :] - prof[:, :, 0, :]).pow(2)).mean()
+
+        # North (y=-1): inflow where v < 0
+        mask_n = (v[:, :, -1, :] < 0).float()
+        loss = loss + (mask_n * (phi[:, :, -1, :] - prof[:, :, -1, :]).pow(2)).mean()
+
+    return loss
+
+
 # ── Device selection ─────────────────────────────────────────────────────────
 
 def get_device() -> torch.device:
@@ -68,7 +192,7 @@ def train(args):
     device = get_device()
     logger.info(f"Device: {device}")
 
-    out_dir = Path(args.output) / f"{args.model}"
+    out_dir = Path(args.output) / args.run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Manifest
@@ -96,10 +220,11 @@ def train(args):
     # Model
     # UNet3D expects (B, C, D, H, W) — here D=nz=27, H=ny=300, W=nx=300
     if args.model == "unet":
-        model = UNet3D(in_channels=8, out_channels=2, base_features=32)
+        model = UNet3D(in_channels=8, out_channels=2,
+                       base_features=args.base_features)
     elif args.model == "fno":
-        model = FNO3D(in_channels=8, out_channels=2, width=32,
-                      modes=(8, 16, 16), n_layers=4)
+        model = FNO3D(in_channels=8, out_channels=2, width=args.width,
+                      modes=tuple(args.modes), n_layers=args.n_layers)
     else:
         raise ValueError(f"Unknown model: {args.model}")
 
@@ -117,8 +242,17 @@ def train(args):
     from src.dataset_fuxicfd import T_SCALE, Q_SCALE
     phys_scales = [T_SCALE, Q_SCALE]
 
+    # Physics loss config
+    use_physics = args.lambda_pde > 0 or args.lambda_bc > 0
+    if use_physics:
+        logger.info(f"PINO mode: lambda_pde={args.lambda_pde}, lambda_bc={args.lambda_bc}")
+
     best_val_loss = float("inf")
     history = {"train_loss": [], "val_loss": [], "val_rmse_T": [], "val_rmse_q": []}
+    if use_physics:
+        history["train_loss_data"] = []
+        history["train_loss_pde"] = []
+        history["train_loss_bc"] = []
 
     for epoch in range(1, args.epochs + 1):
         t0 = time.time()
@@ -126,13 +260,29 @@ def train(args):
         # ── Train ────────────────────────────────────────────────────────
         model.train()
         train_losses = []
+        train_data_losses = []
+        train_pde_losses = []
+        train_bc_losses = []
 
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
 
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                 pred = model(x)
-                loss = criterion(pred, y)
+                loss_data = criterion(pred, y)
+                loss = loss_data
+
+                if args.lambda_pde > 0:
+                    loss_pde = transport_residual_loss(pred.float(), x.float())
+                    loss = loss + args.lambda_pde * loss_pde
+                else:
+                    loss_pde = torch.tensor(0.0)
+
+                if args.lambda_bc > 0:
+                    loss_bc = boundary_consistency_loss(pred.float(), x.float())
+                    loss = loss + args.lambda_bc * loss_bc
+                else:
+                    loss_bc = torch.tensor(0.0)
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -142,9 +292,17 @@ def train(args):
             scaler.update()
 
             train_losses.append(loss.item())
+            if use_physics:
+                train_data_losses.append(loss_data.item())
+                train_pde_losses.append(loss_pde.item())
+                train_bc_losses.append(loss_bc.item())
 
         scheduler.step()
         avg_train = np.mean(train_losses)
+        if use_physics:
+            history["train_loss_data"].append(float(np.mean(train_data_losses)))
+            history["train_loss_pde"].append(float(np.mean(train_pde_losses)))
+            history["train_loss_bc"].append(float(np.mean(train_bc_losses)))
 
         # ── Validate ─────────────────────────────────────────────────────
         model.eval()
@@ -229,12 +387,37 @@ def main():
                         help="Output directory for checkpoints")
     parser.add_argument("--model", choices=["unet", "fno"], default="unet",
                         help="Model architecture (default: unet)")
+    parser.add_argument("--run-name", default=None,
+                        help="Run name for output subdir (default: auto from model+params)")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num-workers", type=int, default=4)
+    # UNet3D hyperparams
+    parser.add_argument("--base-features", type=int, default=32,
+                        help="UNet3D base channel width (default: 32)")
+    # FNO3D hyperparams
+    parser.add_argument("--width", type=int, default=32,
+                        help="FNO hidden channel dimension (default: 32)")
+    parser.add_argument("--modes", type=int, nargs=3, default=[8, 16, 16],
+                        help="FNO Fourier modes (nz ny nx, default: 8 16 16)")
+    parser.add_argument("--n-layers", type=int, default=4,
+                        help="FNO number of spectral layers (default: 4)")
+    # Physics-informed (PINO) losses
+    parser.add_argument("--lambda-pde", type=float, default=0.0,
+                        help="Weight for PDE residual loss (0 = pure data, >0 = PINO)")
+    parser.add_argument("--lambda-bc", type=float, default=0.0,
+                        help="Weight for boundary consistency loss")
 
     args = parser.parse_args()
+    if args.run_name is None:
+        physics_tag = ""
+        if args.lambda_pde > 0 or args.lambda_bc > 0:
+            physics_tag = "_pino"
+        if args.model == "unet":
+            args.run_name = f"unet_f{args.base_features}_lr{args.lr}{physics_tag}"
+        else:
+            args.run_name = f"fno_w{args.width}_m{'x'.join(map(str,args.modes))}_l{args.n_layers}_lr{args.lr}{physics_tag}"
     train(args)
 
 
