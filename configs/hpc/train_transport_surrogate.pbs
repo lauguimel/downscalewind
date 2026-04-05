@@ -19,21 +19,25 @@ DATA_DIR="/scratch/maitreje/fuxicfd/extracted"
 OUTPUT_DIR="/scratch/maitreje/fuxicfd/models"
 SCRIPT_DIR="$HOME/dsw/services/module2b-surrogate"
 
-# Default model: unet (override with -v MODEL=fno)
+# Override with -v MODEL=fno,RUN_NAME=fno_w32,EXTRA_ARGS="--width 32 --n-layers 4"
 MODEL="${MODEL:-unet}"
+RUN_NAME="${RUN_NAME:-$MODEL}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
 EPOCHS="${EPOCHS:-100}"
 LR="${LR:-1e-3}"
+EXTRA_ARGS="${EXTRA_ARGS:-}"
 
 # ── Pre-flight GPU check ────────────────────────────────────────────────────
 nvidia-smi || { echo "ERROR: GPU not available"; exit 1; }
 
 echo "=== Transport Surrogate Training ==="
 echo "Model: $MODEL"
+echo "Run name: $RUN_NAME"
 echo "Data: $DATA_DIR"
 echo "Output: $OUTPUT_DIR"
 echo "Batch size: $BATCH_SIZE"
 echo "Epochs: $EPOCHS"
+echo "Extra args: $EXTRA_ARGS"
 echo "GPU: $CUDA_VISIBLE_DEVICES"
 
 # Activate conda env
@@ -50,12 +54,14 @@ python train_transport_surrogate.py \
     --data-dir "$DATA_DIR" \
     --output "$OUTPUT_DIR" \
     --model "$MODEL" \
+    --run-name "$RUN_NAME" \
     --epochs "$EPOCHS" \
     --batch-size "$BATCH_SIZE" \
     --lr "$LR" \
-    --num-workers 4
+    --num-workers 4 \
+    $EXTRA_ARGS
 
 echo ""
 echo "=== Training Complete ==="
-echo "Model saved to: $OUTPUT_DIR/$MODEL/"
-ls -lh "$OUTPUT_DIR/$MODEL/"
+echo "Model saved to: $OUTPUT_DIR/$RUN_NAME/"
+ls -lh "$OUTPUT_DIR/$RUN_NAME/"
