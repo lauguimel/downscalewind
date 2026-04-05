@@ -58,23 +58,31 @@ def transport_residual_loss(
     Computes the steady-state residual R = U·∇φ - κ∇²φ using central differences.
     Penalizes R² averaged over interior cells.
     """
-    from src.dataset_fuxicfd import WIND_UV_SCALE, WIND_W_SCALE, T_SCALE, Q_SCALE
+    from src.dataset_fuxicfd import (WIND_UV_SCALE, WIND_W_SCALE,
+        T_RESIDUAL_SCALE, Q_RESIDUAL_SCALE, T_PROFILE_SCALE, Q_PROFILE_SCALE)
 
     # Denormalize velocity (from input channels 0-2)
     u = inp[:, 0] * WIND_UV_SCALE   # (B, nz, ny, nx) m/s
     v = inp[:, 1] * WIND_UV_SCALE
     w = inp[:, 2] * WIND_W_SCALE
 
-    # Denormalize predicted scalar fields
-    scales = [T_SCALE, Q_SCALE]
+    # Reconstruct absolute fields: phi = profile + residual * scale
+    # Input channels 6,7 contain profile/T_PROFILE_SCALE, profile/Q_PROFILE_SCALE
+    # pred channels contain (phi - profile) / RESIDUAL_SCALE
+    scales = [T_RESIDUAL_SCALE, Q_RESIDUAL_SCALE]
+    profile_scales = [T_PROFILE_SCALE, Q_PROFILE_SCALE]
+    profile_channels = [6, 7]
     dx = DX
     dy = DX
     z_levels = torch.from_numpy(HF_Z_LEVELS).to(pred.device, dtype=pred.dtype)
 
     total_loss = torch.tensor(0.0, device=pred.device)
 
-    for ch, scale in enumerate(scales):
-        phi = pred[:, ch] * scale  # (B, nz, ny, nx)
+    for ch, (res_scale, prof_scale, prof_ch) in enumerate(
+            zip(scales, profile_scales, profile_channels)):
+        # Reconstruct absolute scalar: phi = profile + predicted_residual * res_scale
+        profile = inp[:, prof_ch] * prof_scale  # (B, nz, ny, nx) in physical units
+        phi = profile + pred[:, ch] * res_scale  # (B, nz, ny, nx)
 
         # ∂φ/∂x: central differences along nx (dim=3)
         dphi_dx = (phi[:, :, :, 2:] - phi[:, :, :, :-2]) / (2.0 * dx)
@@ -122,11 +130,11 @@ def boundary_consistency_loss(
     pred: torch.Tensor,
     inp: torch.Tensor,
 ) -> torch.Tensor:
-    """Penalize predicted T/q deviating from BC profiles at inflow boundaries.
+    """Penalize predicted residuals being non-zero at inflow boundaries.
 
-    At inflow faces, the scalar should equal the BC profile value.
-    pred: (B, 2, nz, ny, nx)
-    inp:  (B, 8, nz, ny, nx) — ch 0-1: u/15, v/15; ch 6-7: T_prof/300, q_prof/0.01
+    At inflow faces, T = T_profile (residual = 0) and q = q_profile (residual = 0).
+    pred: (B, 2, nz, ny, nx) — predicted residuals (should be ~0 at inflow)
+    inp:  (B, 8, nz, ny, nx) — ch 0-1: u/15, v/15
     """
     from src.dataset_fuxicfd import WIND_UV_SCALE
 
@@ -135,25 +143,24 @@ def boundary_consistency_loss(
 
     loss = torch.tensor(0.0, device=pred.device)
 
-    for ch, prof_ch in [(0, 6), (1, 7)]:  # T→ch6, q→ch7
-        phi = pred[:, ch]         # (B, nz, ny, nx) normalized
-        prof = inp[:, prof_ch]    # (B, nz, ny, nx) same normalization
+    for ch in range(2):  # T=0, q=1
+        phi = pred[:, ch]  # (B, nz, ny, nx) — residual, should be 0 at inflow
 
-        # West (x=0): inflow where u > 0
+        # West (x=0): inflow where u > 0 → residual should be 0
         mask_w = (u[:, :, :, 0] > 0).float()
-        loss = loss + (mask_w * (phi[:, :, :, 0] - prof[:, :, :, 0]).pow(2)).mean()
+        loss = loss + (mask_w * phi[:, :, :, 0].pow(2)).mean()
 
         # East (x=-1): inflow where u < 0
         mask_e = (u[:, :, :, -1] < 0).float()
-        loss = loss + (mask_e * (phi[:, :, :, -1] - prof[:, :, :, -1]).pow(2)).mean()
+        loss = loss + (mask_e * phi[:, :, :, -1].pow(2)).mean()
 
         # South (y=0): inflow where v > 0
         mask_s = (v[:, :, 0, :] > 0).float()
-        loss = loss + (mask_s * (phi[:, :, 0, :] - prof[:, :, 0, :]).pow(2)).mean()
+        loss = loss + (mask_s * phi[:, :, 0, :].pow(2)).mean()
 
         # North (y=-1): inflow where v < 0
         mask_n = (v[:, :, -1, :] < 0).float()
-        loss = loss + (mask_n * (phi[:, :, -1, :] - prof[:, :, -1, :]).pow(2)).mean()
+        loss = loss + (mask_n * phi[:, :, -1, :].pow(2)).mean()
 
     return loss
 

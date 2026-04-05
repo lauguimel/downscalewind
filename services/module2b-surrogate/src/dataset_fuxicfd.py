@@ -46,8 +46,15 @@ WIND_W_SCALE = 5.0
 TKE_SCALE = 5.0
 DEM_SCALE = 500.0
 Z0_SCALE = 1.0
-T_SCALE = 300.0
-Q_SCALE = 0.01
+# Target: residuals (T - T_profile), (q - q_profile) normalized by perturbation scale
+T_RESIDUAL_SCALE = 5.0   # terrain-induced T perturbation ~1-5 K
+Q_RESIDUAL_SCALE = 0.001  # terrain-induced q perturbation ~0.001 kg/kg
+# Input profiles: normalized by absolute scale for the model to know the BC values
+T_PROFILE_SCALE = 300.0
+Q_PROFILE_SCALE = 0.01
+# Keep backward-compat aliases for RMSE computation
+T_SCALE = T_RESIDUAL_SCALE
+Q_SCALE = Q_RESIDUAL_SCALE
 
 
 class FuXiCFDTransportDataset(Dataset):
@@ -103,8 +110,12 @@ class FuXiCFDTransportDataset(Dataset):
                 self.cases = all_cases[n_train + n_val:]
 
         # Precompute BC profiles as (nz, 1, 1) for broadcasting
-        self._T_prof = ISA_T_PROFILE[:, None, None] / T_SCALE   # (27, 1, 1)
-        self._q_prof = EXP_Q_PROFILE[:, None, None] / Q_SCALE   # (27, 1, 1)
+        # Input channels: profiles normalized by absolute scale
+        self._T_prof_input = ISA_T_PROFILE[:, None, None] / T_PROFILE_SCALE  # (27, 1, 1)
+        self._q_prof_input = EXP_Q_PROFILE[:, None, None] / Q_PROFILE_SCALE  # (27, 1, 1)
+        # Target: raw profiles for residual computation
+        self._T_prof_raw = ISA_T_PROFILE[:, None, None]  # (27, 1, 1) in K
+        self._q_prof_raw = EXP_Q_PROFILE[:, None, None]  # (27, 1, 1) in kg/kg
 
     def __len__(self) -> int:
         return len(self.cases)
@@ -134,8 +145,8 @@ class FuXiCFDTransportDataset(Dataset):
         # Build input tensor (8, nz, ny, nx)
         dem_3d = np.broadcast_to(dem[None, :, :], (nz, ny, nx))
         z0_3d = np.broadcast_to(roughness[None, :, :], (nz, ny, nx))
-        T_prof_3d = np.broadcast_to(self._T_prof, (nz, ny, nx))
-        q_prof_3d = np.broadcast_to(self._q_prof, (nz, ny, nx))
+        T_prof_3d = np.broadcast_to(self._T_prof_input, (nz, ny, nx))
+        q_prof_3d = np.broadcast_to(self._q_prof_input, (nz, ny, nx))
 
         x = np.stack([
             u / WIND_UV_SCALE,
@@ -144,13 +155,16 @@ class FuXiCFDTransportDataset(Dataset):
             k / TKE_SCALE,
             dem_3d / DEM_SCALE,
             z0_3d / Z0_SCALE,
-            T_prof_3d,   # already normalized
-            q_prof_3d,   # already normalized
+            T_prof_3d,   # profile / 300
+            q_prof_3d,   # profile / 0.01
         ], axis=0).copy()  # (8, nz, ny, nx)
 
+        # Target: RESIDUALS (T - T_profile) / scale, not absolute T
+        T_prof_raw = np.broadcast_to(self._T_prof_raw, (nz, ny, nx))
+        q_prof_raw = np.broadcast_to(self._q_prof_raw, (nz, ny, nx))
         y = np.stack([
-            T / T_SCALE,
-            q / Q_SCALE,
+            (T - T_prof_raw) / T_RESIDUAL_SCALE,
+            (q - q_prof_raw) / Q_RESIDUAL_SCALE,
         ], axis=0).copy()  # (2, nz, ny, nx)
 
         # Augmentation: random rotation + flip
