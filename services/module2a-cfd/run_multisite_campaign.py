@@ -40,6 +40,30 @@ TBM_IMAGE = "terrainblockmesher:of24"
 PYTHON = sys.executable
 DOCKER_USER = f"{os.getuid()}:{os.getgid()}"
 
+# Container runtime: set to "apptainer" on HPC clusters (Aqua).
+# When using Apptainer, OF_IMAGE and TBM_IMAGE should point to .sif files.
+CONTAINER_RUNTIME = os.environ.get("CONTAINER_RUNTIME", "docker")
+
+
+def _container_cmd(image: str, mount_dir: Path, cmd: list[str],
+                   workdir: str = "/home/ofuser/run") -> list[str]:
+    """Build a container exec command for Docker or Apptainer."""
+    d = str(mount_dir.resolve())
+    if CONTAINER_RUNTIME == "apptainer":
+        return [
+            "apptainer", "exec", "--cleanenv",
+            "--bind", f"{d}:{workdir}",
+            "--pwd", workdir,
+            image,
+        ] + cmd
+    else:
+        return [
+            "docker", "run", "--rm",
+            "-v", f"{d}:{workdir}",
+            "-w", workdir,
+            image,
+        ] + cmd
+
 # TBM mesh parameters (same as Perdigão PoC)
 # Must match PoC config (poc_tbm_25ts.yaml) → ~165k cells
 DEFAULT_MESH = {
@@ -277,15 +301,12 @@ def run_tbm_mesh(mesh_dir: Path, mesh_cfg: dict) -> bool:
         return True
 
     t0 = time.time()
-    cmd = [
-        "docker", "run", "--rm",
-        "-v", f"{mesh_dir.resolve()}:/home/ofuser/run",
-        "-w", "/home/ofuser/run",
-        TBM_IMAGE,
-        "bash", "-c",
-        f"cd /home/ofuser/run && terrainBlockMesher; rc=$?; "
-        f"chown -R {DOCKER_USER} /home/ofuser/run; exit $rc",
-    ]
+    chown_suffix = f"; chown -R {DOCKER_USER} /home/ofuser/run" if CONTAINER_RUNTIME == "docker" else ""
+    cmd = _container_cmd(
+        TBM_IMAGE, mesh_dir,
+        ["bash", "-c",
+         f"cd /home/ofuser/run && terrainBlockMesher; rc=$?{chown_suffix}; exit $rc"],
+    )
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
     if result.stdout:
@@ -319,15 +340,12 @@ def run_write_cell_centres(mesh_dir: Path) -> bool:
         "boundaryField { \".*\" { type zeroGradient; } }\n"
     )
 
-    cmd = [
-        "docker", "run", "--rm",
-        "-v", f"{mesh_dir.resolve()}:/home/ofuser/run",
-        "-w", "/home/ofuser/run",
-        OF_IMAGE,
-        "bash", "-c",
-        f"cd /home/ofuser/run && postProcess -func writeCellCentres -time 0; "
-        f"chown -R {DOCKER_USER} /home/ofuser/run/0",
-    ]
+    chown_suffix = f"; chown -R {DOCKER_USER} /home/ofuser/run/0" if CONTAINER_RUNTIME == "docker" else ""
+    cmd = _container_cmd(
+        OF_IMAGE, mesh_dir,
+        ["bash", "-c",
+         f"cd /home/ofuser/run && postProcess -func writeCellCentres -time 0{chown_suffix}"],
+    )
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if result.returncode != 0 or not cx.exists():
         log.error("  writeCellCentres failed: %s", (result.stderr or "")[-200:])
@@ -476,13 +494,10 @@ def solve_case(case_dir: Path, n_iter: int, n_cores: int) -> bool:
         txt = re.sub(r'numberOfSubdomains\s+\d+', f'numberOfSubdomains  {n_cores}', txt)
         dpd.write_text(txt)
 
-    # Helper: run OF command in Docker (direct exec, no bash -c)
+    # Helper: run OF command in container (Docker or Apptainer)
     def _docker_of(cmd: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
         return subprocess.run(
-            ["docker", "run", "--rm",
-             "-v", f"{case_dir.resolve()}:/home/ofuser/run",
-             "-w", "/home/ofuser/run",
-             OF_IMAGE] + cmd,
+            _container_cmd(OF_IMAGE, case_dir, cmd),
             capture_output=True, text=True, timeout=timeout,
         )
 
@@ -518,8 +533,9 @@ def solve_case(case_dir: Path, n_iter: int, n_cores: int) -> bool:
         timeout=3600)
     (case_dir / "log.simpleFoam").write_text(result.stdout + result.stderr)
 
-    # chown all files back to user
-    _docker_of(["chown", "-R", DOCKER_USER, "/home/ofuser/run"], timeout=60)
+    # chown all files back to user (Docker only — Apptainer preserves UID)
+    if CONTAINER_RUNTIME == "docker":
+        _docker_of(["chown", "-R", DOCKER_USER, "/home/ofuser/run"], timeout=60)
 
     wall = time.time() - t0
 
@@ -788,7 +804,24 @@ def main():
                         help="Resume from this site_id (skip earlier sites)")
     parser.add_argument("--dry-run", action="store_true",
                         help="List sites without processing")
+    parser.add_argument("--runtime", choices=["docker", "apptainer"],
+                        default=None,
+                        help="Container runtime (default: from CONTAINER_RUNTIME env var or 'docker'). "
+                             "Use 'apptainer' on HPC.")
+    parser.add_argument("--of-image", default=None,
+                        help=f"OpenFOAM container image (default: {OF_IMAGE})")
+    parser.add_argument("--tbm-image", default=None,
+                        help=f"TBM container image (default: {TBM_IMAGE})")
     args = parser.parse_args()
+
+    # Apply runtime overrides to module-level variables
+    _mod = sys.modules[__name__]
+    if args.runtime:
+        _mod.CONTAINER_RUNTIME = args.runtime
+    if args.of_image:
+        _mod.OF_IMAGE = args.of_image
+    if args.tbm_image:
+        _mod.TBM_IMAGE = args.tbm_image
 
     # Load run matrix
     run_matrix = load_run_matrix(args.run_matrix)

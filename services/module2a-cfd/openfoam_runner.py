@@ -73,12 +73,14 @@ class OpenFOAMRunner:
         platform: str = "linux/amd64",
         image: str = OPENFOAM_IMAGE,
         timeout: int = 7200,  # 2 h per step
+        runtime: str = "docker",  # "docker" or "apptainer"
     ) -> None:
         self.case_dir = Path(case_dir).resolve()
         self.n_cores = n_cores
         self.platform = platform
         self.image = image
         self.timeout = timeout
+        self.runtime = runtime
 
         if not self.case_dir.is_dir():
             raise FileNotFoundError(f"Case directory not found: {self.case_dir}")
@@ -88,18 +90,35 @@ class OpenFOAMRunner:
     # ------------------------------------------------------------------
 
     def _docker_run(self, bash_cmd: str) -> subprocess.CompletedProcess:
-        """Run *bash_cmd* inside the container; stream output to logger."""
+        """Run *bash_cmd* inside the container; stream output to logger.
+
+        Supports both Docker and Apptainer runtimes (set via self.runtime).
+        """
         full_cmd = f"set -o pipefail; {OPENFOAM_INIT} && {bash_cmd}"
-        docker_argv = [
-            "docker", "run", "--rm",
-            "--platform", self.platform,
-            "--entrypoint", "/bin/bash",  # override container ENTRYPOINT
-            "-v", f"{self.case_dir}:/case",
-            "-w", "/case",
-            self.image,
-            "-c", full_cmd,
-        ]
-        logger.debug("docker cmd: %s", " ".join(docker_argv))
+
+        if self.runtime == "apptainer":
+            # Apptainer (Singularity successor) — used on HPC clusters.
+            # --bind mounts the case dir, --pwd sets working directory,
+            # --cleanenv avoids leaking host env into container.
+            docker_argv = [
+                "apptainer", "exec",
+                "--cleanenv",
+                "--bind", f"{self.case_dir}:/case",
+                "--pwd", "/case",
+                self.image,  # .sif file path for Apptainer
+                "/bin/bash", "-c", full_cmd,
+            ]
+        else:
+            docker_argv = [
+                "docker", "run", "--rm",
+                "--platform", self.platform,
+                "--entrypoint", "/bin/bash",  # override container ENTRYPOINT
+                "-v", f"{self.case_dir}:/case",
+                "-w", "/case",
+                self.image,
+                "-c", full_cmd,
+            ]
+        logger.debug("%s cmd: %s", self.runtime, " ".join(docker_argv))
 
         result = subprocess.run(
             docker_argv,
