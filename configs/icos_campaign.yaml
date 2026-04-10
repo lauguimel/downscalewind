@@ -1,0 +1,104 @@
+# ICOS tower validation campaign — simpleFoam (neutral) CFD runs
+#
+# Purpose: generate a small CFD database co-located with ICOS ecosystem and
+# atmosphere stations, for 4-way FWI validation
+# (obs / ERA5 / CFD + precip-DS / surrogate + precip-DS).
+#
+# Design rationale
+#   - 20 sites (see services/data-ingestion/ingest_icos.py ICOS_STATIONS)
+#   - 30 timestamps per site sampled across the observational period,
+#     stratified on wind speed bins (Beaufort) and wind direction octants
+#     to match the FuXi-CFD Fig. 5 validation protocol (Lin et al. 2026).
+#   - simpleFoam (neutral, k-epsilon) — same solver as campaign_9k, no BBSF.
+#   - 4 x 4 km domain, cfMesh cartesianMesh (octree), target 165k cells
+#     (1 min / 500 iter on UGA 24 cores → ~90 CPU-s per case).
+#
+# Total: 20 sites x 30 timestamps = 600 cases
+# Expected wall-time on Aqua (one broadwell node, 24 cpus):
+#   ~600 * 90 s / 24 ≈ 37 min solver only
+#   + meshing/setup (~15 s each) ≈ 1 h 40 min walltime
+#   Budget one 4 h slot with comfortable margin.
+
+campaign_name: icos_fwi_v1
+output_root: ~/dsw/campaigns/icos_fwi_v1
+
+solver: simpleFoam
+stability: neutral              # FuXi-CFD is neutral too
+turbulence_model: kEpsilon
+wall_function: parente_abl      # Parente 2011 ABL
+
+domain:
+  size_x_km: 4.0
+  size_y_km: 4.0
+  size_z_km: 2.0
+  target_cells: 165000          # matches UGA 500-iter / 22 s benchmark
+  refinement_levels: [0, 1, 2]  # cfMesh octree 2:1
+
+solver_control:
+  end_time: 500                 # iterations (SF steady)
+  write_interval: 500
+  relaxation_p: 0.3
+  relaxation_U: 0.7
+
+sampling:
+  # For each site, sample N timestamps from the ICOS observation period
+  # with stratified coverage:
+  #   - Beaufort bins: [0-3, 4, 5, >=6]  (weight 0.1, 0.3, 0.3, 0.3)
+  #   - Wind direction octants: uniform sampling across 8 sectors
+  timestamps_per_site: 30
+  source: era5_hourly           # read 100 m wind from ERA5
+  period_start: "2020-01-01"
+  period_end: "2023-12-31"
+  beaufort_weights:
+    "0-3": 0.10
+    "4":   0.30
+    "5":   0.30
+    "6+":  0.30
+  direction_octants: 8
+  random_seed: 42
+
+sites:
+  # type (ES / AS), name, lat, lon, altitude
+  # Priority A — FuXi-CFD benchmark sites (reproduce Fig. 5)
+  - {id: OPE,    lat: 48.5619, lon:  5.5036, type: AS}
+  - {id: IPR,    lat: 45.8126, lon:  8.6360, type: AS}
+  - {id: HPB,    lat: 47.8011, lon: 11.0246, type: AS}
+  # Priority A — Mediterranean fire-prone ecosystem sites
+  - {id: FR-Pue, lat: 43.7414, lon:  3.5958, type: ES}
+  - {id: FR-OHP, lat: 43.9319, lon:  5.7122, type: ES}
+  - {id: ES-Arn, lat: 37.1047, lon: -6.7333, type: ES}
+  - {id: ES-LJu, lat: 36.9266, lon: -2.7521, type: ES}
+  - {id: ES-Cnd, lat: 37.9148, lon: -3.2277, type: ES}
+  - {id: PT-Mi1, lat: 38.5412, lon: -8.0001, type: ES}
+  - {id: IT-Cp2, lat: 41.7042, lon: 12.3572, type: ES}
+  - {id: IT-Noe, lat: 40.6062, lon:  8.1512, type: ES}
+  # Priority B — Alpine / complex terrain (test terrain-informed ML)
+  - {id: CH-Dav, lat: 46.8153, lon:  9.8559, type: ES}
+  - {id: IT-Ren, lat: 46.5869, lon: 11.4337, type: ES}
+  - {id: IT-Lav, lat: 45.9553, lon: 11.2812, type: ES}
+  - {id: IT-MBo, lat: 46.0147, lon: 11.0458, type: ES}
+  - {id: JFJ,    lat: 46.5475, lon:  7.9851, type: AS}
+  - {id: PUY,    lat: 45.7722, lon:  2.9658, type: AS}
+  # Priority C — additional cross-regional controls
+  - {id: FR-LBr, lat: 44.7171, lon: -0.7693, type: ES}
+  - {id: TRN,    lat: 47.9647, lon:  2.1125, type: AS}
+  - {id: SAC,    lat: 48.7227, lon:  2.1420, type: AS}
+
+# Land surface inputs (identical to campaign_9k pipeline)
+land_surface:
+  dem: SRTM30
+  landcover: ESA_WorldCover_2021
+  canopy: ETH_Canopy_2020
+  z0_source: worldcover          # never worldcover + canopy (see memory)
+
+# ERA5 inflow source for lateral BCs (trilinear interp + exprMixed)
+inflow:
+  source: era5_pressure_levels
+  levels: [1000, 975, 950, 925, 900, 850, 800]
+  profile_bc: exprMixed          # phi-based inlet/outlet (all 8 lateral sections)
+
+# Outputs
+outputs:
+  convergence_metrics: true
+  u_profile_at_tower: true        # sample u,v,w,T,q at tower lat/lon for all heights
+  full_volume_zarr: true          # for surrogate training / inference

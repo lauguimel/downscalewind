@@ -60,34 +60,37 @@ log = get_logger("ingest_icos")
 
 # ── Station metadata ─────────────────────────────────────────────────────────
 
+# Station network:
+#   type="ES" → ICOS Ecosystem station (FLUXNET product, T/RH/WS/WD/precip at 1-2 levels)
+#   type="AS" → ICOS Atmosphere tall-tower (ATC Meteo L2, multi-level wind 10-200 m)
+#
+# Selection criteria for fire weather + wind downscaling validation:
+#   - Mediterranean / complex-terrain ecosystem sites (FWI obs with precip)
+#   - European tall-towers with multi-level wind (FuXi-CFD benchmark sites)
 ICOS_STATIONS: dict[str, dict] = {
-    "FR-Pue": {
-        "name": "Puéchabon",
-        "lat": 43.7414,
-        "lon": 3.5958,
-        "altitude_m": 270.0,
-        "country": "FR",
-        "description": "Mediterranean holm oak forest",
-        "heights_m": [2.0, 10.0],
-    },
-    "FR-OHP": {
-        "name": "Observatoire de Haute-Provence",
-        "lat": 43.9319,
-        "lon": 5.7122,
-        "altitude_m": 680.0,
-        "country": "FR",
-        "description": "Complex terrain, observatory",
-        "heights_m": [10.0, 50.0, 100.0],
-    },
-    "ES-Arn": {
-        "name": "El Arenosillo",
-        "lat": 37.1047,
-        "lon": -6.7333,
-        "altitude_m": 41.0,
-        "country": "ES",
-        "description": "Southwestern Spain, coastal pine forest",
-        "heights_m": [10.0, 50.0],
-    },
+    # ── ICOS Ecosystem — Mediterranean / fire-prone ──────────────────────────
+    "FR-Pue": {"type": "ES", "name": "Puéchabon",            "lat": 43.7414, "lon":  3.5958, "altitude_m":  270.0, "country": "FR", "description": "Mediterranean holm oak forest", "heights_m": [2.0, 10.0]},
+    "FR-OHP": {"type": "ES", "name": "Obs. Haute-Provence",  "lat": 43.9319, "lon":  5.7122, "altitude_m":  680.0, "country": "FR", "description": "Complex terrain observatory",  "heights_m": [10.0, 50.0, 100.0]},
+    "ES-Arn": {"type": "ES", "name": "El Arenosillo",        "lat": 37.1047, "lon": -6.7333, "altitude_m":   41.0, "country": "ES", "description": "SW Spain, coastal pine",       "heights_m": [10.0, 50.0]},
+    "ES-LJu": {"type": "ES", "name": "Llano de los Juanes",  "lat": 36.9266, "lon": -2.7521, "altitude_m": 1600.0, "country": "ES", "description": "Sierra Nevada, shrubland",     "heights_m": [3.0]},
+    "ES-Cnd": {"type": "ES", "name": "Conde",                "lat": 37.9148, "lon": -3.2277, "altitude_m":  790.0, "country": "ES", "description": "Mediterranean savanna",        "heights_m": [5.0]},
+    "PT-Mi1": {"type": "ES", "name": "Mitra IV Tojal",       "lat": 38.5412, "lon": -8.0001, "altitude_m":  243.0, "country": "PT", "description": "Mediterranean grassland",      "heights_m": [2.0]},
+    "IT-Cp2": {"type": "ES", "name": "Castelporziano 2",     "lat": 41.7042, "lon": 12.3572, "altitude_m":   19.0, "country": "IT", "description": "Mediterranean holm oak (Rome)","heights_m": [10.0, 25.0]},
+    "IT-Noe": {"type": "ES", "name": "Arca di Noè (Sardinia)","lat": 40.6062, "lon":  8.1512, "altitude_m":   25.0, "country": "IT", "description": "Mediterranean maquis",         "heights_m": [7.0]},
+    # ── ICOS Ecosystem — Alpine / complex terrain ─────────────────────────────
+    "CH-Dav": {"type": "ES", "name": "Davos",                "lat": 46.8153, "lon":  9.8559, "altitude_m": 1639.0, "country": "CH", "description": "Swiss Alps, conifer forest",   "heights_m": [35.0]},
+    "IT-Ren": {"type": "ES", "name": "Renon (Ritten)",       "lat": 46.5869, "lon": 11.4337, "altitude_m": 1735.0, "country": "IT", "description": "Italian Alps conifer",         "heights_m": [32.0]},
+    "IT-Lav": {"type": "ES", "name": "Lavarone",             "lat": 45.9553, "lon": 11.2812, "altitude_m": 1353.0, "country": "IT", "description": "Pre-Alps conifer",             "heights_m": [29.0]},
+    "IT-MBo": {"type": "ES", "name": "Monte Bondone",        "lat": 46.0147, "lon": 11.0458, "altitude_m": 1550.0, "country": "IT", "description": "Alpine grassland",             "heights_m": [2.5]},
+    "FR-LBr": {"type": "ES", "name": "Le Bray",              "lat": 44.7171, "lon": -0.7693, "altitude_m":   61.0, "country": "FR", "description": "Landes pine forest",           "heights_m": [26.0]},
+    # ── ICOS Atmosphere — European tall-towers (FuXi-CFD benchmark sites) ────
+    "OPE":    {"type": "AS", "name": "Houdelaincourt OPE",   "lat": 48.5619, "lon":  5.5036, "altitude_m":  395.0, "country": "FR", "description": "ANDRA tall tower (10/50/120 m)","heights_m": [10.0, 50.0, 120.0]},
+    "IPR":    {"type": "AS", "name": "Ispra JRC",            "lat": 45.8126, "lon":  8.6360, "altitude_m":  210.0, "country": "IT", "description": "JRC tall tower (northern Italy)","heights_m": [40.0, 60.0, 100.0]},
+    "HPB":    {"type": "AS", "name": "Hohenpeißenberg",      "lat": 47.8011, "lon": 11.0246, "altitude_m":  934.0, "country": "DE", "description": "Bavarian pre-Alps tall tower", "heights_m": [50.0, 93.0, 131.0]},
+    "JFJ":    {"type": "AS", "name": "Jungfraujoch",         "lat": 46.5475, "lon":  7.9851, "altitude_m": 3572.0, "country": "CH", "description": "Swiss high-alpine (3572 m)",   "heights_m": [5.0, 14.0]},
+    "PUY":    {"type": "AS", "name": "Puy de Dôme",          "lat": 45.7722, "lon":  2.9658, "altitude_m": 1465.0, "country": "FR", "description": "Massif Central summit",        "heights_m": [10.0]},
+    "TRN":    {"type": "AS", "name": "Trainou",              "lat": 47.9647, "lon":  2.1125, "altitude_m":  131.0, "country": "FR", "description": "Loire valley tall tower",     "heights_m": [5.0, 50.0, 100.0, 180.0]},
+    "SAC":    {"type": "AS", "name": "Saclay",               "lat": 48.7227, "lon":  2.1420, "altitude_m":  160.0, "country": "FR", "description": "Paris basin tall tower",       "heights_m": [15.0, 60.0, 100.0]},
 }
 
 
@@ -128,8 +131,13 @@ VARIABLE_MAP = {
 
 SPARQL_ENDPOINT = "https://meta.icos-cp.eu/sparql"
 
-# Station URI prefix for ecosystem stations in ICOS
-STATION_URI_PREFIX = "http://meta.icos-cp.eu/resources/stations/ES_"
+# Station URI prefix depends on station type:
+#   ES_ → Ecosystem station (FLUXNET products)
+#   AS_ → Atmosphere station (ATC Meteo Level 2 products with multi-level wind)
+STATION_URI_PREFIXES = {
+    "ES": "http://meta.icos-cp.eu/resources/stations/ES_",
+    "AS": "http://meta.icos-cp.eu/resources/stations/AS_",
+}
 
 
 # ── SPARQL: find Fluxnet Product data objects ──────────────────────────────
@@ -158,12 +166,50 @@ ORDER BY DESC(?timeEnd)
 LIMIT 5
 """
 
+# ICOS Atmosphere Meteo L2 — CSV tables with multi-level wind, T, RH, p, precip
+# Spec labels observed on ICOS CP:
+#   'ICOS ATC Meteo Release'
+#   'ICOS ATC Meteo NRT Growing Time Series'
+#   'ICOS ATC Meteo Release (Level 2)'
+# SPARQL for ICOS Atmosphere Meteo Level 2 (processed, calibrated, distributable).
+# Also accepts NRT growing time series (most recent data, near-real-time).
+# Raw (uncalibrated) data is explicitly excluded — ICOS does not distribute it.
+SPARQL_ATMOS_METEO_QUERY = """
+PREFIX cpmeta: <http://meta.icos-cp.eu/ontologies/cpmeta/>
+PREFIX prov: <http://www.w3.org/ns/prov#>
+
+SELECT ?dobj ?specLabel ?fileName ?timeStart ?timeEnd ?size
+WHERE {{
+  ?dobj cpmeta:hasObjectSpec ?spec .
+  ?dobj cpmeta:hasName ?fileName .
+  ?dobj cpmeta:hasSizeInBytes ?size .
+  ?dobj cpmeta:wasAcquiredBy [
+    prov:wasAssociatedWith <{station_uri}> ;
+    prov:startedAtTime ?timeStart ;
+    prov:endedAtTime ?timeEnd
+  ] .
+  ?spec rdfs:label ?specLabel .
+  FILTER(
+    ?specLabel IN (
+      'ICOS ATC Meteo Release',
+      'ICOS ATC meteo  release',
+      'ICOS ATC NRT Meteo growing time series'
+    )
+  )
+  FILTER(?timeStart <= "{end_date}T23:59:59Z"^^xsd:dateTime)
+  FILTER(?timeEnd   >= "{start_date}T00:00:00Z"^^xsd:dateTime)
+  FILTER NOT EXISTS {{ ?dobj cpmeta:isNextVersionOf ?other }}
+}}
+ORDER BY DESC(?timeEnd)
+LIMIT 20
+"""
+
 
 def _find_fluxnet_dobj(station_id: str, start_date: str, end_date: str) -> list[dict]:
     """Find FLUXNET data object URIs for a station via SPARQL."""
     import requests
 
-    station_uri = STATION_URI_PREFIX + station_id
+    station_uri = STATION_URI_PREFIXES["ES"] + station_id
     query = SPARQL_FLUXNET_QUERY.format(
         station_uri=station_uri,
         start_date=start_date,
@@ -207,6 +253,45 @@ def _find_fluxnet_dobj(station_id: str, start_date: str, end_date: str) -> list[
 # ── Data fetching ────────────────────────────────────────────────────────────
 
 
+_ICOS_DATA_CLIENT = None
+
+
+def _icos_data_client():
+    """Build (and cache) an ICOS data client using cookie-token auth.
+
+    Reads ~/.icoscp/cpauthToken_auth_conf.json — if a 'token' field is
+    present, uses bootstrap.fromCookieToken() (no password needed).
+    Otherwise falls back to the default `data` module which expects an
+    interactive credentials file.
+    """
+    global _ICOS_DATA_CLIENT
+    if _ICOS_DATA_CLIENT is not None:
+        return _ICOS_DATA_CLIENT
+    import json
+    from pathlib import Path as _P
+
+    conf_path = _P.home() / ".icoscp" / "cpauthToken_auth_conf.json"
+    if conf_path.exists():
+        try:
+            conf = json.loads(conf_path.read_text())
+            token = conf.get("token")
+            if token:
+                from icoscp_core.icos import bootstrap
+                # icoscp_core expects the cookie *value* in the form
+                # 'cpauthToken=<token>' (it parses the '=' separator).
+                cookie_value = token if token.startswith("cpauthToken=") else f"cpauthToken={token}"
+                _meta, _ICOS_DATA_CLIENT = bootstrap.fromCookieToken(cookie_value)
+                log.info("ICOS auth via cookie token", extra={"user": conf.get("user_id")})
+                return _ICOS_DATA_CLIENT
+        except Exception as e:
+            log.warning("Cookie-token auth failed", extra={"error": str(e)})
+
+    # Fallback: default module-level client (uses ~/.icoscp credentials file)
+    from icoscp_core.icos import data as icos_data
+    _ICOS_DATA_CLIENT = icos_data
+    return _ICOS_DATA_CLIENT
+
+
 def _download_fluxnet_zip(dobj_url: str) -> bytes | None:
     """Download a FLUXNET ZIP archive from ICOS CP.
 
@@ -214,8 +299,8 @@ def _download_fluxnet_zip(dobj_url: str) -> bytes | None:
     falls back to unauthenticated download (will fail for most data).
     """
     try:
-        from icoscp_core.icos import data as icos_data
-        stream = icos_data.get_csv_byte_stream(dobj_url)
+        client = _icos_data_client()
+        stream = client.get_csv_byte_stream(dobj_url)
         content = stream.read()
         log.info("Downloaded via icoscp_core", extra={"size_mb": round(len(content) / 1e6, 1)})
         return content
@@ -295,19 +380,284 @@ def _extract_hh_csv_from_zip(zip_bytes: bytes) -> pd.DataFrame | None:
         return None
 
 
+def _find_atmos_meteo_dobj(station_id: str, start_date: str, end_date: str) -> list[dict]:
+    """Find ICOS Atmosphere Meteo L2 data objects for a tall-tower station."""
+    import requests
+
+    station_uri = STATION_URI_PREFIXES["AS"] + station_id
+    query = SPARQL_ATMOS_METEO_QUERY.format(
+        station_uri=station_uri, start_date=start_date, end_date=end_date,
+    )
+    log.info("Querying ICOS SPARQL for Atmosphere Meteo", extra={"station": station_id})
+    try:
+        resp = requests.post(
+            SPARQL_ENDPOINT, data={"query": query},
+            headers={"Accept": "application/json"}, timeout=30,
+        )
+        resp.raise_for_status()
+        bindings = resp.json().get("results", {}).get("bindings", [])
+        out = [
+            {
+                "dobj": r["dobj"]["value"],
+                "specLabel": r["specLabel"]["value"],
+                "fileName": r["fileName"]["value"],
+                "timeStart": r["timeStart"]["value"],
+                "timeEnd": r["timeEnd"]["value"],
+                "size": int(r["size"]["value"]),
+            }
+            for r in bindings
+        ]
+        log.info("Found Atmos Meteo objects", extra={"station": station_id, "n": len(out)})
+        for r in out[:5]:
+            log.info("  dobj", extra={"spec": r["specLabel"], "file": r["fileName"],
+                                      "size_mb": round(r["size"]/1e6, 2)})
+        return out
+    except Exception as e:
+        log.warning("Atmos SPARQL failed", extra={"error": str(e)})
+        return []
+
+
+def _download_atmos_file(dobj_url: str) -> bytes | None:
+    """Download an ICOS Atmosphere Meteo file (ZIP or CSV).
+
+    Uses get_file_stream (raw file download), NOT get_csv_byte_stream which
+    only works for ICOS binary-table objects (not ATC meteo ZIPs/CSVs).
+    """
+    try:
+        client = _icos_data_client()
+        stream = client.get_file_stream(dobj_url)
+        content = stream.read()
+        log.info("Downloaded ATC meteo file", extra={"size_kb": round(len(content)/1e3, 1)})
+        return content
+    except Exception as e1:
+        log.warning("get_file_stream failed, trying direct HTTP", extra={"error": str(e1)})
+
+    # Fallback: direct HTTP with auth cookie
+    import json, requests
+    from pathlib import Path as _P
+    try:
+        conf = json.loads((_P.home() / ".icoscp" / "cpauthToken_auth_conf.json").read_text())
+        token = conf.get("token", "")
+        # The download URL uses /objects/ endpoint
+        dl_url = dobj_url.replace("meta.icos-cp.eu", "data.icos-cp.eu")
+        if "/objects/" not in dl_url:
+            dl_url = dl_url.replace("/csv/", "/objects/")
+        resp = requests.get(
+            dl_url, timeout=120,
+            cookies={"cpauthToken": token},
+        )
+        if resp.status_code == 200 and len(resp.content) > 100:
+            log.info("Downloaded via direct HTTP", extra={"size_kb": round(len(resp.content)/1e3, 1)})
+            return resp.content
+        log.warning("Direct HTTP returned", extra={"status": resp.status_code, "size": len(resp.content)})
+    except Exception as e2:
+        log.warning("Direct HTTP download failed", extra={"error": str(e2)})
+    return None
+
+
+def _parse_atmos_meteo_csv(content: bytes) -> pd.DataFrame | None:
+    """Parse an ICOS ATC Meteo MTO file into a harmonized hourly frame.
+
+    The ATC MTO format is a semicolon-separated file with header lines
+    starting with '#'. Columns:
+      Site;SamplingHeight;Year;Month;Day;Hour;Minute;DecimalDate;
+      AT;AT-Stdev;AT-NbPoints;AT-Flag;...;
+      RH;RH-Stdev;...;WS;WS-Stdev;...;WD;WD-Stdev;...
+
+    Each file covers ONE sampling height (e.g. 10 m, 120 m). The height is
+    in the 'SamplingHeight' column. We rename the variables to include the
+    height: T_10m, ws_120m, etc.
+    """
+    from io import StringIO
+    try:
+        txt = content.decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+    # The MTO format has comment lines starting with '#'. The LAST comment line
+    # (starting with '#Site;' or '#  Site;') contains the column header.
+    all_lines = txt.splitlines()
+    header_line = None
+    data_start = 0
+    for i, ln in enumerate(all_lines):
+        if ln.startswith("#"):
+            # Check if this looks like the header (contains 'Site;' or 'Year')
+            stripped = ln.lstrip("# ")
+            if "Site" in stripped and "Year" in stripped:
+                header_line = stripped
+            data_start = i + 1
+        else:
+            break
+
+    data_lines = all_lines[data_start:]
+    if not data_lines:
+        return None
+    if header_line is None:
+        log.warning("ATC MTO: no header line found")
+        return None
+
+    try:
+        df = pd.read_csv(StringIO(header_line + "\n" + "\n".join(data_lines)), sep=";")
+    except Exception as e:
+        log.warning("ATC MTO parse failed", extra={"error": str(e)})
+        return None
+
+    if df.empty:
+        return None
+
+    # Build timestamp from Year/Month/Day/Hour/Minute columns
+    time_cols = {"Year", "Month", "Day", "Hour", "Minute"}
+    if not time_cols.issubset(df.columns):
+        log.warning("ATC MTO: missing time columns", extra={"cols": list(df.columns)[:15]})
+        return None
+
+    df["time"] = pd.to_datetime(
+        df[["Year", "Month", "Day", "Hour", "Minute"]].rename(
+            columns={"Year": "year", "Month": "month", "Day": "day",
+                      "Hour": "hour", "Minute": "minute"}
+        ),
+        utc=True, errors="coerce",
+    )
+    df = df.dropna(subset=["time"]).set_index("time").sort_index()
+
+    # Get the sampling height
+    h = int(float(df["SamplingHeight"].iloc[0]))
+
+    def _clean(s):
+        s = pd.to_numeric(s, errors="coerce")
+        return s.where(s > -990).astype("float32")
+
+    result = pd.DataFrame(index=df.index)
+    for src, tgt in [("AT", "T"), ("RH", "RH"), ("WS", "ws"), ("WD", "wd")]:
+        if src in df.columns:
+            result[f"{tgt}_{h}m"] = _clean(df[src])
+
+    # Also set primary aliases (ws, T, etc.) — will be overridden if
+    # multiple heights are merged later, keeping the highest ws and lowest T.
+    if "WS" in df.columns:
+        result["ws"] = _clean(df["WS"])
+    if "WD" in df.columns:
+        result["wd"] = _clean(df["WD"])
+    if "AT" in df.columns:
+        result["T"] = _clean(df["AT"])
+    if "RH" in df.columns:
+        result["RH"] = _clean(df["RH"])
+    if "AP" in df.columns:
+        result["p"] = _clean(df["AP"])
+    if "PA" in df.columns and "p" not in result.columns:
+        result["p"] = _clean(df["PA"]) * 10.0  # kPa → hPa
+
+    # Add height metadata for downstream merging
+    result.attrs["sampling_height"] = h
+
+    result = result.resample("1h").mean().reset_index()
+    return result
+
+
+def _fetch_atmos_station(station_id: str, start_date: str, end_date: str) -> pd.DataFrame | None:
+    """Fetch ICOS Atmosphere tall-tower meteo data."""
+    t_start = pd.Timestamp(start_date, tz="UTC")
+    t_end = pd.Timestamp(end_date, tz="UTC")
+    results = _find_atmos_meteo_dobj(station_id, start_date, end_date)
+    if not results:
+        return None
+    # Prefer releases over NRT
+    results.sort(key=lambda r: ("release" not in r["specLabel"].lower(), r["fileName"]))
+    frames: list[pd.DataFrame] = []
+    for r in results:
+        url = r["dobj"]  # keep meta URL — client handles rewrite
+        content = _download_atmos_file(url)
+        if content is None:
+            continue
+        # Handle ZIP files (ATC meteo are packaged as ZIP with .MTO inside)
+        if r["fileName"].endswith(".zip") or (content[:2] == b"PK"):
+            import zipfile
+            from io import BytesIO
+            try:
+                with zipfile.ZipFile(BytesIO(content)) as zf:
+                    # Accept .csv or .MTO files
+                    data_names = [n for n in zf.namelist()
+                                  if n.endswith(".csv") or n.endswith(".MTO")]
+                    if not data_names:
+                        log.warning("ZIP has no data file", extra={"file": r["fileName"],
+                                                                    "contents": zf.namelist()})
+                        continue
+                    with zf.open(data_names[0]) as cf:
+                        content = cf.read()
+            except Exception as e:
+                log.warning("ZIP extraction failed", extra={"file": r["fileName"], "error": str(e)})
+                continue
+        df = _parse_atmos_meteo_csv(content)
+        if df is None or df.empty:
+            continue
+        df = df.set_index("time")[t_start:t_end].reset_index()
+        if not df.empty:
+            frames.append(df)
+            log.info("ATC data chunk", extra={
+                "file": r["fileName"], "rows": len(df),
+                "start": str(df["time"].iloc[0]), "end": str(df["time"].iloc[-1]),
+            })
+    if not frames:
+        return None
+    # Merge multi-level frames on time. Each frame has height-specific columns
+    # (ws_10m, ws_120m, T_10m, ...) plus generic aliases (ws, T, ...).
+    # We merge on time, keeping all height-specific columns and resolving
+    # conflicts in generic aliases: ws = highest level, T = lowest level.
+    merged = frames[0].set_index("time")
+    for df in frames[1:]:
+        df2 = df.set_index("time")
+        # Identify height-specific columns (like ws_120m) vs generic (ws)
+        new_cols = [c for c in df2.columns if c not in merged.columns]
+        overlap = [c for c in df2.columns if c in merged.columns]
+        if new_cols:
+            merged = merged.join(df2[new_cols], how="outer")
+        # For overlapping generic cols (ws, T, etc.), keep the value from
+        # the frame with more data or higher/lower height as appropriate
+        for c in overlap:
+            merged[c] = merged[c].combine_first(df2[c])
+
+    # Re-assign generic aliases based on height columns present
+    h_cols: dict[str, list[tuple[int, str]]] = {}
+    import re
+    for c in merged.columns:
+        m = re.match(r"^(ws|wd|T|RH)_(\d+)m$", c)
+        if m:
+            var, h = m.group(1), int(m.group(2))
+            h_cols.setdefault(var, []).append((h, c))
+    if "ws" in h_cols:
+        h_top = max(h_cols["ws"], key=lambda x: x[0])
+        merged["ws"] = merged[h_top[1]]
+    if "wd" in h_cols:
+        h_top = max(h_cols["wd"], key=lambda x: x[0])
+        merged["wd"] = merged[h_top[1]]
+    if "T" in h_cols:
+        h_low = min(h_cols["T"], key=lambda x: x[0])
+        merged["T"] = merged[h_low[1]]
+    if "RH" in h_cols:
+        h_low = min(h_cols["RH"], key=lambda x: x[0])
+        merged["RH"] = merged[h_low[1]]
+
+    heights_found = sorted(set(h for hl in h_cols.values() for h, _ in hl))
+    log.info("Multi-level merge done", extra={
+        "station": station_id, "heights_m": heights_found,
+        "total_rows": len(merged), "columns": list(merged.columns)[:20],
+    })
+    return merged.reset_index()
+
+
 def _fetch_station_data(
     station_id: str, start_date: str, end_date: str
 ) -> pd.DataFrame | None:
-    """Fetch FLUXNET data for an ICOS ecosystem station.
+    """Fetch meteorological data for an ICOS station.
 
-    Strategy:
-    1. Find FLUXNET Product data objects via SPARQL
-    2. Download the ZIP archive (requires icoscp_core auth)
-    3. Extract the half-hourly CSV
-    4. Harmonize variable names and filter to requested period
-
-    Returns a harmonized DataFrame or None.
+    Routes to the appropriate ICOS product based on station type:
+      - type 'ES' → FLUXNET Product (Ecosystem stations)
+      - type 'AS' → ATC Meteo Level 2 (Atmosphere tall-towers)
     """
+    meta = ICOS_STATIONS.get(station_id, {})
+    if meta.get("type") == "AS":
+        return _fetch_atmos_station(station_id, start_date, end_date)
+
     results = _find_fluxnet_dobj(station_id, start_date, end_date)
     if not results:
         log.warning("No FLUXNET data objects found", extra={"station": station_id})
@@ -511,24 +861,33 @@ def _write_zarr(
     arr[:] = times.astype(np.int64)
     arr.attrs.update({"long_name": "time UTC", "units": "ns since epoch"})
 
-    # Meteo group
+    # Meteo group — write all numeric columns (primary aliases + per-level)
     meteo = root.require_group("meteo")
-    for var_name, info in VARIABLE_MAP.items():
-        if var_name in df.columns:
-            vals = df[var_name].values.astype(np.float32)
-            arr = meteo.create_array(var_name, shape=(n_times,), dtype=np.float32,
-                                     chunks=(min(720, n_times),), overwrite=True)
-            arr[:] = vals
-            arr.attrs.update({
-                "long_name": info["long_name"],
-                "units": info["units"],
-            })
+    skip_cols = {"time"}
+    for col in df.columns:
+        if col in skip_cols:
+            continue
+        vals = df[col].values
+        if vals.dtype.kind not in ("f", "i"):
+            continue
+        vals = vals.astype(np.float32)
+        arr = meteo.create_array(
+            col, shape=(n_times,), dtype=np.float32,
+            chunks=(min(720, n_times),), overwrite=True,
+        )
+        arr[:] = vals
+        info = VARIABLE_MAP.get(col.split("_")[0])
+        if info is not None:
+            arr.attrs.update({"long_name": info["long_name"], "units": info["units"]})
+        else:
+            arr.attrs.update({"long_name": col})
 
     # Global attributes
     root.attrs.update({
         "Conventions": "CF-1.9",
         "title": f"ICOS atmospheric station — {station_id} ({station_meta['name']})",
         "station_id": station_id,
+        "station_type": station_meta.get("type", "ES"),
         "lat": station_meta["lat"],
         "lon": station_meta["lon"],
         "altitude_m": station_meta["altitude_m"],

@@ -332,3 +332,61 @@ def compute_fwi_field(
         "bui": bui_val,
         "fwi": fwi_val,
     }
+
+
+# ── Hybrid FWI: spatial ISI × temporal BUI ─────────────────────────────────
+
+
+def compute_fwi_hybrid(
+    t_kelvin: np.ndarray,
+    q_kgkg: np.ndarray,
+    p_hpa: np.ndarray,
+    u_ms: np.ndarray,
+    v_ms: np.ndarray,
+    month: int,
+    *,
+    bui_era5: float,
+    ffmc_prev: np.ndarray | float = 85.0,
+) -> dict[str, np.ndarray]:
+    """Hybrid FWI: spatial ISI from CFD wind + temporal BUI from ERA5 series.
+
+    ISI depends on wind (spatially heterogeneous in terrain) and FFMC
+    (fast-response, ~1 day memory). BUI depends on DMC/DC which integrate
+    weeks-months of rainfall — uniform at CFD domain scale, so ERA5 suffices.
+
+    This decoupling avoids the single-step BUI problem (wrong initial values)
+    while capturing terrain-induced wind acceleration in ISI.
+
+    Args:
+        t_kelvin, q_kgkg, p_hpa: atmospheric state on spatial grid
+        u_ms, v_ms: wind components from CFD (any shape)
+        month: month number (1-12)
+        bui_era5: BUI value from ERA5 daily time series (scalar, pre-computed)
+        ffmc_prev: previous FFMC (scalar or spatial, default 85.0)
+
+    Returns dict with keys: rh, ws_kmh, ffmc, isi, bui, fwi.
+    """
+    t_c = t_kelvin - 273.15
+    rh_pct = specific_humidity_to_rh(q_kgkg, t_kelvin, p_hpa)
+    ws_kmh = np.sqrt(u_ms**2 + v_ms**2) * 3.6
+
+    # FFMC: fast response, compute spatially from CFD fields (no rain = dry day)
+    ffmc_val = ffmc(t_c, rh_pct, ws_kmh, np.zeros_like(t_c), ffmc_prev)
+
+    # ISI: spatial, from FFMC + CFD wind
+    isi_val = isi(ffmc_val, ws_kmh)
+
+    # BUI: from ERA5 time series (temporal, uniform over domain)
+    bui_val = np.full_like(isi_val, bui_era5)
+
+    # FWI: combine spatial ISI with temporal BUI
+    fwi_val = fwi(isi_val, bui_val)
+
+    return {
+        "rh": rh_pct,
+        "ws_kmh": ws_kmh,
+        "ffmc": ffmc_val,
+        "isi": isi_val,
+        "bui": bui_val,
+        "fwi": fwi_val,
+    }

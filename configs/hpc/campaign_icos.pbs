@@ -1,0 +1,84 @@
+#!/bin/bash -l
+#PBS -N icos_cfd
+#PBS -l select=1:ncpus=24:mem=48GB
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -m ae
+
+# ICOS validation CFD campaign — simpleFoam neutral on 20 ICOS sites × 30 timestamps
+# = 600 cases, target walltime ~1h40 (24 cpu node, ~90 CPU-s per case).
+#
+# Prerequisites on Aqua:
+#   ~/dsw/services/module2a-cfd/    (python tooling)
+#   ~/dsw/data/campaign/icos_fwi_v1/run_matrix.csv  (from build_icos_campaign.py)
+#   OpenFOAM Apptainer SIF:  ~/dsw/containers/openfoam_v2512.sif
+#   Mesher SIF (cfMesh):     ~/dsw/containers/cfmesh.sif
+#   SRTM + WorldCover caches under ~/dsw/data/raw/
+#
+# Usage:
+#   qsub configs/hpc/campaign_icos.pbs
+
+cd $PBS_O_WORKDIR
+
+CAMPAIGN_DIR="$HOME/dsw/data/campaign/icos_fwi_v1"
+RUN_MATRIX="$CAMPAIGN_DIR/run_matrix.csv"
+CASES_DIR="$CAMPAIGN_DIR/cases"
+LOG_DIR="$CAMPAIGN_DIR/logs"
+OF_SIF="$HOME/dsw/containers/openfoam_v2512.sif"
+SCRIPT_DIR="$HOME/dsw/services/module2a-cfd"
+
+mkdir -p "$CASES_DIR" "$LOG_DIR"
+
+echo "=== ICOS CFD Campaign ==="
+echo "Campaign dir : $CAMPAIGN_DIR"
+echo "Cases dir    : $CASES_DIR"
+echo "OpenFOAM SIF : $OF_SIF"
+echo
+
+[ -f "$RUN_MATRIX" ] || { echo "ERROR: run_matrix not found at $RUN_MATRIX"; exit 1; }
+[ -f "$OF_SIF" ]     || { echo "ERROR: OpenFOAM SIF not found at $OF_SIF"; exit 1; }
+
+module load apptainer 2>/dev/null || true
+module load Miniconda3 2>/dev/null || module load Anaconda3 2>/dev/null || true
+eval "$(conda shell.bash hook)"
+conda activate downscalewind
+
+N_CASES=$(tail -n +2 "$RUN_MATRIX" | wc -l)
+echo "Total cases: $N_CASES"
+echo "Start: $(date)"
+echo
+
+# ── Phase 1 : mesh + inflow prep (cheap, sequential) ────────────────────────
+echo "=== [1/3] Generating cases (mesh + inflow) ==="
+python "$SCRIPT_DIR/generate_campaign.py" \
+    "$CAMPAIGN_DIR/campaign.yaml" \
+    --output "$CASES_DIR" \
+    --prefix icos \
+    || { echo "ERROR: case generation failed"; exit 2; }
+
+# ── Phase 2 : solve cases (parallel inside each case, serial between cases) ─
+echo
+echo "=== [2/3] Running simpleFoam cases ==="
+python "$SCRIPT_DIR/run_multisite_campaign.py" \
+    --campaign-dir "$CASES_DIR" \
+    --of-sif "$OF_SIF" \
+    --np 24 \
+    --max-iter 500 \
+    --log-dir "$LOG_DIR" \
+    || { echo "ERROR: solver phase failed"; exit 3; }
+
+# ── Phase 3 : post-process — sample tower profiles + stack to Zarr ──────────
+echo
+echo "=== [3/3] Post-processing ==="
+python "$SCRIPT_DIR/assemble_training_zarr.py" \
+    --cases "$CASES_DIR" \
+    --run-matrix "$RUN_MATRIX" \
+    --output "$CAMPAIGN_DIR/stacked.zarr" \
+    --sample-towers \
+    || { echo "ERROR: post-processing failed"; exit 4; }
+
+echo
+echo "=== DONE ==="
+echo "Finish: $(date)"
+echo "Stacked Zarr: $CAMPAIGN_DIR/stacked.zarr"
+echo "Tower profiles CSV: $CAMPAIGN_DIR/tower_profiles.csv"

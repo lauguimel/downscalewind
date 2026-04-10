@@ -21,33 +21,59 @@ from .dataset import split_spatial
 
 logger = logging.getLogger(__name__)
 
+# Large-capacity XGBoost — for the upgraded v2 precip correction trained on
+# 1500+ stations with IMERG + ERA5-Land + terrain + climatology features.
 DEFAULT_PARAMS: dict[str, Any] = {
-    "n_estimators": 300,
-    "max_depth": 6,
-    "learning_rate": 0.1,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "min_child_weight": 5,
-    "reg_alpha": 0.1,
+    "n_estimators": 2000,
+    "max_depth": 10,
+    "learning_rate": 0.03,
+    "subsample": 0.85,
+    "colsample_bytree": 0.75,
+    "min_child_weight": 3,
+    "reg_alpha": 0.3,
+    "reg_lambda": 1.0,
+    "gamma": 0.1,
+    "tree_method": "hist",
     "objective": "reg:squarederror",
     "random_state": 42,
+    "n_jobs": -1,
 }
 
 
-def get_feature_columns() -> list[str]:
-    """Return the list of feature column names for the model."""
-    return [
-        "rain_imerg",
-        "elevation",
-        "slope",
-        "aspect_sin",
-        "aspect_cos",
-        "tpi",
-        "lat",
-        "lon",
-        "month_sin",
-        "month_cos",
-    ]
+FEATURE_COLUMNS_V1 = [
+    "rain_imerg", "elevation", "slope", "aspect_sin", "aspect_cos",
+    "tpi", "lat", "lon", "month_sin", "month_cos",
+]
+
+FEATURE_COLUMNS_V2 = [
+    # Rain anchors — IMERG + ERA5-Land + temporal context (key for BUI)
+    "rain_imerg", "rain_era5land",
+    "rain_imerg_lag1", "rain_imerg_lag2",
+    "rain_imerg_3d", "rain_imerg_7d", "rain_era5land_3d",
+    # Terrain (multi-radius TPI + distance to coast)
+    "elevation", "slope", "aspect_sin", "aspect_cos",
+    "tpi_1km", "tpi_5km", "tpi_10km", "dist_coast_km",
+    # Wind-orography interaction from ERA5
+    "u10", "v10", "wspd10", "upslope_flow",
+    # Climatology conditioning (IMERG 10-yr monthly mean + anomaly)
+    "clim_rain_month", "clim_rain_ratio",
+    # Location + time (day-of-year is finer than month for Mediterranean)
+    "lat", "lon", "doy_sin", "doy_cos", "month_sin", "month_cos",
+]
+
+
+def get_feature_columns(version: str = "v1") -> list[str]:
+    """Return the feature column list for the requested model version.
+
+    v1 — original 10-feature set (IMERG + terrain + month) — compatible with
+         services/module3-precip/train.py out of the box.
+    v2 — upgraded 27-feature set (adds ERA5-Land, IMERG lags, multi-radius
+         TPI, wind-orography, and climatology anomaly). Requires dataset.py
+         to build the extra columns — use when training the large model.
+    """
+    if version == "v2":
+        return list(FEATURE_COLUMNS_V2)
+    return list(FEATURE_COLUMNS_V1)
 
 
 def train_cv(
@@ -222,67 +248,22 @@ def load_model(model_dir: str | Path) -> xgb.XGBRegressor:
     return model
 
 
-def predict(
+def predict_from_features(
     model: xgb.XGBRegressor,
-    rain_imerg: float | np.ndarray,
-    lat: float | np.ndarray,
-    lon: float | np.ndarray,
-    elevation: float | np.ndarray,
-    slope: float | np.ndarray,
-    aspect: float | np.ndarray,
-    tpi: float | np.ndarray,
-    month: int | np.ndarray,
-) -> float | np.ndarray:
-    """Predict corrected precipitation.
+    features: pd.DataFrame,
+) -> np.ndarray:
+    """Predict corrected precipitation from a pre-built feature frame.
 
-    All inputs can be scalars or arrays of the same length.
-
-    Parameters
-    ----------
-    model : xgb.XGBRegressor
-        Trained model.
-    rain_imerg, lat, lon, elevation, slope, aspect, tpi : float or array
-        Input features.
-    month : int or array
-        Month (1-12) for temporal encoding.
-
-    Returns
-    -------
-    float or np.ndarray
-        Corrected precipitation.
+    The caller is responsible for computing the engineered features listed
+    in ``get_feature_columns()``. Use this for production pipelines where
+    features are assembled from gridded inputs (module3_precip/predict.py).
     """
-    rain_imerg = np.atleast_1d(np.asarray(rain_imerg, dtype=np.float64))
-    lat = np.atleast_1d(np.asarray(lat, dtype=np.float64))
-    lon = np.atleast_1d(np.asarray(lon, dtype=np.float64))
-    elevation = np.atleast_1d(np.asarray(elevation, dtype=np.float64))
-    slope = np.atleast_1d(np.asarray(slope, dtype=np.float64))
-    aspect = np.atleast_1d(np.asarray(aspect, dtype=np.float64))
-    tpi = np.atleast_1d(np.asarray(tpi, dtype=np.float64))
-    month = np.atleast_1d(np.asarray(month, dtype=np.float64))
+    missing = set(get_feature_columns()) - set(features.columns)
+    if missing:
+        raise ValueError(f"Missing feature columns for prediction: {sorted(missing)}")
+    return np.clip(model.predict(features[get_feature_columns()]), 0.0, None)
 
-    aspect_rad = np.deg2rad(aspect)
-    aspect_sin = np.sin(aspect_rad)
-    aspect_cos = np.cos(aspect_rad)
-    month_sin = np.sin(2.0 * np.pi * month / 12.0)
-    month_cos = np.cos(2.0 * np.pi * month / 12.0)
 
-    X = pd.DataFrame(
-        {
-            "rain_imerg": rain_imerg,
-            "elevation": elevation,
-            "slope": slope,
-            "aspect_sin": aspect_sin,
-            "aspect_cos": aspect_cos,
-            "tpi": tpi,
-            "lat": lat,
-            "lon": lon,
-            "month_sin": month_sin,
-            "month_cos": month_cos,
-        }
-    )
-
-    result = model.predict(X)
-
-    if len(result) == 1:
-        return float(result[0])
-    return result
+# Legacy scalar-argument predict() helper removed in v2 — use
+# predict_from_features(model, features_df) with engineered features
+# assembled by services/module3-precip/predict.py.
