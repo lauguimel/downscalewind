@@ -1,0 +1,78 @@
+#!/bin/bash -l
+#PBS -N vit_wind_9k
+#PBS -l select=1:ncpus=8:ngpus=1:mem=64GB:gpu_id=H100
+#PBS -l walltime=48:00:00
+#PBS -j oe
+#PBS -m ae
+
+# Train TerrainViT for 3D wind downscaling on the 9k dataset.
+#
+# Architecture: Vision Transformer (FuXi-CFD style)
+#   - 2D patch embedding for terrain/z0 (128x128, patch_size=8 → 256 tokens)
+#   - ERA5 profile conditioning (5 vars × 32 levels)
+#   - 12 transformer blocks (embed_dim=384, 8 heads)
+#   - Per-variable 3D decoder heads → (128, 128, 32) output
+#
+# Dataset: /scratch/maitreje/dsw/training_9k (8998 cases)
+#   432 train sites / 72 val sites / 96 test sites
+#   Geographic split: each site exclusively in ONE split
+#
+# Loss: Charbonnier + amplitude (freq domain) + divergence penalty
+#
+# Usage: qsub configs/hpc/train_wind_vit_9k.pbs
+
+cd $PBS_O_WORKDIR
+
+# Dataset on /scratch (NVMe) for fast Zarr I/O
+DATA_DIR="/scratch/maitreje/dsw/training_9k"
+OUTPUT_DIR="$HOME/dsw/models/surrogate_9k_v2"
+SCRIPT_DIR="$HOME/dsw/services/module2b-surrogate_wind"
+
+# ── Pre-flight ──────────────────────────────────────────────────────────────
+nvidia-smi || { echo "ERROR: GPU not available"; exit 1; }
+
+echo "=== TerrainViT Training on 9k Wind Dataset ==="
+echo "Data:   $DATA_DIR"
+echo "Code:   $SCRIPT_DIR"
+echo "Output: $OUTPUT_DIR"
+echo
+
+# ── Verify inputs ───────────────────────────────────────────────────────────
+[ -f "$DATA_DIR/dataset.yaml" ]            || { echo "ERROR: dataset.yaml not found"; exit 1; }
+[ -f "$SCRIPT_DIR/train_wind_vit.py" ]     || { echo "ERROR: train_wind_vit.py not found"; exit 1; }
+[ -f "$SCRIPT_DIR/src/model_vit.py" ]      || { echo "ERROR: model_vit.py not found"; exit 1; }
+[ -f "$SCRIPT_DIR/src/dataset_wind9k.py" ] || { echo "ERROR: dataset_wind9k.py not found"; exit 1; }
+
+# ── Activate conda env ──────────────────────────────────────────────────────
+module load Miniconda3 2>/dev/null || module load Anaconda3 2>/dev/null || true
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+
+python -c "import torch; print(f'PyTorch {torch.__version__} | CUDA: {torch.cuda.is_available()} | Device: {torch.cuda.get_device_name(0)}')"
+
+cd "$SCRIPT_DIR"
+
+# ── Train: ViT-base (200 epochs, early stopping patience=30) ───────────────
+echo
+echo "=== Training TerrainViT-base ==="
+mkdir -p "$OUTPUT_DIR"
+python train_wind_vit.py \
+    --data-dir "$DATA_DIR" \
+    --output "$OUTPUT_DIR" \
+    --run-name vit_base \
+    --preset base \
+    --epochs 200 \
+    --batch-size 8 \
+    --lr 5e-4 \
+    --num-workers 4 \
+    --patience 30 \
+    --lambda-amp 0.1 \
+    --lambda-div 0.05 \
+    || { echo "ERROR: training failed"; exit 2; }
+
+BEST_MODEL="$OUTPUT_DIR/vit_base/best_model.pt"
+[ -f "$BEST_MODEL" ] || { echo "ERROR: best_model.pt not found"; exit 3; }
+
+echo
+echo "=== DONE ==="
+echo "Model: $BEST_MODEL"
