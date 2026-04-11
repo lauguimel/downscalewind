@@ -680,6 +680,13 @@ def process_site(
         log.info("  [DRY RUN] would process %d cases", len(runs))
         return status
 
+    # ---- ERA5 resolution: use per-site Zarr if available ----
+    # Convention: if era5_zarr parent dir contains era5_<site_id>.zarr, use it
+    site_era5 = era5_zarr.parent / f"era5_{site_id.lower()}.zarr"
+    if site_era5.exists() and site_era5 != era5_zarr:
+        log.info("  Using per-site ERA5: %s", site_era5)
+        era5_zarr = site_era5
+
     # ---- Step 1: STL ----
     stl_path = mesh_dir / "constant" / "triSurface" / "terrain.stl"
     try:

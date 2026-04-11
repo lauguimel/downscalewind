@@ -1,0 +1,19 @@
+site:
+  name: OPE (Houdelaincourt)
+  coordinates:
+    latitude: 48.5619
+    longitude: 5.5036
+    elevation_m: 395
+era5_domain:
+  north: 48.81
+  south: 48.31
+  east: 5.75
+  west: 5.25
+  grid_spacing_deg: 0.25
+  n_lat: 3
+  n_lon: 3
+periods:
+  icos:
+    start: '2020-01-01'
+    end: '2023-12-31'
+    description: ICOS observation period for FWI validation

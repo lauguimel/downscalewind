@@ -1,0 +1,19 @@
+site:
+  name: Puy de Dome
+  coordinates:
+    latitude: 45.7722
+    longitude: 2.9658
+    elevation_m: 1465
+era5_domain:
+  north: 46.02
+  south: 45.52
+  east: 3.22
+  west: 2.72
+  grid_spacing_deg: 0.25
+  n_lat: 3
+  n_lon: 3
+periods:
+  icos:
+    start: '2020-01-01'
+    end: '2023-12-31'
+    description: ICOS observation period for FWI validation

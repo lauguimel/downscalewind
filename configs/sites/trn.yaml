@@ -1,0 +1,19 @@
+site:
+  name: Trainou
+  coordinates:
+    latitude: 47.9647
+    longitude: 2.1125
+    elevation_m: 131
+era5_domain:
+  north: 48.21
+  south: 47.71
+  east: 2.36
+  west: 1.86
+  grid_spacing_deg: 0.25
+  n_lat: 3
+  n_lon: 3
+periods:
+  icos:
+    start: '2020-01-01'
+    end: '2023-12-31'
+    description: ICOS observation period for FWI validation

@@ -1,0 +1,19 @@
+site:
+  name: Ispra JRC
+  coordinates:
+    latitude: 45.8126
+    longitude: 8.636
+    elevation_m: 210
+era5_domain:
+  north: 46.06
+  south: 45.56
+  east: 8.89
+  west: 8.39
+  grid_spacing_deg: 0.25
+  n_lat: 3
+  n_lon: 3
+periods:
+  icos:
+    start: '2020-01-01'
+    end: '2023-12-31'
+    description: ICOS observation period for FWI validation

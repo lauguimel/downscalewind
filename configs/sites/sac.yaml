@@ -1,0 +1,19 @@
+site:
+  name: Saclay
+  coordinates:
+    latitude: 48.7227
+    longitude: 2.142
+    elevation_m: 160
+era5_domain:
+  north: 48.97
+  south: 48.47
+  east: 2.39
+  west: 1.89
+  grid_spacing_deg: 0.25
+  n_lat: 3
+  n_lon: 3
+periods:
+  icos:
+    start: '2020-01-01'
+    end: '2023-12-31'
+    description: ICOS observation period for FWI validation
