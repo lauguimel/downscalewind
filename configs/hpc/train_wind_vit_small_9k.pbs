@@ -1,0 +1,55 @@
+#!/bin/bash -l
+#PBS -N vit_small_9k
+#PBS -l select=1:ncpus=8:mem=64GB:ngpus=1:gpu_id=H100
+#PBS -l walltime=48:00:00
+#PBS -j oe
+#PBS -m n
+
+cd $PBS_O_WORKDIR
+
+# --- Pre-flight GPU check ---
+nvidia-smi || { echo "ERROR: GPU not available"; exit 1; }
+
+# --- Conda environment ---
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+
+# CRITICAL: Add NVIDIA CUDA libs from pip packages to LD_LIBRARY_PATH
+for d in $CONDA_PREFIX/lib/python3.10/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+# --- Run ---
+DATA_DIR="/scratch/maitreje/dsw/training_9k"
+OUTPUT_DIR="$HOME/dsw/models/surrogate_9k_v2"
+SCRIPT_DIR="$HOME/dsw/services/module2b-surrogate_wind"
+
+echo "=== TerrainViT-small Training on 9k Wind Dataset ==="
+echo "Data:   $DATA_DIR"
+echo "Code:   $SCRIPT_DIR"
+echo "Output: $OUTPUT_DIR"
+
+[ -f "$DATA_DIR/dataset.yaml" ]            || { echo "ERROR: dataset.yaml not found"; exit 1; }
+[ -f "$SCRIPT_DIR/train_wind_vit.py" ]     || { echo "ERROR: train_wind_vit.py not found"; exit 1; }
+[ -f "$SCRIPT_DIR/src/model_vit.py" ]      || { echo "ERROR: model_vit.py not found"; exit 1; }
+[ -f "$SCRIPT_DIR/src/dataset_wind9k.py" ] || { echo "ERROR: dataset_wind9k.py not found"; exit 1; }
+
+cd "$SCRIPT_DIR"
+
+python train_wind_vit.py \
+    --data-dir "$DATA_DIR" \
+    --output "$OUTPUT_DIR" \
+    --run-name vit_small \
+    --preset small \
+    --epochs 200 \
+    --batch-size 8 \
+    --lr 5e-4 \
+    --num-workers 4 \
+    --patience 30 \
+    --lambda-amp 0.1 \
+    --lambda-div 0.05 \
+    || { echo "ERROR: training failed"; exit 2; }
+
+echo "=== DONE ==="
+

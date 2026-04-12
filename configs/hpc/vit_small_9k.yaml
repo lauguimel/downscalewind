@@ -1,0 +1,44 @@
+# TerrainViT-small training on 9k wind dataset
+# ~25M params, for comparison with FNO (33M) and ViT-base (55M)
+job_name: vit_small_9k
+ncpus: 8
+ngpus: 1
+gpu_id: H100
+mem: 64GB
+walltime: "48:00:00"
+conda:
+  env: fuxicfd
+  fallback: true
+  cuda_libs: true
+command: |
+  DATA_DIR="/scratch/maitreje/dsw/training_9k"
+  OUTPUT_DIR="$HOME/dsw/models/surrogate_9k_v2"
+  SCRIPT_DIR="$HOME/dsw/services/module2b-surrogate_wind"
+
+  echo "=== TerrainViT-small Training on 9k Wind Dataset ==="
+  echo "Data:   $DATA_DIR"
+  echo "Code:   $SCRIPT_DIR"
+  echo "Output: $OUTPUT_DIR"
+
+  [ -f "$DATA_DIR/dataset.yaml" ]            || { echo "ERROR: dataset.yaml not found"; exit 1; }
+  [ -f "$SCRIPT_DIR/train_wind_vit.py" ]     || { echo "ERROR: train_wind_vit.py not found"; exit 1; }
+  [ -f "$SCRIPT_DIR/src/model_vit.py" ]      || { echo "ERROR: model_vit.py not found"; exit 1; }
+  [ -f "$SCRIPT_DIR/src/dataset_wind9k.py" ] || { echo "ERROR: dataset_wind9k.py not found"; exit 1; }
+
+  cd "$SCRIPT_DIR"
+
+  python train_wind_vit.py \
+      --data-dir "$DATA_DIR" \
+      --output "$OUTPUT_DIR" \
+      --run-name vit_small \
+      --preset small \
+      --epochs 200 \
+      --batch-size 8 \
+      --lr 5e-4 \
+      --num-workers 4 \
+      --patience 30 \
+      --lambda-amp 0.1 \
+      --lambda-div 0.05 \
+      || { echo "ERROR: training failed"; exit 2; }
+
+  echo "=== DONE ==="
