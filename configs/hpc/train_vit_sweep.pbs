@@ -1,0 +1,59 @@
+#!/bin/bash -l
+#PBS -l select=1:ncpus=8:ngpus=1:mem=64GB:gpu_id=H100
+#PBS -l walltime=48:00:00
+#PBS -j oe
+#PBS -m n
+
+# TerrainViT ablation sweep — submit with:
+#   qsub -N vit_film   -v VARIANT=film,PRESET=base   configs/hpc/train_vit_sweep.pbs
+#   qsub -N vit_factor -v VARIANT=factor,PRESET=base  configs/hpc/train_vit_sweep.pbs
+#   qsub -N vit_cross  -v VARIANT=cross,PRESET=base   configs/hpc/train_vit_sweep.pbs
+
+cd $PBS_O_WORKDIR
+
+VARIANT="${VARIANT:-film}"
+PRESET="${PRESET:-base}"
+RUN_NAME="vit_${VARIANT}_${PRESET}"
+
+DATA_DIR="/scratch/maitreje/dsw/training_9k"
+OUTPUT_DIR="$HOME/dsw/models/surrogate_9k_v2"
+SCRIPT_DIR="$HOME/dsw/services/module2b-surrogate_wind"
+
+nvidia-smi || { echo "ERROR: GPU not available"; exit 1; }
+
+echo "=== TerrainViT Ablation: variant=$VARIANT preset=$PRESET ==="
+echo "Run:    $RUN_NAME"
+echo "Data:   $DATA_DIR"
+echo "Output: $OUTPUT_DIR/$RUN_NAME"
+
+module load Miniconda3 2>/dev/null || module load Anaconda3 2>/dev/null || true
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+
+for d in $CONDA_PREFIX/lib/python3.*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+python -c "import torch; print(f'PyTorch {torch.__version__} | CUDA: {torch.cuda.is_available()} | Device: {torch.cuda.get_device_name(0)}')"
+
+[ -f "$DATA_DIR/dataset.yaml" ]        || { echo "ERROR: dataset.yaml not found"; exit 1; }
+[ -f "$SCRIPT_DIR/train_wind_vit.py" ] || { echo "ERROR: train_wind_vit.py not found"; exit 1; }
+
+cd "$SCRIPT_DIR"
+
+python train_wind_vit.py \
+    --data-dir "$DATA_DIR" \
+    --output "$OUTPUT_DIR" \
+    --run-name "$RUN_NAME" \
+    --variant "$VARIANT" \
+    --preset "$PRESET" \
+    --epochs 200 \
+    --batch-size 8 \
+    --lr 5e-4 \
+    --num-workers 4 \
+    --patience 50 \
+    --lambda-amp 0.1 \
+    --lambda-div 0.05 \
+    || { echo "ERROR: training failed"; exit 2; }
+
+echo "=== DONE: $RUN_NAME ==="

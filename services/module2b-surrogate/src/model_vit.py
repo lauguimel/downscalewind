@@ -1,65 +1,40 @@
 """
-model_vit.py — Vision Transformer for terrain-aware 3D wind downscaling.
+model_vit.py — TerrainViT variants for 3D wind downscaling.
 
-V2: FuXi-CFD fusion architecture (Lin et al., Nature Communications 2026).
+Three architectures, all using S4 training recipe:
 
-Key changes vs V1:
-  - ERA5 profiles broadcast to 2D and CONCATENATED with terrain/z0 (not added)
-  - Downsample conv layer fuses all inputs before patchification
-  - Heavy 3D decoder with progressive upsampling (not linear projection)
-  - Per-variable decoder heads with shared trunk
+  S1 "film":   v1 encoder (terrain patches + ERA5 additive) + v2 decoder + FiLM vertical
+  S2 "factor": Factored 2D transformer + 1D vertical MLP conditioned by ERA5
+  S3 "cross":  Cross-attention between terrain tokens and ERA5 profile tokens
 
-Architecture (Fig. 8 of FuXi-CFD):
-  1. Input: terrain(128,128) + z0(128,128) + ERA5 broadcast(5ch, 128,128) → 7ch
-  2. Downsample conv layers → reduced spatial dim
-  3. Reshape to patch tokens + positional embedding
-  4. Transformer encoder (N blocks)
-  5. Reshape back to 2D feature map → upsample to full res
-  6. Expand to 3D (vertical) → per-variable conv3d heads
+Shared components: TransformerBlock, UpsampleDecoder2D, PatchEmbed2D.
 """
 
 from __future__ import annotations
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-class DownsampleFusion(nn.Module):
-    """Fuse multi-channel 2D input and downsample to patch grid.
+# ── Shared components ───────────────────────────────────────────────────────
 
-    FuXi-CFD style: conv layers reduce (B, C_in, H, W) to (B, embed_dim, pg, pg)
-    where pg = H / total_stride.
+class PatchEmbed2D(nn.Module):
+    """2D terrain patch embedding with positional encoding."""
 
-    Input:  (B, 7, 128, 128) — terrain + z0 + 5 ERA5 channels
-    Output: (B, embed_dim, pg, pg)
-    """
-
-    def __init__(self, in_channels: int = 7, embed_dim: int = 384,
+    def __init__(self, in_channels: int = 2, embed_dim: int = 384,
                  img_size: int = 128, patch_size: int = 8):
         super().__init__()
-        # Progressive downsampling: 128 → 64 → 32 → 16 (for patch_size=8)
-        self.layers = nn.Sequential(
-            nn.Conv2d(in_channels, 64, 7, stride=2, padding=3),  # /2
-            nn.BatchNorm2d(64),
-            nn.GELU(),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1),  # /4
-            nn.BatchNorm2d(128),
-            nn.GELU(),
-            nn.Conv2d(128, embed_dim, 3, stride=2, padding=1),  # /8
-            nn.BatchNorm2d(embed_dim),
-            nn.GELU(),
-        )
         self.n_patches = (img_size // patch_size) ** 2
+        self.proj = nn.Conv2d(in_channels, embed_dim,
+                              kernel_size=patch_size, stride=patch_size)
         self.pos_embed = nn.Parameter(
             torch.zeros(1, self.n_patches, embed_dim))
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, C_in, H, W)
-        x = self.layers(x)  # (B, embed_dim, pg, pg)
-        B, C, H, W = x.shape
-        x = x.flatten(2).transpose(1, 2)  # (B, n_patches, embed_dim)
+        x = self.proj(x).flatten(2).transpose(1, 2)
         return x + self.pos_embed
 
 
@@ -73,230 +48,362 @@ class TransformerBlock(nn.Module):
         self.attn = nn.MultiheadAttention(dim, n_heads, dropout=drop,
                                           batch_first=True)
         self.norm2 = nn.LayerNorm(dim)
+        mlp_dim = int(dim * mlp_ratio)
         self.mlp = nn.Sequential(
-            nn.Linear(dim, int(dim * mlp_ratio)),
-            nn.GELU(),
-            nn.Dropout(drop),
-            nn.Linear(int(dim * mlp_ratio), dim),
-            nn.Dropout(drop),
+            nn.Linear(dim, mlp_dim), nn.GELU(), nn.Dropout(drop),
+            nn.Linear(mlp_dim, dim), nn.Dropout(drop),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.norm1(x)
         h, _ = self.attn(h, h, h)
         x = x + h
-        x = x + self.mlp(self.norm2(x))
-        return x
+        return x + self.mlp(self.norm2(x))
+
+
+class CrossAttentionBlock(nn.Module):
+    """Cross-attention: queries attend to key/value from another sequence."""
+
+    def __init__(self, dim: int, n_heads: int = 8, drop: float = 0.0):
+        super().__init__()
+        self.norm_q = nn.LayerNorm(dim)
+        self.norm_kv = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, n_heads, dropout=drop,
+                                          batch_first=True)
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, dim * 4), nn.GELU(), nn.Dropout(drop),
+            nn.Linear(dim * 4, dim), nn.Dropout(drop),
+        )
+
+    def forward(self, q: torch.Tensor, kv: torch.Tensor) -> torch.Tensor:
+        q_n = self.norm_q(q)
+        kv_n = self.norm_kv(kv)
+        h, _ = self.attn(q_n, kv_n, kv_n)
+        x = q + h
+        return x + self.mlp(self.norm2(x))
 
 
 class UpsampleDecoder2D(nn.Module):
-    """Upsample 2D feature map from patch grid to full resolution.
+    """Upsample tokens back to full 2D resolution via transposed convolutions.
 
-    (B, embed_dim, pg, pg) → (B, feat_dim, H, W) via transposed convolutions.
+    (B, embed_dim, pg, pg) → (B, feat_dim, H, W)
     """
 
     def __init__(self, embed_dim: int = 384, feat_dim: int = 64,
-                 patch_grid: int = 16, img_size: int = 128):
+                 patch_grid: int = 16):
         super().__init__()
-        # pg=16 → 32 → 64 → 128
         self.layers = nn.Sequential(
-            nn.ConvTranspose2d(embed_dim, 256, 4, stride=2, padding=1),  # ×2
-            nn.BatchNorm2d(256),
-            nn.GELU(),
-            nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1),  # ×4
-            nn.BatchNorm2d(128),
-            nn.GELU(),
-            nn.ConvTranspose2d(128, feat_dim, 4, stride=2, padding=1),  # ×8
-            nn.BatchNorm2d(feat_dim),
-            nn.GELU(),
+            nn.ConvTranspose2d(embed_dim, 256, 4, stride=2, padding=1),
+            nn.BatchNorm2d(256), nn.GELU(),
+            nn.ConvTranspose2d(256, 128, 4, stride=2, padding=1),
+            nn.BatchNorm2d(128), nn.GELU(),
+            nn.ConvTranspose2d(128, feat_dim, 4, stride=2, padding=1),
+            nn.BatchNorm2d(feat_dim), nn.GELU(),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.layers(x)  # (B, feat_dim, H, W)
+        return self.layers(x)
 
 
-class DecoderHead3D(nn.Module):
-    """Expand 2D features to 3D volume for one output variable.
+class ERA5Encoder(nn.Module):
+    """Encode ERA5 profiles (5, nz) → (embed_dim,) for additive conditioning."""
 
-    (B, feat_dim, H, W) → (B, 1, H, W, nz) via vertical expansion + conv3d.
+    def __init__(self, n_vars: int = 5, nz: int = 32, embed_dim: int = 384):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_vars * nz, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),
+        )
+
+    def forward(self, profiles: torch.Tensor) -> torch.Tensor:
+        return self.net(profiles.flatten(1))
+
+
+def _init_weights(module):
+    """Standard weight init for transformers."""
+    if isinstance(module, nn.Linear):
+        nn.init.trunc_normal_(module.weight, std=0.02)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+    elif isinstance(module, (nn.Conv2d, nn.Conv3d, nn.ConvTranspose2d)):
+        nn.init.kaiming_normal_(module.weight, mode='fan_out')
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# S1 — FiLM vertical: v1 encoder + v2 decoder + FiLM conditioning per z
+# ═══════════════════════════════════════════════════════════════════════════
+
+class FiLMVerticalHead(nn.Module):
+    """3D decoder head with FiLM conditioning from ERA5 profiles.
+
+    2D features → expand to 3D → FiLM modulation per z-level → conv3d.
+    ERA5 profiles provide per-level gamma/beta.
     """
 
-    def __init__(self, feat_dim: int = 64, nz: int = 32):
+    def __init__(self, feat_dim: int = 64, nz: int = 32,
+                 n_era5_vars: int = 5, hidden: int = 32):
         super().__init__()
         self.nz = nz
-        # Vertical expansion: project each spatial location to nz values
-        self.vert_proj = nn.Linear(feat_dim, feat_dim * nz)
-
-        # 3D refinement (operates on the full 3D volume)
+        # Expand 2D → 3D: learn a vertical basis
+        self.vert_basis = nn.Parameter(torch.randn(1, feat_dim, 1, 1, nz) * 0.02)
+        # FiLM from ERA5 profiles: (n_vars, nz) → per-level (gamma, beta)
+        self.film_net = nn.Sequential(
+            nn.Linear(n_era5_vars * nz, 128), nn.GELU(),
+            nn.Linear(128, feat_dim * nz * 2),  # gamma + beta per (feat, z)
+        )
+        # 3D refinement
         self.refine = nn.Sequential(
-            nn.Conv3d(feat_dim, 32, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv3d(32, 16, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv3d(16, 1, kernel_size=1),
+            nn.Conv3d(feat_dim, hidden, 3, padding=1), nn.GELU(),
+            nn.Conv3d(hidden, hidden, 3, padding=1), nn.GELU(),
+            nn.Conv3d(hidden, 1, 1),
         )
 
-    def forward(self, feat2d: torch.Tensor) -> torch.Tensor:
-        """feat2d: (B, feat_dim, H, W) → (B, 1, H, W, nz)"""
+    def forward(self, feat2d: torch.Tensor,
+                era5: torch.Tensor) -> torch.Tensor:
+        """
+        feat2d: (B, feat_dim, H, W)
+        era5:   (B, n_vars, nz)
+        """
         B, C, H, W = feat2d.shape
-        # (B, C, H, W) → (B, H, W, C)
-        x = feat2d.permute(0, 2, 3, 1)
-        # (B, H, W, C) → (B, H, W, C*nz)
-        x = self.vert_proj(x)
-        # (B, H, W, C, nz) → (B, C, H, W, nz)
-        x = x.view(B, H, W, C, self.nz).permute(0, 3, 1, 2, 4)
-        # 3D convolution refinement → (B, 1, H, W, nz)
-        x = self.refine(x)
-        return x
+        # Expand to 3D: (B, C, H, W, 1) * (1, C, 1, 1, nz) → (B, C, H, W, nz)
+        vol = feat2d.unsqueeze(-1) * self.vert_basis
+
+        # FiLM modulation
+        film = self.film_net(era5.flatten(1))  # (B, C*nz*2)
+        film = film.view(B, C, self.nz, 2)
+        gamma = film[:, :, :, 0]  # (B, C, nz)
+        beta = film[:, :, :, 1]
+        # Apply: (B, C, H, W, nz) * (B, C, 1, 1, nz) + ...
+        vol = vol * (1 + gamma[:, :, None, None, :]) + beta[:, :, None, None, :]
+
+        return self.refine(vol)  # (B, 1, H, W, nz)
 
 
-class TerrainViT(nn.Module):
-    """Vision Transformer for terrain-aware 3D wind field downscaling.
+class TerrainViT_S1(nn.Module):
+    """S1: v1 encoder + v2 decoder + FiLM vertical."""
 
-    V2 architecture — FuXi-CFD style input fusion.
-
-    Input:
-      - terrain_z0: (B, 2, 128, 128) — normalized elevation + roughness
-      - era5:       (B, 5, 32) — ERA5 profiles [u, v, T, q, k]
-
-    The ERA5 profiles are broadcast to (B, 5, 128, 128) taking the mean
-    across z-levels per variable, then concatenated with terrain → 7 channels.
-
-    Output: (B, 5, 128, 128, 32) — predicted residual fields (u, v, w, T, q)
-    """
-
-    def __init__(
-        self,
-        img_size: int = 128,
-        patch_size: int = 8,
-        n_era5_vars: int = 5,
-        nz: int = 32,
-        embed_dim: int = 384,
-        depth: int = 12,
-        n_heads: int = 8,
-        mlp_ratio: float = 4.0,
-        drop: float = 0.1,
-        n_output_vars: int = 5,
-        decoder_feat_dim: int = 64,
-    ):
+    def __init__(self, img_size=128, patch_size=8, nz=32,
+                 embed_dim=384, depth=12, n_heads=8,
+                 mlp_ratio=4.0, drop=0.1, feat_dim=64,
+                 n_era5_vars=5, n_output_vars=5):
         super().__init__()
-        self.nz = nz
-        self.n_output_vars = n_output_vars
-        self.n_era5_vars = n_era5_vars
-        self.img_size = img_size
-        self.patch_grid = img_size // patch_size
+        pg = img_size // patch_size
+        self.patch_grid = pg
 
-        # ERA5 profile → per-level spatial maps
-        # Project each (n_vars, nz) profile into n_era5_vars 2D channels
-        self.era5_proj = nn.Sequential(
-            nn.Linear(n_era5_vars * nz, 128),
-            nn.GELU(),
-            nn.Linear(128, n_era5_vars),
-        )
-
-        # Input fusion: 2 (terrain) + n_era5_vars channels → downsample → tokens
-        self.downsample = DownsampleFusion(
-            in_channels=2 + n_era5_vars,
-            embed_dim=embed_dim,
-            img_size=img_size,
-            patch_size=patch_size,
-        )
-
-        # Transformer encoder
+        self.patch_embed = PatchEmbed2D(2, embed_dim, img_size, patch_size)
+        self.era5_enc = ERA5Encoder(n_era5_vars, nz, embed_dim)
         self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim, n_heads, mlp_ratio, drop)
-            for _ in range(depth)
-        ])
+            for _ in range(depth)])
         self.norm = nn.LayerNorm(embed_dim)
-
-        # Shared 2D upsampler (tokens → full-res 2D feature map)
-        self.upsample = UpsampleDecoder2D(
-            embed_dim=embed_dim,
-            feat_dim=decoder_feat_dim,
-            patch_grid=self.patch_grid,
-            img_size=img_size,
-        )
-
-        # Per-variable 3D decoder heads
+        self.upsample = UpsampleDecoder2D(embed_dim, feat_dim, pg)
         self.heads = nn.ModuleList([
-            DecoderHead3D(feat_dim=decoder_feat_dim, nz=nz)
-            for _ in range(n_output_vars)
-        ])
+            FiLMVerticalHead(feat_dim, nz, n_era5_vars)
+            for _ in range(n_output_vars)])
+        self.apply(_init_weights)
 
-        self._init_weights()
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.trunc_normal_(m.weight, std=0.02)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, (nn.Conv2d, nn.Conv3d, nn.ConvTranspose2d)):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-    def forward(self, terrain: torch.Tensor, era5: torch.Tensor) -> torch.Tensor:
-        """
-        Parameters
-        ----------
-        terrain : (B, 2, 128, 128) — [terrain_norm, z0_norm]
-        era5    : (B, 5, 32) — ERA5 profiles [u, v, T, q, k] normalized
-
-        Returns
-        -------
-        (B, 5, 128, 128, 32) — predicted residual fields
-        """
-        B = terrain.shape[0]
-        H, W = terrain.shape[2], terrain.shape[3]
-
-        # ERA5 profiles → summary channels broadcast to 2D
-        era5_flat = era5.flatten(1)  # (B, n_vars * nz)
-        era5_2d = self.era5_proj(era5_flat)  # (B, n_era5_vars)
-        era5_spatial = era5_2d[:, :, None, None].expand(
-            B, self.n_era5_vars, H, W)  # (B, 5, 128, 128)
-
-        # Concatenate terrain + ERA5 → (B, 7, 128, 128)
-        x = torch.cat([terrain, era5_spatial], dim=1)
-
-        # Downsample + patchify → tokens
-        tokens = self.downsample(x)  # (B, n_patches, embed_dim)
-
-        # Transformer encoder
-        for block in self.blocks:
-            tokens = block(tokens)
+    def forward(self, terrain, era5):
+        tokens = self.patch_embed(terrain)
+        tokens = tokens + self.era5_enc(era5).unsqueeze(1)
+        for blk in self.blocks:
+            tokens = blk(tokens)
         tokens = self.norm(tokens)
-
-        # Reshape tokens to 2D feature map
         pg = self.patch_grid
         feat2d = tokens.transpose(1, 2).view(
-            B, -1, pg, pg)  # (B, embed_dim, pg, pg)
-
-        # Shared 2D upsampling
-        feat2d = self.upsample(feat2d)  # (B, feat_dim, H, W)
-
-        # Per-variable 3D decoding
-        outputs = [head(feat2d) for head in self.heads]
-        return torch.cat(outputs, dim=1)  # (B, 5, H, W, nz)
+            tokens.shape[0], -1, pg, pg)
+        feat2d = self.upsample(feat2d)
+        return torch.cat([h(feat2d, era5) for h in self.heads], dim=1)
 
 
-def build_vit(preset: str = "base", **overrides) -> TerrainViT:
-    """Build a TerrainViT with preset configurations.
+# ═══════════════════════════════════════════════════════════════════════════
+# S2 — Factored 2D+1D: 2D transformer + vertical MLP conditioned by ERA5
+# ═══════════════════════════════════════════════════════════════════════════
 
-    Presets:
-      - "small":  embed_dim=256, depth=8,  heads=8,  feat=48  (~15M params)
-      - "base":   embed_dim=384, depth=12, heads=8,  feat=64  (~45M params)
-      - "large":  embed_dim=512, depth=16, heads=16, feat=96  (~100M params)
+class VerticalMLPHead(nn.Module):
+    """Per-variable head: 2D features + ERA5 profile → 3D via vertical MLP.
+
+    For each spatial location, MLP(feat_vec, ERA5_profile) → nz output values.
     """
-    configs = {
-        "small": dict(embed_dim=256, depth=8, n_heads=8, drop=0.1,
-                       decoder_feat_dim=48),
-        "base": dict(embed_dim=384, depth=12, n_heads=8, drop=0.1,
-                      decoder_feat_dim=64),
-        "large": dict(embed_dim=512, depth=16, n_heads=16, drop=0.1,
-                       decoder_feat_dim=96),
-    }
-    if preset not in configs:
-        raise ValueError(f"Unknown preset: {preset}. Choose from {list(configs)}")
-    cfg = {**configs[preset], **overrides}
-    return TerrainViT(**cfg)
+
+    def __init__(self, feat_dim: int = 64, nz: int = 32,
+                 n_era5_vars: int = 5, hidden: int = 128):
+        super().__init__()
+        self.nz = nz
+        in_dim = feat_dim + n_era5_vars * nz
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.GELU(),
+            nn.Linear(hidden, hidden), nn.GELU(),
+            nn.Linear(hidden, nz),
+        )
+
+    def forward(self, feat2d: torch.Tensor,
+                era5: torch.Tensor) -> torch.Tensor:
+        """
+        feat2d: (B, feat_dim, H, W)
+        era5:   (B, n_vars, nz)
+        """
+        B, C, H, W = feat2d.shape
+        # Concat feat + ERA5 at each spatial location
+        era5_flat = era5.flatten(1)  # (B, n_vars*nz)
+        era5_bc = era5_flat[:, :, None, None].expand(B, -1, H, W)
+        # (B, feat+era5, H, W)
+        x = torch.cat([feat2d, era5_bc], dim=1)
+        # (B, H, W, feat+era5) → MLP → (B, H, W, nz)
+        x = x.permute(0, 2, 3, 1)
+        x = self.mlp(x)
+        # (B, 1, H, W, nz)
+        return x.permute(0, 3, 1, 2).unsqueeze(1).permute(0, 1, 3, 4, 2)
+
+
+class TerrainViT_S2(nn.Module):
+    """S2: Factored — 2D transformer + per-location vertical MLP."""
+
+    def __init__(self, img_size=128, patch_size=8, nz=32,
+                 embed_dim=384, depth=12, n_heads=8,
+                 mlp_ratio=4.0, drop=0.1, feat_dim=64,
+                 n_era5_vars=5, n_output_vars=5):
+        super().__init__()
+        pg = img_size // patch_size
+        self.patch_grid = pg
+
+        self.patch_embed = PatchEmbed2D(2, embed_dim, img_size, patch_size)
+        self.era5_enc = ERA5Encoder(n_era5_vars, nz, embed_dim)
+        self.blocks = nn.ModuleList([
+            TransformerBlock(embed_dim, n_heads, mlp_ratio, drop)
+            for _ in range(depth)])
+        self.norm = nn.LayerNorm(embed_dim)
+        self.upsample = UpsampleDecoder2D(embed_dim, feat_dim, pg)
+        self.heads = nn.ModuleList([
+            VerticalMLPHead(feat_dim, nz, n_era5_vars)
+            for _ in range(n_output_vars)])
+        self.apply(_init_weights)
+
+    def forward(self, terrain, era5):
+        tokens = self.patch_embed(terrain)
+        tokens = tokens + self.era5_enc(era5).unsqueeze(1)
+        for blk in self.blocks:
+            tokens = blk(tokens)
+        tokens = self.norm(tokens)
+        pg = self.patch_grid
+        feat2d = tokens.transpose(1, 2).view(
+            tokens.shape[0], -1, pg, pg)
+        feat2d = self.upsample(feat2d)
+        return torch.cat([h(feat2d, era5) for h in self.heads], dim=1)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# S3 — Cross-attention: terrain tokens × ERA5 profile tokens
+# ═══════════════════════════════════════════════════════════════════════════
+
+class ERA5TokenEncoder(nn.Module):
+    """Encode ERA5 profiles into a sequence of tokens for cross-attention.
+
+    (B, n_vars, nz) → (B, n_tokens, embed_dim)
+    Uses Conv1d to create tokens from profile slices.
+    """
+
+    def __init__(self, n_vars: int = 5, nz: int = 32,
+                 embed_dim: int = 384, n_tokens: int = 16):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(n_vars * nz, embed_dim), nn.GELU(),
+            nn.Linear(embed_dim, embed_dim * n_tokens),
+        )
+        self.n_tokens = n_tokens
+        self.embed_dim = embed_dim
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, n_tokens, embed_dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+    def forward(self, profiles: torch.Tensor) -> torch.Tensor:
+        B = profiles.shape[0]
+        x = self.proj(profiles.flatten(1))
+        x = x.view(B, self.n_tokens, self.embed_dim)
+        return x + self.pos_embed
+
+
+class TerrainViT_S3(nn.Module):
+    """S3: Cross-attention — terrain queries attend to ERA5 key/values."""
+
+    def __init__(self, img_size=128, patch_size=8, nz=32,
+                 embed_dim=384, depth=12, n_heads=8,
+                 mlp_ratio=4.0, drop=0.1, feat_dim=64,
+                 n_era5_vars=5, n_output_vars=5,
+                 n_cross_layers=4, n_era5_tokens=16):
+        super().__init__()
+        pg = img_size // patch_size
+        self.patch_grid = pg
+        n_self = depth - n_cross_layers
+
+        self.patch_embed = PatchEmbed2D(2, embed_dim, img_size, patch_size)
+        self.era5_tokens = ERA5TokenEncoder(
+            n_era5_vars, nz, embed_dim, n_era5_tokens)
+
+        # Cross-attention layers first (ERA5 → terrain)
+        self.cross_blocks = nn.ModuleList([
+            CrossAttentionBlock(embed_dim, n_heads, drop)
+            for _ in range(n_cross_layers)])
+        # Self-attention layers
+        self.self_blocks = nn.ModuleList([
+            TransformerBlock(embed_dim, n_heads, mlp_ratio, drop)
+            for _ in range(n_self)])
+        self.norm = nn.LayerNorm(embed_dim)
+
+        self.upsample = UpsampleDecoder2D(embed_dim, feat_dim, pg)
+        self.heads = nn.ModuleList([
+            FiLMVerticalHead(feat_dim, nz, n_era5_vars)
+            for _ in range(n_output_vars)])
+        self.apply(_init_weights)
+
+    def forward(self, terrain, era5):
+        t_tokens = self.patch_embed(terrain)     # (B, 256, dim)
+        e_tokens = self.era5_tokens(era5)        # (B, 16, dim)
+
+        # Cross-attention: terrain attends to ERA5
+        for blk in self.cross_blocks:
+            t_tokens = blk(t_tokens, e_tokens)
+        # Self-attention on enriched terrain tokens
+        for blk in self.self_blocks:
+            t_tokens = blk(t_tokens)
+        t_tokens = self.norm(t_tokens)
+
+        pg = self.patch_grid
+        feat2d = t_tokens.transpose(1, 2).view(
+            t_tokens.shape[0], -1, pg, pg)
+        feat2d = self.upsample(feat2d)
+        return torch.cat([h(feat2d, era5) for h in self.heads], dim=1)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Builder
+# ═══════════════════════════════════════════════════════════════════════════
+
+_PRESETS = {
+    "small": dict(embed_dim=256, depth=8, n_heads=8, drop=0.1, feat_dim=48),
+    "base": dict(embed_dim=384, depth=12, n_heads=8, drop=0.1, feat_dim=64),
+}
+
+_VARIANTS = {
+    "film": TerrainViT_S1,
+    "factor": TerrainViT_S2,
+    "cross": TerrainViT_S3,
+}
+
+
+def build_vit(variant: str = "film", preset: str = "base",
+              **overrides) -> nn.Module:
+    """Build a TerrainViT variant.
+
+    Variants: "film" (S1), "factor" (S2), "cross" (S3)
+    Presets:  "small" (~10-15M), "base" (~20-30M)
+    """
+    if variant not in _VARIANTS:
+        raise ValueError(f"Unknown variant: {variant}. Choose from {list(_VARIANTS)}")
+    if preset not in _PRESETS:
+        raise ValueError(f"Unknown preset: {preset}. Choose from {list(_PRESETS)}")
+    cfg = {**_PRESETS[preset], **overrides}
+    return _VARIANTS[variant](**cfg)

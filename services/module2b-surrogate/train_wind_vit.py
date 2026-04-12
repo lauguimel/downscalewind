@@ -1,24 +1,30 @@
 """
 train_wind_vit.py — Train TerrainViT for 3D wind downscaling on 9k dataset.
 
-Architecture inspired by FuXi-CFD (Lin et al., Nature Communications 2026):
-  - Vision Transformer with terrain patch embedding + ERA5 profile conditioning
-  - Per-variable 3D decoder heads
-  - Charbonnier + frequency-domain amplitude loss
+Supports 3 architecture variants (S1/S2/S3) with S4 training recipe:
+  S1 "film":   v1 encoder + FiLM vertical decoder
+  S2 "factor": Factored 2D transformer + 1D vertical MLP
+  S3 "cross":  Cross-attention terrain × ERA5 tokens
+
+S4 training recipe:
+  - Linear warmup (10 epochs) + cosine decay (no restart)
+  - Weight decay 0.1, patience 50
+  - Charbonnier + amplitude + divergence losses
 
 Usage:
     python train_wind_vit.py \
         --data-dir /path/to/training_9k \
         --output /path/to/models \
+        --variant film \
         --preset base \
-        --epochs 200 \
-        --batch-size 4
+        --epochs 200
 """
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import math
 import time
 from pathlib import Path
 
@@ -26,7 +32,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 
 from src.dataset_wind9k import Wind9kDataset, WIND_UV_SCALE, WIND_W_SCALE, T_SCALE, Q_SCALE
@@ -153,14 +159,25 @@ def train(args):
         prefetch_factor=2, persistent_workers=True)
 
     # Model
-    model = build_vit(preset=args.preset, nz=32, img_size=128, patch_size=8)
+    variant = getattr(args, "variant", "film")
+    model = build_vit(variant=variant, preset=args.preset,
+                      nz=32, img_size=128, patch_size=8)
     model = model.to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"Model: TerrainViT-{args.preset}, params: {n_params:,}")
+    logger.info(f"Model: TerrainViT-{variant}-{args.preset}, params: {n_params:,}")
 
-    # Optimizer
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=50, T_mult=2, eta_min=1e-6)
+    # S4: AdamW with higher weight decay + linear warmup + cosine decay (no restart)
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=0.1)
+    warmup_epochs = 10
+    total_epochs = args.epochs
+
+    def lr_lambda(epoch):
+        if epoch < warmup_epochs:
+            return epoch / warmup_epochs
+        progress = (epoch - warmup_epochs) / max(total_epochs - warmup_epochs, 1)
+        return max(1e-6 / args.lr, 0.5 * (1 + math.cos(math.pi * progress)))
+
+    scheduler = LambdaLR(optimizer, lr_lambda)
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
 
     # Z levels for divergence loss
@@ -268,6 +285,7 @@ def train(args):
                 "optimizer_state_dict": optimizer.state_dict(),
                 "val_loss": avg_val,
                 "rmse": {k: float(np.mean(v)) for k, v in val_metrics_acc.items()},
+                "variant": variant,
                 "preset": args.preset,
                 "n_params": n_params,
             }, out_dir / "best_model.pt")
@@ -309,15 +327,17 @@ def main():
                         help="Root dir with site_NNNNN_case_tsNNN/ folders + dataset.yaml")
     parser.add_argument("--output", required=True,
                         help="Output directory for checkpoints")
-    parser.add_argument("--run-name", default="vit_base",
-                        help="Run name for output subdir")
-    parser.add_argument("--preset", choices=["small", "base", "large"],
+    parser.add_argument("--run-name", default=None,
+                        help="Run name for output subdir (auto from variant+preset)")
+    parser.add_argument("--variant", choices=["film", "factor", "cross"],
+                        default="film", help="Architecture variant (S1/S2/S3)")
+    parser.add_argument("--preset", choices=["small", "base"],
                         default="base", help="ViT size preset")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--patience", type=int, default=30,
+    parser.add_argument("--patience", type=int, default=50,
                         help="Early stopping patience")
     # Loss weights
     parser.add_argument("--lambda-amp", type=float, default=0.1,
@@ -326,6 +346,8 @@ def main():
                         help="Weight for divergence penalty")
 
     args = parser.parse_args()
+    if args.run_name is None:
+        args.run_name = f"vit_{args.variant}_{args.preset}"
     train(args)
 
 
