@@ -123,7 +123,7 @@ def evaluate_grid_model(args):
             cond_dim=0,
         ).to(device)
 
-    checkpoint = torch.load(args.weights, map_location=device, weights_only=True)
+    checkpoint = torch.load(args.weights, map_location=device, weights_only=False)
     if "model" in checkpoint:
         model.load_state_dict(checkpoint["model"])
     elif "model_state_dict" in checkpoint:
@@ -195,17 +195,25 @@ def evaluate_vit(args):
     from src.model_vit import build_vit
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info("Evaluating ViT-%s on %s", args.vit_preset, device)
+    vit_variant = getattr(args, "vit_variant", "cross")
+    logger.info("Evaluating ViT-%s-%s on %s", vit_variant, args.vit_preset, device)
 
     dataset_yaml = Path(args.data_dir) / "dataset.yaml"
     test_ds = Wind9kDataset(args.data_dir, dataset_yaml, split="test",
                             use_residual=True, augment=False)
     logger.info("Test set: %d cases", len(test_ds))
 
-    model = build_vit(preset=args.vit_preset, nz=32, img_size=128, patch_size=8)
+    # Auto-detect variant from checkpoint if available
+    checkpoint_peek = torch.load(args.weights, map_location="cpu", weights_only=False)  # noqa: S614
+    if "variant" in checkpoint_peek:
+        vit_variant = checkpoint_peek["variant"]
+        logger.info("Detected variant from checkpoint: %s", vit_variant)
+
+    model = build_vit(variant=vit_variant, preset=args.vit_preset,
+                      nz=32, img_size=128, patch_size=8)
     model = model.to(device)
 
-    checkpoint = torch.load(args.weights, map_location=device, weights_only=True)
+    checkpoint = torch.load(args.weights, map_location=device, weights_only=False)
     if "model_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
     elif "model" in checkpoint:
@@ -329,8 +337,11 @@ def main():
                         choices=["unet", "fno", "factored", "vit"],
                         help="Architecture type")
     parser.add_argument("--vit-preset", default="base",
-                        choices=["small", "base", "large"],
+                        choices=["small", "base"],
                         help="ViT preset (only for --model-type vit)")
+    parser.add_argument("--vit-variant", default="cross",
+                        choices=["film", "factor", "cross"],
+                        help="ViT architecture variant")
     args = parser.parse_args()
 
     output_dir = Path(args.output)
