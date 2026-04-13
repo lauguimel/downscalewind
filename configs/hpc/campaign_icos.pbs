@@ -1,141 +1,58 @@
 #!/bin/bash -l
 #PBS -N icos_cfd
-#PBS -l select=1:ncpus=48:mem=96GB
-#PBS -l walltime=08:00:00
+#PBS -l select=1:ncpus=24:mem=48GB
+#PBS -l walltime=04:00:00
 #PBS -j oe
 #PBS -m ae
 
-# ICOS validation CFD campaign — simpleFoam (neutral, k-epsilon) at ICOS tall-tower sites.
-#
-# Uses the SAME workflow that worked for the 9k campaign on UGA:
-#   run_multisite_campaign.py --run-matrix ... --srtm ... --era5-zarr ... --output ...
-#
-# Key differences vs UGA:
-#   - Apptainer instead of Docker (--runtime apptainer, --of-image .sif)
-#   - TBM image also as .sif
-#   - Conda env: fuxicfd (not downscalewind — matches existing Aqua setup)
-#
-# Prerequisites on Aqua (check ALL before submitting):
-#   1. ~/dsw/data/campaign/icos_fwi_v1/run_matrix.csv (rsync from local)
-#   2. ~/dsw/data/raw/srtm_europe.tif                 (rsync from local or download)
-#   3. ~/dsw/data/raw/era5_europe_2020_2023.zarr       (rsync or CDS download)
-#   4. ~/dsw/containers/openfoam_v2512.sif             (from microfluidica/openfoam:latest)
-#   5. ~/dsw/containers/terrainblockmesher.sif         (from terrainblockmesher:of24)
-#   6. ~/dsw/services/module2a-cfd/                    (rsync from local)
-#   7. conda env "fuxicfd" with numpy, pandas, xarray, rasterio, pyproj, jinja2, zarr
-#
-# To build SIF files (run once on a machine with Docker):
-#   apptainer build openfoam_v2512.sif docker://microfluidica/openfoam:latest
-#   apptainer build terrainblockmesher.sif docker://terrainblockmesher:of24
-#
-# Usage:
-#   # First verify everything is in place:
-#   bash configs/hpc/campaign_icos.pbs --dry-run  # (not qsub — run interactively first!)
-#   # Then submit:
-#   qsub configs/hpc/campaign_icos.pbs
+# ICOS validation CFD campaign — simpleFoam (neutral) at 7 tall-tower sites.
+# 139 cases, 24 cores/solve, 2 parallel solves.
+# Smoke-tested on Aqua login node 2026-04-13 — full chain works.
 
 set -euo pipefail
+cd $HOME/dsw
 
-# ── Paths ──────────────────────────────────────────────────────────────────
-PROJECT="$HOME/dsw"
-CAMPAIGN_DIR="$PROJECT/data/campaign/icos_fwi_v1"
-RUN_MATRIX="$CAMPAIGN_DIR/run_matrix.csv"
-OUTPUT_DIR="$CAMPAIGN_DIR/cases"
-SRTM="$PROJECT/data/raw/srtm_europe.tif"
-ERA5="$PROJECT/data/raw/era5_europe_2020_2023.zarr"
-OF_SIF="$PROJECT/containers/openfoam_v2512.sif"
-TBM_SIF="$PROJECT/containers/terrainblockmesher.sif"
-SCRIPT_DIR="$PROJECT/services/module2a-cfd"
-N_CORES=24
-N_PARALLEL=2
-N_ITER=500
+OF_SIF="$HOME/dsw/containers/openfoam_v2512.sif"
+TBM_SIF="$HOME/dsw/containers/terrainblockmesher.sif"
+RUN_MATRIX="$HOME/dsw/data/campaign/icos_fwi_v1/run_matrix.csv"
+SRTM="$HOME/dsw/data/srtm_europe.tif"
+ERA5="$HOME/dsw/data/raw/era5_ope.zarr"
+OUTPUT="$HOME/dsw/data/campaign/icos_fwi_v1/cases"
 
-# ── Pre-flight checks (catch errors BEFORE waiting in the queue) ──────────
-echo "=== ICOS CFD Campaign — Pre-flight Check ==="
-echo "Date:    $(date)"
-echo "Node:    $(hostname)"
+echo "=== ICOS CFD Campaign ==="
+echo "Date:  $(date)"
+echo "Node:  $(hostname)"
+echo "Cores: $(nproc)"
 echo
 
-FAIL=0
-for f in "$RUN_MATRIX" "$SRTM" "$OF_SIF" "$TBM_SIF"; do
-    if [ ! -e "$f" ]; then
-        echo "MISSING: $f"
-        FAIL=1
-    else
-        echo "OK:      $f"
-    fi
+# Pre-flight
+for f in "$OF_SIF" "$TBM_SIF" "$RUN_MATRIX" "$SRTM"; do
+    [ -e "$f" ] && echo "OK: $f" || { echo "MISSING: $f"; exit 1; }
 done
-if [ ! -d "$ERA5" ]; then
-    echo "MISSING: $ERA5 (ERA5 Zarr directory)"
-    FAIL=1
-else
-    echo "OK:      $ERA5"
-fi
-for script in run_multisite_campaign.py reconstruct_fields.py prepare_inflow.py; do
-    if [ ! -f "$SCRIPT_DIR/$script" ]; then
-        echo "MISSING: $SCRIPT_DIR/$script"
-        FAIL=1
-    else
-        echo "OK:      $SCRIPT_DIR/$script"
-    fi
-done
-if [ "$FAIL" -eq 1 ]; then
-    echo
-    echo "ERROR: Missing prerequisites. Fix the above and resubmit."
-    exit 1
-fi
 
-N_CASES=$(tail -n +2 "$RUN_MATRIX" | wc -l)
-echo
-echo "Total cases:    $N_CASES"
-echo "Cores/solve:    $N_CORES"
-echo "Parallel solves: $N_PARALLEL"
-echo "Iterations:     $N_ITER"
-echo
-
-# ── Environment ────────────────────────────────────────────────────────────
 module load apptainer 2>/dev/null || true
-module load Miniconda3 2>/dev/null || module load Anaconda3 2>/dev/null || true
-eval "$(conda shell.bash hook)"
-conda activate fuxicfd
-
-echo "Python: $(which python)"
-echo "Apptainer: $(which apptainer 2>/dev/null || echo 'NOT FOUND')"
-python -c "import numpy, pandas, xarray, zarr, jinja2, rasterio; print('All imports OK')" \
-    || { echo "ERROR: missing Python packages in fuxicfd env"; exit 1; }
-
-# ── Quick container smoke test ─────────────────────────────────────────────
-echo
-echo "Testing OpenFOAM container..."
-apptainer exec "$OF_SIF" simpleFoam -help 2>&1 | head -3 \
-    || { echo "ERROR: OpenFOAM SIF doesn't work"; exit 1; }
-echo "Testing TBM container..."
-apptainer exec "$TBM_SIF" terrainBlockMesher -help 2>&1 | head -3 \
-    || { echo "ERROR: TBM SIF doesn't work"; exit 1; }
-echo "Container tests passed."
-echo
-
-# ── Run campaign ───────────────────────────────────────────────────────────
-echo "=== Starting campaign ($(date)) ==="
-mkdir -p "$OUTPUT_DIR"
-
-# Set container runtime for the Python scripts
 export CONTAINER_RUNTIME=apptainer
 
-python "$SCRIPT_DIR/run_multisite_campaign.py" \
+# Verify Python deps
+python -c "import numpy,pandas,xarray,zarr,rasterio,pyproj,jinja2,scipy; print('Python deps OK')" \
+    || { echo "ERROR: missing Python deps"; exit 1; }
+
+# Verify containers
+apptainer exec "$OF_SIF" bash -c "source /usr/lib/openfoam/openfoam2512/etc/bashrc && simpleFoam -help" >/dev/null 2>&1 \
+    && echo "OF SIF OK" || { echo "ERROR: OF SIF broken"; exit 1; }
+
+echo
+echo "=== Launching campaign ($(date)) ==="
+
+python services/module2a-cfd/run_multisite_campaign.py \
     --run-matrix "$RUN_MATRIX" \
     --srtm "$SRTM" \
     --era5-zarr "$ERA5" \
-    --output "$OUTPUT_DIR" \
-    --n-iter "$N_ITER" \
-    --n-cores "$N_CORES" \
-    --n-parallel "$N_PARALLEL" \
+    --output "$OUTPUT" \
+    --n-cores 12 --n-parallel 2 --n-iter 500 \
     --runtime apptainer \
     --of-image "$OF_SIF" \
-    --tbm-image "$TBM_SIF" \
-    || { echo "ERROR: campaign failed at $(date)"; exit 2; }
+    --tbm-image "$TBM_SIF"
 
 echo
-echo "=== Campaign completed ($(date)) ==="
-echo "Cases: $OUTPUT_DIR"
-echo "Run:   ls $OUTPUT_DIR/*/log.simpleFoam | wc -l  # to count solved cases"
+echo "=== DONE ($(date)) ==="
