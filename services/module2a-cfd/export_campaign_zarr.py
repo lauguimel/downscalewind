@@ -243,6 +243,11 @@ def export_zarr(
     """Main export pipeline."""
     import zarr
 
+    # zarr v2/v3 compatibility: v3 uses Group.create_array(name, data=...),
+    # v2 uses Group.create_dataset(name, data=...). Monkey-patch if needed.
+    if not hasattr(zarr.hierarchy.Group, "create_array"):
+        zarr.hierarchy.Group.create_array = zarr.hierarchy.Group.create_dataset
+
     cases = find_cases(cases_dir, case_prefix)
     if not cases:
         logger.error("No cases found in %s", cases_dir)

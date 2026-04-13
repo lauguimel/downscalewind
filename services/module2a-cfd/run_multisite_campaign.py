@@ -45,11 +45,24 @@ DOCKER_USER = f"{os.getuid()}:{os.getgid()}"
 CONTAINER_RUNTIME = os.environ.get("CONTAINER_RUNTIME", "docker")
 
 
+# OpenFOAM ESI v2512 bashrc path inside microfluidica/openfoam:latest SIF
+OF_ESI_BASHRC = "source /usr/lib/openfoam/openfoam2512/etc/bashrc 2>/dev/null || true"
+
+
 def _container_cmd(image: str, mount_dir: Path, cmd: list[str],
                    workdir: str = "/home/ofuser/run") -> list[str]:
-    """Build a container exec command for Docker or Apptainer."""
+    """Build a container exec command for Docker or Apptainer.
+
+    On Apptainer with the OF image, Docker ENTRYPOINT is not honored,
+    so we prepend the OF bashrc sourcing to any 'bash -c' command.
+    """
     d = str(mount_dir.resolve())
     if CONTAINER_RUNTIME == "apptainer":
+        # If this is the OF image (not TBM) and cmd is ["bash", "-c", ...],
+        # prepend the OF env sourcing. TBM has its own sourcing in run_tbm_mesh.
+        if image == OF_IMAGE and len(cmd) >= 3 and cmd[0] == "bash" and cmd[1] == "-c":
+            cmd = list(cmd)
+            cmd[2] = f"{OF_ESI_BASHRC} && {cmd[2]}"
         return [
             "apptainer", "exec", "--cleanenv",
             "--bind", f"{d}:{workdir}",
@@ -302,10 +315,23 @@ def run_tbm_mesh(mesh_dir: Path, mesh_cfg: dict) -> bool:
 
     t0 = time.time()
     chown_suffix = f"; chown -R {DOCKER_USER} /home/ofuser/run" if CONTAINER_RUNTIME == "docker" else ""
+    # TBM requires sourcing OF 2.4 + iwesol environment for library paths.
+    # On Docker (UGA) the ENTRYPOINT does this; on Apptainer we must do it explicitly.
+    if CONTAINER_RUNTIME == "apptainer":
+        tbm_env = (
+            ". /opt/openfoam/2.4.x/OpenFOAM-2.4.x/etc/bashrc; "
+            "export IWESOL=/opt/iwesol OLDEV=/opt/iwesol; "
+            ". $IWESOL/OF/OF-2.3.1/etc/bashrc; "
+            ". $IWESOL/nonOF/c++/etc/bashrc; "
+            "export PATH=/root/OpenFOAM/-2.4.x/platforms/linux64GccDPOpt/bin:$PATH; "
+            "export LD_LIBRARY_PATH=/root/OpenFOAM/-2.4.x/platforms/linux64GccDPOpt/lib:$LD_LIBRARY_PATH; "
+        )
+    else:
+        tbm_env = ""
     cmd = _container_cmd(
         TBM_IMAGE, mesh_dir,
         ["bash", "-c",
-         f"cd /home/ofuser/run && terrainBlockMesher; rc=$?{chown_suffix}; exit $rc"],
+         f"{tbm_env}cd /home/ofuser/run && terrainBlockMesher; rc=$?{chown_suffix}; exit $rc"],
     )
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
@@ -395,7 +421,7 @@ def setup_case(
              "--lat", str(site_lat),
              "--lon", str(site_lon),
              "--output", str(inflow_json)],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=300,
         )
         if result.returncode != 0:
             log.error("  prepare_inflow failed for %s: %s",
@@ -494,8 +520,12 @@ def solve_case(case_dir: Path, n_iter: int, n_cores: int) -> bool:
         txt = re.sub(r'numberOfSubdomains\s+\d+', f'numberOfSubdomains  {n_cores}', txt)
         dpd.write_text(txt)
 
-    # Helper: run OF command in container (Docker or Apptainer)
+    # Helper: run OF command in container (Docker or Apptainer).
+    # On Docker, the ENTRYPOINT sources OF bashrc. On Apptainer, we must
+    # wrap every command in 'bash -c "source bashrc && ..."'.
     def _docker_of(cmd: list[str], timeout: int = 300) -> subprocess.CompletedProcess:
+        if CONTAINER_RUNTIME == "apptainer" and cmd[0] != "bash":
+            cmd = ["bash", "-c", " ".join(cmd)]
         return subprocess.run(
             _container_cmd(OF_IMAGE, case_dir, cmd),
             capture_output=True, text=True, timeout=timeout,

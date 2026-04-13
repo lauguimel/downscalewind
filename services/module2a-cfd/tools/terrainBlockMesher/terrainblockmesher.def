@@ -1,0 +1,56 @@
+Bootstrap: docker
+From: asaramet/openfoam-2.4.x:latest
+
+%labels
+    Author Guillaume Maitrejean
+    Description terrainBlockMesher compiled on OpenFOAM 2.4.x
+
+%files
+    iwesol /opt/iwesol
+
+%post
+    export IWESOL=/opt/iwesol
+    export OLDEV=$IWESOL
+    export OF_BASHRC=/opt/openfoam/2.4.x/OpenFOAM-2.4.x/etc/bashrc
+
+    # Source OpenFOAM 2.4 environment
+    . $OF_BASHRC
+
+    # Source iwesol environment (sets OLDEV_OF_SRC, OLDEV_CPP_*, LD_LIBRARY_PATH)
+    . $IWESOL/OF/OF-2.3.1/etc/bashrc
+    . $IWESOL/nonOF/c++/etc/bashrc
+
+    # Create build dirs for nonOF libraries (Makefile expects obj/ and dep/)
+    mkdir -p $IWESOL/nonOF/c++/src/io/obj $IWESOL/nonOF/c++/src/io/dep
+    mkdir -p $IWESOL/nonOF/c++/src/data/obj $IWESOL/nonOF/c++/src/data/dep
+    mkdir -p $IWESOL/nonOF/c++/src/plot/obj $IWESOL/nonOF/c++/src/plot/dep
+    mkdir -p $IWESOL/nonOF/c++/lib
+
+    # Compile nonOF C++ libraries (pure C++, no OF dependency)
+    cd $IWESOL
+    make lolCppIO || true
+    make lolCppData || true
+    make lolCppPlot || true
+
+    # Compile OF libraries (wmake)
+    wmake libso OF/OF-2.3.1/src/basics
+    wmake libso OF/OF-2.3.1/src/functions
+    wmake libso OF/OF-2.3.1/src/mesh/blockMesh
+    wmake libso OF/OF-2.3.1/src/geometry
+    wmake libso OF/OF-2.3.1/src/mesh/meshTools
+
+    # Compile terrainBlockMesher application
+    wmake OF/OF-2.3.1/applications/utilities/mesh/terrainBlockMesher
+
+    # Verify
+    which terrainBlockMesher && echo "=== BUILD SUCCESS ===" || echo "=== BUILD FAILED ==="
+
+%environment
+    export IWESOL=/opt/iwesol
+    export OLDEV=$IWESOL
+    . /opt/openfoam/2.4.x/OpenFOAM-2.4.x/etc/bashrc 2>/dev/null || true
+    . $IWESOL/OF/OF-2.3.1/etc/bashrc 2>/dev/null || true
+    . $IWESOL/nonOF/c++/etc/bashrc 2>/dev/null || true
+
+%runscript
+    exec terrainBlockMesher "$@"
