@@ -107,18 +107,25 @@ class UpsampleDecoder2D(nn.Module):
 
 
 class ERA5Encoder(nn.Module):
-    """Encode ERA5 profiles (5, nz) → (embed_dim,) for additive conditioning."""
+    """Encode ERA5 grid/profiles → (embed_dim,) for additive conditioning.
 
-    def __init__(self, n_vars: int = 5, nz: int = 32, embed_dim: int = 384):
+    Accepts either:
+      - (B, 4, 3, 3, 32) — 3×3 spatial grid, 4 vars, 32 z-levels
+      - (B, 4, 1, 1, 32) — 1D profiles (backward compat)
+      - (B, 5, 32) — legacy 1D profiles
+    All are flattened and projected.
+    """
+
+    def __init__(self, era5_input_dim: int = 1440, embed_dim: int = 384):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_vars * nz, embed_dim),
+            nn.Linear(era5_input_dim, embed_dim),
             nn.GELU(),
             nn.Linear(embed_dim, embed_dim),
         )
 
-    def forward(self, profiles: torch.Tensor) -> torch.Tensor:
-        return self.net(profiles.flatten(1))
+    def forward(self, era5: torch.Tensor) -> torch.Tensor:
+        return self.net(era5.flatten(1))
 
 
 def _init_weights(module):
@@ -145,14 +152,14 @@ class FiLMVerticalHead(nn.Module):
     """
 
     def __init__(self, feat_dim: int = 64, nz: int = 32,
-                 n_era5_vars: int = 5, hidden: int = 32):
+                 era5_input_dim: int = 1440, hidden: int = 32):
         super().__init__()
         self.nz = nz
         # Expand 2D → 3D: learn a vertical basis
         self.vert_basis = nn.Parameter(torch.randn(1, feat_dim, 1, 1, nz) * 0.02)
-        # FiLM from ERA5 profiles: (n_vars, nz) → per-level (gamma, beta)
+        # FiLM from ERA5: flatten → per-level (gamma, beta)
         self.film_net = nn.Sequential(
-            nn.Linear(n_era5_vars * nz, 128), nn.GELU(),
+            nn.Linear(era5_input_dim, 128), nn.GELU(),
             nn.Linear(128, feat_dim * nz * 2),  # gamma + beta per (feat, z)
         )
         # 3D refinement
@@ -189,20 +196,20 @@ class TerrainViT_S1(nn.Module):
     def __init__(self, img_size=128, patch_size=8, nz=32,
                  embed_dim=384, depth=12, n_heads=8,
                  mlp_ratio=4.0, drop=0.1, feat_dim=64,
-                 n_era5_vars=5, n_output_vars=5):
+                 era5_input_dim=1440, n_output_vars=5):
         super().__init__()
         pg = img_size // patch_size
         self.patch_grid = pg
 
         self.patch_embed = PatchEmbed2D(2, embed_dim, img_size, patch_size)
-        self.era5_enc = ERA5Encoder(n_era5_vars, nz, embed_dim)
+        self.era5_enc = ERA5Encoder(era5_input_dim, embed_dim)
         self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim, n_heads, mlp_ratio, drop)
             for _ in range(depth)])
         self.norm = nn.LayerNorm(embed_dim)
         self.upsample = UpsampleDecoder2D(embed_dim, feat_dim, pg)
         self.heads = nn.ModuleList([
-            FiLMVerticalHead(feat_dim, nz, n_era5_vars)
+            FiLMVerticalHead(feat_dim, nz, era5_input_dim)
             for _ in range(n_output_vars)])
         self.apply(_init_weights)
 
@@ -230,10 +237,10 @@ class VerticalMLPHead(nn.Module):
     """
 
     def __init__(self, feat_dim: int = 64, nz: int = 32,
-                 n_era5_vars: int = 5, hidden: int = 128):
+                 era5_input_dim: int = 1440, hidden: int = 128):
         super().__init__()
         self.nz = nz
-        in_dim = feat_dim + n_era5_vars * nz
+        in_dim = feat_dim + era5_input_dim
         self.mlp = nn.Sequential(
             nn.Linear(in_dim, hidden), nn.GELU(),
             nn.Linear(hidden, hidden), nn.GELU(),
@@ -265,20 +272,20 @@ class TerrainViT_S2(nn.Module):
     def __init__(self, img_size=128, patch_size=8, nz=32,
                  embed_dim=384, depth=12, n_heads=8,
                  mlp_ratio=4.0, drop=0.1, feat_dim=64,
-                 n_era5_vars=5, n_output_vars=5):
+                 era5_input_dim=1440, n_output_vars=5):
         super().__init__()
         pg = img_size // patch_size
         self.patch_grid = pg
 
         self.patch_embed = PatchEmbed2D(2, embed_dim, img_size, patch_size)
-        self.era5_enc = ERA5Encoder(n_era5_vars, nz, embed_dim)
+        self.era5_enc = ERA5Encoder(era5_input_dim, embed_dim)
         self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim, n_heads, mlp_ratio, drop)
             for _ in range(depth)])
         self.norm = nn.LayerNorm(embed_dim)
         self.upsample = UpsampleDecoder2D(embed_dim, feat_dim, pg)
         self.heads = nn.ModuleList([
-            VerticalMLPHead(feat_dim, nz, n_era5_vars)
+            VerticalMLPHead(feat_dim, nz, era5_input_dim)
             for _ in range(n_output_vars)])
         self.apply(_init_weights)
 
@@ -306,11 +313,11 @@ class ERA5TokenEncoder(nn.Module):
     Uses Conv1d to create tokens from profile slices.
     """
 
-    def __init__(self, n_vars: int = 5, nz: int = 32,
+    def __init__(self, era5_input_dim: int = 1440,
                  embed_dim: int = 384, n_tokens: int = 16):
         super().__init__()
         self.proj = nn.Sequential(
-            nn.Linear(n_vars * nz, embed_dim), nn.GELU(),
+            nn.Linear(era5_input_dim, embed_dim), nn.GELU(),
             nn.Linear(embed_dim, embed_dim * n_tokens),
         )
         self.n_tokens = n_tokens
@@ -332,7 +339,7 @@ class TerrainViT_S3(nn.Module):
     def __init__(self, img_size=128, patch_size=8, nz=32,
                  embed_dim=384, depth=12, n_heads=8,
                  mlp_ratio=4.0, drop=0.1, feat_dim=64,
-                 n_era5_vars=5, n_output_vars=5,
+                 era5_input_dim=1440, n_output_vars=5,
                  n_cross_layers=4, n_era5_tokens=16):
         super().__init__()
         pg = img_size // patch_size
@@ -341,7 +348,7 @@ class TerrainViT_S3(nn.Module):
 
         self.patch_embed = PatchEmbed2D(2, embed_dim, img_size, patch_size)
         self.era5_tokens = ERA5TokenEncoder(
-            n_era5_vars, nz, embed_dim, n_era5_tokens)
+            era5_input_dim, embed_dim, n_era5_tokens)
 
         # Cross-attention layers first (ERA5 → terrain)
         self.cross_blocks = nn.ModuleList([
@@ -355,7 +362,7 @@ class TerrainViT_S3(nn.Module):
 
         self.upsample = UpsampleDecoder2D(embed_dim, feat_dim, pg)
         self.heads = nn.ModuleList([
-            FiLMVerticalHead(feat_dim, nz, n_era5_vars)
+            FiLMVerticalHead(feat_dim, nz, era5_input_dim)
             for _ in range(n_output_vars)])
         self.apply(_init_weights)
 

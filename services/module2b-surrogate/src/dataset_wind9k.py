@@ -100,17 +100,30 @@ class Wind9kDataset(Dataset):
             z0 / Z0_SCALE,
         ], axis=0)  # (2, ny, nx)
 
-        # ── ERA5 profiles (5, nz) ──
-        era5_grp = store["input/era5"]
-        profiles = []
-        for var in ["u", "v", "T", "q", "k"]:
-            if var in era5_grp:
-                prof = np.array(era5_grp[var][:], dtype=np.float32)
-                profiles.append(prof / ERA5_SCALES[var])
-            else:
-                nz = 32
-                profiles.append(np.zeros(nz, dtype=np.float32))
-        era5_input = np.stack(profiles, axis=0)  # (5, nz)
+        # ── ERA5 input ──
+        # Prefer 3D grid (3, 3, 32) if available, else fallback to 1D (5, 32)
+        if "input/era5_3d" in store:
+            era5_3d_grp = store["input/era5_3d"]
+            era5_channels = []
+            for var, scale in [("u", WIND_UV_SCALE), ("v", WIND_UV_SCALE),
+                               ("T", 300.0), ("q", Q_SCALE), ("k", K_SCALE)]:
+                if var in era5_3d_grp:
+                    arr = np.array(era5_3d_grp[var][:], dtype=np.float32)
+                    era5_channels.append(arr / scale)  # (3, 3, 32)
+                else:
+                    era5_channels.append(np.zeros((3, 3, 32), dtype=np.float32))
+            era5_input = np.stack(era5_channels, axis=0)  # (5, 3, 3, 32)
+        else:
+            # Fallback: 1D profiles → broadcast to (5, 1, 1, 32)
+            era5_grp = store["input/era5"]
+            profiles = []
+            for var in ["u", "v", "T", "q", "k"]:
+                if var in era5_grp:
+                    prof = np.array(era5_grp[var][:], dtype=np.float32)
+                    profiles.append(prof / ERA5_SCALES[var])
+                else:
+                    profiles.append(np.zeros(32, dtype=np.float32))
+            era5_input = np.stack(profiles, axis=0)[:, None, None, :]  # (5, 1, 1, 32)
 
         # ── Target (5, ny, nx, nz) ──
         if self.use_residual and "residual" in store:
@@ -155,6 +168,6 @@ class Wind9kDataset(Dataset):
 
         return (
             torch.from_numpy(terrain_input),  # (2, 128, 128)
-            torch.from_numpy(era5_input),      # (5, 32)
+            torch.from_numpy(era5_input),      # (5, 3, 3, 32) or (5, 1, 1, 32)
             torch.from_numpy(target),          # (5, 128, 128, 32)
         )

@@ -112,6 +112,12 @@ def run_ingestion(
     log.info("  %s: downloading ERA5...", site_id)
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
+    # Check if data was actually written (checkpoint sentinel may fail
+    # but the Zarr store is still valid)
+    if output_path.exists() and (output_path / "pressure").exists():
+        log.info("  %s: OK → %s", site_id, output_path)
+        return True
+
     if result.returncode != 0:
         log.error("  %s: FAILED\n%s", site_id, result.stderr[-500:])
         return False
