@@ -59,7 +59,9 @@ class Wind9kDataset(Dataset):
         split: str = "train",
         use_residual: bool = True,
         augment: bool = False,
+        era5_mode: str = "1d",  # "1d", "3d" (full 3×3), "grad" (center + gradients)
     ):
+        self.era5_mode = era5_mode
         self.data_dir = Path(data_dir)
         with open(dataset_yaml) as f:
             self.meta = yaml.safe_load(f)
@@ -102,19 +104,27 @@ class Wind9kDataset(Dataset):
 
         # ── ERA5 input ──
         # Prefer 3D grid (3, 3, 32) if available, else fallback to 1D (5, 32)
-        if "input/era5_3d" in store:
+        # Load ERA5 3D (5, 3, 3, 32) on log-law reconstructed AGL levels
+        if self.era5_mode in ("3d", "grad") and "input/era5_3d" in store:
             era5_3d_grp = store["input/era5_3d"]
             era5_channels = []
-            for var, scale in [("u", WIND_UV_SCALE), ("v", WIND_UV_SCALE),
-                               ("T", 300.0), ("q", Q_SCALE), ("k", K_SCALE)]:
+            for var in ["u", "v", "T", "q", "k"]:
                 if var in era5_3d_grp:
                     arr = np.array(era5_3d_grp[var][:], dtype=np.float32)
-                    era5_channels.append(arr / scale)  # (3, 3, 32)
+                    era5_channels.append(arr / ERA5_SCALES[var])  # (3, 3, 32)
                 else:
                     era5_channels.append(np.zeros((3, 3, 32), dtype=np.float32))
-            era5_input = np.stack(era5_channels, axis=0)  # (5, 3, 3, 32)
+            era5_3d = np.stack(era5_channels, axis=0)  # (5, 3, 3, 32)
+
+            if self.era5_mode == "3d":
+                era5_input = era5_3d  # (5, 3, 3, 32)
+            else:  # grad
+                center = era5_3d[:, 1, 1, :]  # (5, 32)
+                grad_x = (era5_3d[:, 1, 2, :] - era5_3d[:, 1, 0, :]) / 2  # (5, 32)
+                grad_y = (era5_3d[:, 2, 1, :] - era5_3d[:, 0, 1, :]) / 2  # (5, 32)
+                era5_input = np.stack([center, grad_x, grad_y], axis=0)  # (3, 5, 32)
         else:
-            # Fallback: 1D profiles → broadcast to (5, 1, 1, 32)
+            # 1D mode (baseline) or fallback
             era5_grp = store["input/era5"]
             profiles = []
             for var in ["u", "v", "T", "q", "k"]:
@@ -123,7 +133,7 @@ class Wind9kDataset(Dataset):
                     profiles.append(prof / ERA5_SCALES[var])
                 else:
                     profiles.append(np.zeros(32, dtype=np.float32))
-            era5_input = np.stack(profiles, axis=0)[:, None, None, :]  # (5, 1, 1, 32)
+            era5_input = np.stack(profiles, axis=0)  # (5, 32)
 
         # ── Target (5, ny, nx, nz) ──
         if self.use_residual and "residual" in store:
@@ -143,31 +153,11 @@ class Wind9kDataset(Dataset):
             q / Q_SCALE,
         ], axis=0).copy()  # (5, ny, nx, nz)
 
-        # ── Data augmentation (random 90° rotation + flip) ──
-        if self.augment and np.random.random() > 0.5:
-            # Random number of 90° rotations (on spatial dims)
-            k = np.random.randint(1, 4)
-            terrain_input = np.rot90(terrain_input, k, axes=(1, 2)).copy()
-            target = np.rot90(target, k, axes=(1, 2)).copy()
-            # Rotate u,v components accordingly
-            if k == 1:  # 90° CCW: u→v, v→-u
-                target[0], target[1] = target[1].copy(), -target[0].copy()
-            elif k == 2:  # 180°: u→-u, v→-v
-                target[0] = -target[0]
-                target[1] = -target[1]
-            elif k == 3:  # 270° CCW: u→-v, v→u
-                target[0], target[1] = -target[1].copy(), target[0].copy()
-            # Also rotate ERA5 u,v profiles
-            if k == 1:
-                era5_input[0], era5_input[1] = era5_input[1].copy(), -era5_input[0].copy()
-            elif k == 2:
-                era5_input[0] = -era5_input[0]
-                era5_input[1] = -era5_input[1]
-            elif k == 3:
-                era5_input[0], era5_input[1] = -era5_input[1].copy(), era5_input[0].copy()
+        # Augmentation disabled for 3D/grad modes (spatial rotation complex)
+        # Kept only as no-op to preserve signature
 
         return (
             torch.from_numpy(terrain_input),  # (2, 128, 128)
-            torch.from_numpy(era5_input),      # (5, 3, 3, 32) or (5, 1, 1, 32)
+            torch.from_numpy(era5_input),      # (5, 32) 1D, (5,3,3,32) 3D, or (3,5,32) grad
             torch.from_numpy(target),          # (5, 128, 128, 32)
         )

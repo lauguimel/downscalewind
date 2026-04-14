@@ -141,11 +141,19 @@ def train(args):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Dataset
+    era5_mode = getattr(args, "era5_mode", "1d")
     dataset_yaml = Path(args.data_dir) / "dataset.yaml"
     train_ds = Wind9kDataset(args.data_dir, dataset_yaml, split="train",
-                             use_residual=True, augment=True)
+                             use_residual=True, augment=False,
+                             era5_mode=era5_mode)
     val_ds = Wind9kDataset(args.data_dir, dataset_yaml, split="val",
-                           use_residual=True, augment=False)
+                           use_residual=True, augment=False,
+                           era5_mode=era5_mode)
+    logger.info(f"ERA5 mode: {era5_mode}")
+
+    # Compute era5_input_dim based on mode
+    era5_dims = {"1d": 160, "grad": 480, "3d": 1440}
+    era5_input_dim = era5_dims.get(era5_mode, 160)
 
     logger.info(f"Train: {len(train_ds)} cases, Val: {len(val_ds)} cases")
 
@@ -161,7 +169,8 @@ def train(args):
     # Model
     variant = getattr(args, "variant", "film")
     model = build_vit(variant=variant, preset=args.preset,
-                      nz=32, img_size=128, patch_size=8)
+                      nz=32, img_size=128, patch_size=8,
+                      era5_input_dim=era5_input_dim)
     model = model.to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Model: TerrainViT-{variant}-{args.preset}, params: {n_params:,}")
@@ -331,6 +340,8 @@ def main():
                         help="Run name for output subdir (auto from variant+preset)")
     parser.add_argument("--variant", choices=["film", "factor", "cross"],
                         default="film", help="Architecture variant (S1/S2/S3)")
+    parser.add_argument("--era5-mode", choices=["1d", "grad", "3d"],
+                        default="1d", help="ERA5 input format")
     parser.add_argument("--preset", choices=["small", "base"],
                         default="base", help="ViT size preset")
     parser.add_argument("--epochs", type=int, default=200)

@@ -116,7 +116,7 @@ class ERA5Encoder(nn.Module):
     All are flattened and projected.
     """
 
-    def __init__(self, era5_input_dim: int = 1440, embed_dim: int = 384):
+    def __init__(self, era5_input_dim: int = 450, embed_dim: int = 384):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(era5_input_dim, embed_dim),
@@ -152,7 +152,7 @@ class FiLMVerticalHead(nn.Module):
     """
 
     def __init__(self, feat_dim: int = 64, nz: int = 32,
-                 era5_input_dim: int = 1440, hidden: int = 32):
+                 era5_input_dim: int = 450, hidden: int = 32):
         super().__init__()
         self.nz = nz
         # Expand 2D → 3D: learn a vertical basis
@@ -196,7 +196,7 @@ class TerrainViT_S1(nn.Module):
     def __init__(self, img_size=128, patch_size=8, nz=32,
                  embed_dim=384, depth=12, n_heads=8,
                  mlp_ratio=4.0, drop=0.1, feat_dim=64,
-                 era5_input_dim=1440, n_output_vars=5):
+                 era5_input_dim=450, n_output_vars=5):
         super().__init__()
         pg = img_size // patch_size
         self.patch_grid = pg
@@ -237,7 +237,7 @@ class VerticalMLPHead(nn.Module):
     """
 
     def __init__(self, feat_dim: int = 64, nz: int = 32,
-                 era5_input_dim: int = 1440, hidden: int = 128):
+                 era5_input_dim: int = 450, hidden: int = 128):
         super().__init__()
         self.nz = nz
         in_dim = feat_dim + era5_input_dim
@@ -272,7 +272,7 @@ class TerrainViT_S2(nn.Module):
     def __init__(self, img_size=128, patch_size=8, nz=32,
                  embed_dim=384, depth=12, n_heads=8,
                  mlp_ratio=4.0, drop=0.1, feat_dim=64,
-                 era5_input_dim=1440, n_output_vars=5):
+                 era5_input_dim=450, n_output_vars=5):
         super().__init__()
         pg = img_size // patch_size
         self.patch_grid = pg
@@ -313,7 +313,7 @@ class ERA5TokenEncoder(nn.Module):
     Uses Conv1d to create tokens from profile slices.
     """
 
-    def __init__(self, era5_input_dim: int = 1440,
+    def __init__(self, era5_input_dim: int = 450,
                  embed_dim: int = 384, n_tokens: int = 16):
         super().__init__()
         self.proj = nn.Sequential(
@@ -339,7 +339,7 @@ class TerrainViT_S3(nn.Module):
     def __init__(self, img_size=128, patch_size=8, nz=32,
                  embed_dim=384, depth=12, n_heads=8,
                  mlp_ratio=4.0, drop=0.1, feat_dim=64,
-                 era5_input_dim=1440, n_output_vars=5,
+                 era5_input_dim=450, n_output_vars=5,
                  n_cross_layers=4, n_era5_tokens=16):
         super().__init__()
         pg = img_size // patch_size
