@@ -295,17 +295,19 @@ def _icos_data_client():
 def _download_fluxnet_zip(dobj_url: str) -> bytes | None:
     """Download a FLUXNET ZIP archive from ICOS CP.
 
-    Requires authentication via icoscp_core. If auth is not configured,
-    falls back to unauthenticated download (will fail for most data).
+    Requires authentication via icoscp_core. Uses get_file_stream (raw
+    binary download, returns (stream, filename) tuple).
     """
     try:
         client = _icos_data_client()
-        stream = client.get_csv_byte_stream(dobj_url)
+        result = client.get_file_stream(dobj_url)
+        # get_file_stream returns (filename: str, stream: HTTPResponse)
+        stream = result[1] if isinstance(result, tuple) else result
         content = stream.read()
-        log.info("Downloaded via icoscp_core", extra={"size_mb": round(len(content) / 1e6, 1)})
+        log.info("Downloaded FLUXNET file", extra={"size_mb": round(len(content) / 1e6, 1)})
         return content
     except Exception as e:
-        log.warning("icoscp_core download failed (auth configured?)", extra={"error": str(e)})
+        log.warning("get_file_stream failed", extra={"error": str(e)})
 
     # Fallback: try direct HTTP (usually returns HTML license page)
     import requests
@@ -425,7 +427,8 @@ def _download_atmos_file(dobj_url: str) -> bytes | None:
     """
     try:
         client = _icos_data_client()
-        stream = client.get_file_stream(dobj_url)
+        result = client.get_file_stream(dobj_url)
+        stream = result[1] if isinstance(result, tuple) else result
         content = stream.read()
         log.info("Downloaded ATC meteo file", extra={"size_kb": round(len(content)/1e3, 1)})
         return content

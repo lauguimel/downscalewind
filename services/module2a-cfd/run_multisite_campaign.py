@@ -77,8 +77,11 @@ def _container_cmd(image: str, mount_dir: Path, cmd: list[str],
             image,
         ] + cmd
 
-# TBM mesh parameters (same as Perdigão PoC)
-# Must match PoC config (poc_tbm_25ts.yaml) → ~165k cells
+# TBM mesh parameters — refined vertical grid (2026-04-14)
+# Previous: height=5000, cells_z=50, grading=15 → first cell ~19m, centre ~10m
+# New:      height=2500, cells_z=80, grading=30 → first cell ~3.7m, centre ~1.8m
+# This enables resolving the surface layer (2m) where t2m/d2m/u10 are imposed.
+# Coverage up to 2500m AGL still captures synoptic-driven flows.
 DEFAULT_MESH = {
     "inner_size_m": 2000,
     "inner_blocks": 10,
@@ -87,9 +90,9 @@ DEFAULT_MESH = {
     "cylinder_sections": 8,
     "radial_cells": 20,
     "radial_grading": 20,
-    "height_m": 5000,
-    "cells_z": 50,
-    "grading_z": 15,
+    "height_m": 2500,
+    "cells_z": 80,
+    "grading_z": 30,
     "max_dist_proj": 20000,
     "blend_distance_m": 5000,
     "p_above_z": 10000,
@@ -558,8 +561,11 @@ def solve_case(case_dir: Path, n_iter: int, n_cores: int) -> bool:
                         timeout=10)
 
     # mpirun simpleFoam (direct exec — entrypoint sets OF env)
+    # --oversubscribe needed on Apptainer (no PBS resource manager inside container)
+    # --allow-run-as-root needed if running as root inside container
+    mpi_flags = ["--oversubscribe", "--allow-run-as-root"] if CONTAINER_RUNTIME == "apptainer" else []
     result = _docker_of(
-        ["mpirun", "-np", str(n_cores), "simpleFoam", "-parallel"],
+        ["mpirun"] + mpi_flags + ["-np", str(n_cores), "simpleFoam", "-parallel"],
         timeout=3600)
     (case_dir / "log.simpleFoam").write_text(result.stdout + result.stderr)
 

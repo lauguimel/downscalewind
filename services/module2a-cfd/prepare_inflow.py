@@ -549,47 +549,38 @@ def reconstruct_inlet_profile(
     T_era5 = np.asarray(era5_profile["T_K"], dtype=float)
     q_era5_arr = np.asarray(era5_profile["q_kgkg"], dtype=float) if era5_profile.get("q_kgkg") is not None else None
 
-    # ── Inject ERA5 surface variables at their true AGL heights ──────────────
-    # Fix for the critical inlet bug (2026-04-14): pressure levels only give
-    # data at z >= lowest_pressure_level. At mountain sites (e.g. Puéchabon
-    # 270m), lowest level (1000 hPa) is ~-145m AGL and NEVER accessed; surface
-    # heating and u10 are lost. We rebuild z_era5 in AGL (ref = lowest pressure
-    # level ≈ local ground) and prepend surface values at z=2m (T/q) and
-    # z=10m (u/v).
-    has_surface = ("u10_ms" in era5_profile and "v10_ms" in era5_profile
-                   and "t2m_K" in era5_profile and "d2m_K" in era5_profile)
-    if has_surface:
-        # Convert to AGL using lowest pressure level as reference ground
-        z_agl = z_era5 - z_era5[0]
-        # Keep only levels well above 10m (surface layer handled explicitly)
-        upper = z_agl > 20.0
-        z_upper = z_agl[upper]
-        u_upper = u_era5[upper]
-        v_upper = v_era5[upper]
-        T_upper = T_era5[upper]
-        # Build surface points
-        u10 = float(era5_profile["u10_ms"])
-        v10 = float(era5_profile["v10_ms"])
+    # ── Fix T/q surface anchor (2026-04-14) ──────────────────────────────────
+    # Inject ERA5 surface t2m/d2m as a z=2m level for T/q profile only.
+    # The wind (u, v) profile stays unchanged — log-law from pressure levels,
+    # which is consistent with ERA5 u10 ≈ u at lowest pressure level.
+    # Modifying u/v with u10 creates a log-law discontinuity at z=100m
+    # (ERA5 convective BL is already well-mixed, log-law over-shears).
+    has_surface_tq = "t2m_K" in era5_profile and "d2m_K" in era5_profile
+    if has_surface_tq:
+        # Prepend a surface point to T and q arrays only
+        # Use z = z_era5[0] - 50m (just below lowest pressure level to extend
+        # coverage down) with T = t2m, q derived from d2m
         t2m = float(era5_profile["t2m_K"])
         d2m = float(era5_profile["d2m_K"])
-        # q from d2m (Magnus-Tetens): e = 611.2 * exp(17.62*Tdc/(243.12+Tdc))
         tdc = d2m - 273.15
         e_vap_Pa = 611.2 * np.exp(17.62 * tdc / (243.12 + tdc))
         p_surf_Pa = float(era5_profile["pressure_hPa"][0]) * 100.0
         q2m = 0.622 * e_vap_Pa / (p_surf_Pa - 0.378 * e_vap_Pa)
-        # Assemble final profile: z=2m, z=10m, + pressure levels above 20m
-        z_era5 = np.concatenate([[2.0, 10.0], z_upper])
-        # u, v at z=2m extrapolated by crude factor (log-law gives ~0.7×u10 at 2m)
-        u_era5 = np.concatenate([[0.7 * u10, u10], u_upper])
-        v_era5 = np.concatenate([[0.7 * v10, v10], v_upper])
-        T_era5 = np.concatenate([[t2m, t2m], T_upper])  # near-neutral surface layer
-        if q_era5_arr is not None:
-            q_upper = q_era5_arr[upper]
-            q_era5_arr = np.concatenate([[q2m, q2m], q_upper])
+        # Extend T/q arrays with a surface point at z slightly below first pressure level
+        # This ensures extrapolation to z=0..20m uses t2m/d2m instead of spline from upper levels
+        z_surf = z_era5[0] - 100.0  # 100m below lowest pressure level (ensures surface proximity)
+        T_with_surface = np.concatenate([[t2m], T_era5])
+        q_with_surface = (np.concatenate([[q2m], q_era5_arr])
+                          if q_era5_arr is not None else None)
+        z_tq = np.concatenate([[z_surf], z_era5])
+    else:
+        T_with_surface = T_era5
+        q_with_surface = q_era5_arr
+        z_tq = z_era5
 
-    # Speed and direction from ERA5 surface reference (u10 if available, else lowest level)
-    u_ref_10m = float(u_era5[1] if has_surface else u_era5[0])  # now truly at 10m AGL
-    v_ref_10m = float(v_era5[1] if has_surface else v_era5[0])
+    # Speed and direction from ERA5 surface reference (lowest pressure level, ~100m AGL)
+    u_ref_10m = float(u_era5[0])
+    v_ref_10m = float(v_era5[0])
     spd_ref   = float(np.hypot(u_ref_10m, v_ref_10m))
 
     # Flow direction: unit vector (we keep the ERA5 lowest-level direction)
@@ -668,36 +659,22 @@ def reconstruct_inlet_profile(
     else:
         spd3 = np.full_like(z3, spd_era5_full[-1])
 
-    # Temperature profile (cubic spline through ERA5 levels)
-    if len(z_era5) >= 2:
-        cs_T = CubicSpline(z_era5, T_era5, extrapolate=True)
+    # Temperature profile (cubic spline through ERA5 + surface t2m)
+    if len(z_tq) >= 2:
+        cs_T = CubicSpline(z_tq, T_with_surface, extrapolate=True)
         T_out = cs_T(z_output)
     else:
         T_out = np.full_like(z_output, T_ref)
 
-    # Specific humidity profile (cubic spline, kg/kg) — use surface-augmented array
-    if q_era5_arr is not None and len(z_era5) >= 2:
-        cs_q = CubicSpline(z_era5, q_era5_arr, extrapolate=True)
+    # Specific humidity profile (cubic spline, kg/kg) — surface-augmented
+    if q_with_surface is not None and len(z_tq) >= 2:
+        cs_q = CubicSpline(z_tq, q_with_surface, extrapolate=True)
         q_out = np.maximum(cs_q(z_output), 0.0)  # q ≥ 0 always
     else:
         q_out = None
 
     # Pressure profile (cubic spline through ERA5 levels → Pa)
-    # Pressure array original matches original z_era5 (pressure levels only).
-    # When surface is injected, compute p at z=2m and z=10m from hydrostatic approx.
-    p_hPa_orig = np.asarray(era5_profile["pressure_hPa"], dtype=float)
-    if has_surface:
-        # Build pressure array aligned with current z_era5 (z=2m, 10m, z_upper...)
-        # Hydrostatic: p(z) = p_surf * exp(-z / H), H ≈ 8400m (scale height)
-        p_surf_hPa = p_hPa_orig[0]
-        p_2m = p_surf_hPa * np.exp(-2.0 / 8400.0)
-        p_10m = p_surf_hPa * np.exp(-10.0 / 8400.0)
-        # z_agl for upper pressure levels (subtract original z_era5[0])
-        z_agl_orig = np.asarray(era5_profile["z_m"], dtype=float) - era5_profile["z_m"][0]
-        upper_mask = z_agl_orig > 20.0
-        p_hPa = np.concatenate([[p_2m, p_10m], p_hPa_orig[upper_mask]])
-    else:
-        p_hPa = p_hPa_orig
+    p_hPa = np.asarray(era5_profile["pressure_hPa"], dtype=float)
     if len(z_era5) >= 2:
         cs_p = CubicSpline(z_era5, p_hPa * 100.0, extrapolate=True)  # hPa → Pa
         p_out = cs_p(z_output)

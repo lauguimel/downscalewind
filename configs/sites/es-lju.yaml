@@ -1,0 +1,14 @@
+site:
+  name: Llano de los Juanes
+  coordinates:
+    latitude: 36.9266
+    longitude: -2.7521
+    elevation_m: 1600
+era5_domain:
+  north: 37.25
+  south: 36.75
+  east: -2.5
+  west: -3.0
+  grid_spacing_deg: 0.25
+  n_lat: 3
+  n_lon: 3

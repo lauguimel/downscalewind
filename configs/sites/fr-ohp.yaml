@@ -1,0 +1,14 @@
+site:
+  name: Observatoire Haute-Provence
+  coordinates:
+    latitude: 43.9319
+    longitude: 5.7122
+    elevation_m: 684
+era5_domain:
+  north: 44.25
+  south: 43.75
+  east: 6.0
+  west: 5.5
+  grid_spacing_deg: 0.25
+  n_lat: 3
+  n_lon: 3
