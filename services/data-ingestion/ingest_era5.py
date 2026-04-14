@@ -66,6 +66,7 @@ SURFACE_VARIABLES = [
     "10m_u_component_of_wind",
     "10m_v_component_of_wind",
     "2m_temperature",
+    "2m_dewpoint_temperature",
 ]
 
 # Mapping noms CDS → noms courts DownscaleWind
@@ -78,6 +79,8 @@ CDS_TO_SHORT = {
     "10m_u_component_of_wind":  "u10",
     "10m_v_component_of_wind":  "v10",
     "2m_temperature":           "t2m",
+    "2m_dewpoint_temperature":  "d2m",
+    "total_precipitation":      "tp",
 }
 
 # Heures disponibles ERA5 à 6h
@@ -189,6 +192,10 @@ def _nc_to_arrays_surface(nc_path: str) -> dict[str, np.ndarray]:
         "v10": ds["v10"].values.astype(np.float32),
         "t2m": ds["t2m"].values.astype(np.float32),
     }
+    # Optional surface variables (d2m for RH, tp for precipitation)
+    for var in ("d2m", "tp"):
+        if var in ds:
+            result[var] = ds[var].values.astype(np.float32)
     ds.close()
     return result
 
@@ -448,6 +455,16 @@ def main(site, start, end, output, config_dir, checkpoint_dir, dry_run):
                 store["surface/u10"][idx]  = surf_data["u10"][i]
                 store["surface/v10"][idx]  = surf_data["v10"][i]
                 store["surface/t2m"][idx]  = surf_data["t2m"][i]
+                for var in ("d2m", "tp"):
+                    if var in surf_data:
+                        if f"surface/{var}" not in store:
+                            store.create_array(
+                                f"surface/{var}",
+                                shape=store["surface/t2m"].shape,
+                                chunks=store["surface/t2m"].chunks,
+                                dtype=np.float32,
+                            )
+                        store[f"surface/{var}"][idx] = surf_data[var][i]
 
             # ── Checkpoint ────────────────────────────────────────────────────
             cp.mark_done(

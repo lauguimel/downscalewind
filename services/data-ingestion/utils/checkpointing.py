@@ -55,6 +55,7 @@ class Checkpointer:
             extra_meta: Métadonnées additionnelles (taille, nombre de pas, etc.)
         """
         sentinel = self._sentinel_path(key)
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
         content = {
             "key":        key,
             "timestamp":  datetime.now(timezone.utc).isoformat(),

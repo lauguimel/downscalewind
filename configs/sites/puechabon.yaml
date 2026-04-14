@@ -1,0 +1,14 @@
+site:
+  name: "Pu\xE9chabon"
+  coordinates:
+    latitude: 43.7414
+    longitude: 3.5958
+    elevation_m: 270
+era5_domain:
+  north: 44.0
+  south: 43.5
+  east: 3.75
+  west: 3.25
+  grid_spacing_deg: 0.25
+  n_lat: 3
+  n_lon: 3
