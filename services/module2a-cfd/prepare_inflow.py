@@ -336,6 +336,15 @@ def extract_era5_profile(
     corner_q = []
 
     has_q = "q" in era5_data and era5_data["q"] is not None
+    # Surface variables (used to anchor profiles at z=2m for T/q, z=10m for u/v)
+    has_t2m = "t2m" in era5_data and era5_data["t2m"] is not None
+    has_d2m = "d2m" in era5_data and era5_data["d2m"] is not None
+    has_u10 = "u10" in era5_data and era5_data["u10"] is not None
+    has_v10 = "v10" in era5_data and era5_data["v10"] is not None
+    corner_t2m = []
+    corner_d2m = []
+    corner_u10 = []
+    corner_v10 = []
 
     for (ci, cj) in corners:
         corner_z.append(era5_data["z"][t_idx, :, ci, cj] / G)
@@ -344,6 +353,14 @@ def extract_era5_profile(
         corner_T.append(era5_data["t"][t_idx, :, ci, cj])
         if has_q:
             corner_q.append(era5_data["q"][t_idx, :, ci, cj])
+        if has_t2m:
+            corner_t2m.append(float(era5_data["t2m"][t_idx, ci, cj]))
+        if has_d2m:
+            corner_d2m.append(float(era5_data["d2m"][t_idx, ci, cj]))
+        if has_u10:
+            corner_u10.append(float(era5_data["u10"][t_idx, ci, cj]))
+        if has_v10:
+            corner_v10.append(float(era5_data["v10"][t_idx, ci, cj]))
 
     # Step 2: Build common z grid from the bilinear-weighted z
     # Use the weighted average of corner z values as the common grid
@@ -404,6 +421,15 @@ def extract_era5_profile(
     }
     if q_out is not None:
         result["q_kgkg"] = q_out
+    # Surface variables for anchoring profiles at known AGL heights
+    if has_t2m and corner_t2m:
+        result["t2m_K"] = float(sum(w * v for w, v in zip(weights, corner_t2m)))
+    if has_d2m and corner_d2m:
+        result["d2m_K"] = float(sum(w * v for w, v in zip(weights, corner_d2m)))
+    if has_u10 and corner_u10:
+        result["u10_ms"] = float(sum(w * v for w, v in zip(weights, corner_u10)))
+    if has_v10 and corner_v10:
+        result["v10_ms"] = float(sum(w * v for w, v in zip(weights, corner_v10)))
     return result
 
 
@@ -517,14 +543,53 @@ def reconstruct_inlet_profile(
     -------
     dict with keys: z_m, u_ms, v_ms, T_K, speed_ms, dir_deg
     """
-    z_era5 = era5_profile["z_m"]
-    u_era5 = era5_profile["u_ms"]
-    v_era5 = era5_profile["v_ms"]
-    T_era5 = era5_profile["T_K"]
+    z_era5 = np.asarray(era5_profile["z_m"], dtype=float)
+    u_era5 = np.asarray(era5_profile["u_ms"], dtype=float)
+    v_era5 = np.asarray(era5_profile["v_ms"], dtype=float)
+    T_era5 = np.asarray(era5_profile["T_K"], dtype=float)
+    q_era5_arr = np.asarray(era5_profile["q_kgkg"], dtype=float) if era5_profile.get("q_kgkg") is not None else None
 
-    # Speed and direction from ERA5 surface reference
-    u_ref_10m = float(u_era5[0])  # ~lowest ERA5 level (~1000 hPa, ~100–200 m AGL at Perdigão)
-    v_ref_10m = float(v_era5[0])
+    # ── Inject ERA5 surface variables at their true AGL heights ──────────────
+    # Fix for the critical inlet bug (2026-04-14): pressure levels only give
+    # data at z >= lowest_pressure_level. At mountain sites (e.g. Puéchabon
+    # 270m), lowest level (1000 hPa) is ~-145m AGL and NEVER accessed; surface
+    # heating and u10 are lost. We rebuild z_era5 in AGL (ref = lowest pressure
+    # level ≈ local ground) and prepend surface values at z=2m (T/q) and
+    # z=10m (u/v).
+    has_surface = ("u10_ms" in era5_profile and "v10_ms" in era5_profile
+                   and "t2m_K" in era5_profile and "d2m_K" in era5_profile)
+    if has_surface:
+        # Convert to AGL using lowest pressure level as reference ground
+        z_agl = z_era5 - z_era5[0]
+        # Keep only levels well above 10m (surface layer handled explicitly)
+        upper = z_agl > 20.0
+        z_upper = z_agl[upper]
+        u_upper = u_era5[upper]
+        v_upper = v_era5[upper]
+        T_upper = T_era5[upper]
+        # Build surface points
+        u10 = float(era5_profile["u10_ms"])
+        v10 = float(era5_profile["v10_ms"])
+        t2m = float(era5_profile["t2m_K"])
+        d2m = float(era5_profile["d2m_K"])
+        # q from d2m (Magnus-Tetens): e = 611.2 * exp(17.62*Tdc/(243.12+Tdc))
+        tdc = d2m - 273.15
+        e_vap_Pa = 611.2 * np.exp(17.62 * tdc / (243.12 + tdc))
+        p_surf_Pa = float(era5_profile["pressure_hPa"][0]) * 100.0
+        q2m = 0.622 * e_vap_Pa / (p_surf_Pa - 0.378 * e_vap_Pa)
+        # Assemble final profile: z=2m, z=10m, + pressure levels above 20m
+        z_era5 = np.concatenate([[2.0, 10.0], z_upper])
+        # u, v at z=2m extrapolated by crude factor (log-law gives ~0.7×u10 at 2m)
+        u_era5 = np.concatenate([[0.7 * u10, u10], u_upper])
+        v_era5 = np.concatenate([[0.7 * v10, v10], v_upper])
+        T_era5 = np.concatenate([[t2m, t2m], T_upper])  # near-neutral surface layer
+        if q_era5_arr is not None:
+            q_upper = q_era5_arr[upper]
+            q_era5_arr = np.concatenate([[q2m, q2m], q_upper])
+
+    # Speed and direction from ERA5 surface reference (u10 if available, else lowest level)
+    u_ref_10m = float(u_era5[1] if has_surface else u_era5[0])  # now truly at 10m AGL
+    v_ref_10m = float(v_era5[1] if has_surface else v_era5[0])
     spd_ref   = float(np.hypot(u_ref_10m, v_ref_10m))
 
     # Flow direction: unit vector (we keep the ERA5 lowest-level direction)
@@ -610,17 +675,29 @@ def reconstruct_inlet_profile(
     else:
         T_out = np.full_like(z_output, T_ref)
 
-    # Specific humidity profile (cubic spline, kg/kg)
-    q_era5 = era5_profile.get("q_kgkg")
-    if q_era5 is not None and len(z_era5) >= 2:
-        q_era5 = np.asarray(q_era5, dtype=float)
-        cs_q = CubicSpline(z_era5, q_era5, extrapolate=True)
+    # Specific humidity profile (cubic spline, kg/kg) — use surface-augmented array
+    if q_era5_arr is not None and len(z_era5) >= 2:
+        cs_q = CubicSpline(z_era5, q_era5_arr, extrapolate=True)
         q_out = np.maximum(cs_q(z_output), 0.0)  # q ≥ 0 always
     else:
         q_out = None
 
     # Pressure profile (cubic spline through ERA5 levels → Pa)
-    p_hPa = era5_profile["pressure_hPa"]
+    # Pressure array original matches original z_era5 (pressure levels only).
+    # When surface is injected, compute p at z=2m and z=10m from hydrostatic approx.
+    p_hPa_orig = np.asarray(era5_profile["pressure_hPa"], dtype=float)
+    if has_surface:
+        # Build pressure array aligned with current z_era5 (z=2m, 10m, z_upper...)
+        # Hydrostatic: p(z) = p_surf * exp(-z / H), H ≈ 8400m (scale height)
+        p_surf_hPa = p_hPa_orig[0]
+        p_2m = p_surf_hPa * np.exp(-2.0 / 8400.0)
+        p_10m = p_surf_hPa * np.exp(-10.0 / 8400.0)
+        # z_agl for upper pressure levels (subtract original z_era5[0])
+        z_agl_orig = np.asarray(era5_profile["z_m"], dtype=float) - era5_profile["z_m"][0]
+        upper_mask = z_agl_orig > 20.0
+        p_hPa = np.concatenate([[p_2m, p_10m], p_hPa_orig[upper_mask]])
+    else:
+        p_hPa = p_hPa_orig
     if len(z_era5) >= 2:
         cs_p = CubicSpline(z_era5, p_hPa * 100.0, extrapolate=True)  # hPa → Pa
         p_out = cs_p(z_output)
@@ -769,6 +846,18 @@ def prepare_inflow(
         "z":               store["pressure/z"][:],
         "q":               store["pressure/q"][:] if has_q else None,
     }
+    # Surface fields (anchor profiles at z=2m for T/q and z=10m for u/v)
+    # Fixes the issue where CFD inlet extrapolates from pressure levels only
+    # (lowest=1000 hPa ~100m altitude) — surface heating and u10 were ignored.
+    if "surface" in store:
+        if "t2m" in store["surface"]:
+            era5_data["t2m"] = store["surface/t2m"][:]
+        if "d2m" in store["surface"]:
+            era5_data["d2m"] = store["surface/d2m"][:]
+        if "u10" in store["surface"]:
+            era5_data["u10"] = store["surface/u10"][:]
+        if "v10" in store["surface"]:
+            era5_data["v10"] = store["surface/v10"][:]
 
     ts = np.datetime64(timestamp, "s")
 
