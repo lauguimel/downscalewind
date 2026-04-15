@@ -49,7 +49,7 @@ import warnings
 from pathlib import Path
 
 import numpy as np
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import CubicSpline, PchipInterpolator
 
 logger = logging.getLogger(__name__)
 
@@ -549,55 +549,85 @@ def reconstruct_inlet_profile(
     T_era5 = np.asarray(era5_profile["T_K"], dtype=float)
     q_era5_arr = np.asarray(era5_profile["q_kgkg"], dtype=float) if era5_profile.get("q_kgkg") is not None else None
 
+    # Ensure z is monotonically increasing (era5_profile may return z sorted by
+    # ascending pressure → descending altitude). PCHIP/CubicSpline require
+    # monotonic x. Sort by altitude to be safe.
+    sort_idx = np.argsort(z_era5)
+    z_era5 = z_era5[sort_idx]
+    u_era5 = u_era5[sort_idx]
+    v_era5 = v_era5[sort_idx]
+    T_era5 = T_era5[sort_idx]
+    if q_era5_arr is not None:
+        q_era5_arr = q_era5_arr[sort_idx]
+
     # ── Fix T/q surface anchor (2026-04-14) ──────────────────────────────────
     # Inject ERA5 surface t2m/d2m as a z=2m level for T/q profile only.
     # The wind (u, v) profile stays unchanged — log-law from pressure levels,
     # which is consistent with ERA5 u10 ≈ u at lowest pressure level.
     # Modifying u/v with u10 creates a log-law discontinuity at z=100m
     # (ERA5 convective BL is already well-mixed, log-law over-shears).
-    has_surface_tq = "t2m_K" in era5_profile and "d2m_K" in era5_profile
-    if has_surface_tq:
-        # Prepend a surface point to T and q arrays only
-        # Use z = z_era5[0] - 50m (just below lowest pressure level to extend
-        # coverage down) with T = t2m, q derived from d2m
+    # Surface anchor for T (+ q if d2m available). T always anchored if t2m
+    # is present; q is anchored only if d2m is present (otherwise falls back
+    # to the ERA5 pressure-level q profile without surface point).
+    has_surface_t = "t2m_K" in era5_profile and era5_profile.get("t2m_K") is not None
+    has_surface_d = "d2m_K" in era5_profile and era5_profile.get("d2m_K") is not None
+    z_surf = 2.0
+    if has_surface_t:
         t2m = float(era5_profile["t2m_K"])
+        T_with_surface = np.concatenate([[t2m], T_era5])
+        z_T = np.concatenate([[z_surf], z_era5])
+    else:
+        T_with_surface = T_era5
+        z_T = z_era5
+    if has_surface_d and q_era5_arr is not None:
         d2m = float(era5_profile["d2m_K"])
         tdc = d2m - 273.15
         e_vap_Pa = 611.2 * np.exp(17.62 * tdc / (243.12 + tdc))
         p_surf_Pa = float(era5_profile["pressure_hPa"][0]) * 100.0
         q2m = 0.622 * e_vap_Pa / (p_surf_Pa - 0.378 * e_vap_Pa)
-        # Extend T/q arrays with a surface point at z slightly below first pressure level
-        # This ensures extrapolation to z=0..20m uses t2m/d2m instead of spline from upper levels
-        z_surf = z_era5[0] - 100.0  # 100m below lowest pressure level (ensures surface proximity)
-        T_with_surface = np.concatenate([[t2m], T_era5])
-        q_with_surface = (np.concatenate([[q2m], q_era5_arr])
-                          if q_era5_arr is not None else None)
-        z_tq = np.concatenate([[z_surf], z_era5])
+        q_with_surface = np.concatenate([[q2m], q_era5_arr])
+        z_q = np.concatenate([[z_surf], z_era5])
     else:
-        T_with_surface = T_era5
         q_with_surface = q_era5_arr
-        z_tq = z_era5
+        z_q = z_era5
+    # Legacy aliases (used elsewhere in this function)
+    z_tq = z_T
+    has_surface_tq = has_surface_t
 
-    # Speed and direction from ERA5 surface reference (lowest pressure level, ~100m AGL)
-    u_ref_10m = float(u_era5[0])
-    v_ref_10m = float(v_era5[0])
-    spd_ref   = float(np.hypot(u_ref_10m, v_ref_10m))
+    # ── Wind reference (2026-04-14 fix) ──────────────────────────────────
+    # Prefer ERA5 surface (u10, v10 @ z=10m) over pressure-level (~100m) for:
+    #   - u_star estimation (log-law Layer 1 then passes through u10 by construction)
+    #   - flow direction (surface wind is more representative than BL wind)
+    # Falls back to pressure-level ~100m if surface vars absent.
+    has_surface_uv = (
+        "u10_ms" in era5_profile and era5_profile["u10_ms"] is not None
+        and "v10_ms" in era5_profile and era5_profile["v10_ms"] is not None
+    )
+    if has_surface_uv:
+        u_ref = float(era5_profile["u10_ms"])
+        v_ref = float(era5_profile["v10_ms"])
+        z_ref = Z_SURF  # 10 m (ERA5 10-m wind reference height)
+        logger.debug("Wind ref: u10/v10 at z=%.0fm", z_ref)
+    else:
+        u_ref = float(u_era5[0])
+        v_ref = float(v_era5[0])
+        z_ref = max(float(z_era5[0]), Z_SURF)
+        logger.debug("Wind ref: pressure-level at z=%.0fm (u10/v10 unavailable)", z_ref)
+    spd_ref = float(np.hypot(u_ref, v_ref))
 
-    # Flow direction: unit vector (we keep the ERA5 lowest-level direction)
+    # Flow direction: unit vector (surface wind or fallback to pressure level)
     if spd_ref < 0.5:
         flow_dir_x, flow_dir_y = 1.0, 0.0  # fallback: westerly
-        logger.warning("ERA5 surface wind speed < 0.5 m/s — using default W flow direction")
+        logger.warning("Wind ref speed < 0.5 m/s — using default W flow direction")
     else:
-        flow_dir_x = u_ref_10m / spd_ref
-        flow_dir_y = v_ref_10m / spd_ref
+        flow_dir_x = u_ref / spd_ref
+        flow_dir_y = v_ref / spd_ref
 
-    # Reference temperature (lowest ERA5 level)
+    # Reference temperature (lowest ERA5 pressure level — T spline handles t2m blend)
     T_ref = float(T_era5[0])
 
-    # u* from ERA5 lowest level
-    z_ref_era5 = float(z_era5[0])
-    z_ref_era5 = max(z_ref_era5, Z_SURF)
-    u_star = estimate_ustar(spd_ref, z_ref_era5, z0_eff, L_mo)
+    # u* from reference height (z=10m if u10/v10 available, else lowest pressure level)
+    u_star = estimate_ustar(spd_ref, z_ref, z0_eff, L_mo)
     u_star = max(u_star, 0.05)  # physical lower bound
 
     logger.debug(
@@ -659,16 +689,18 @@ def reconstruct_inlet_profile(
     else:
         spd3 = np.full_like(z3, spd_era5_full[-1])
 
-    # Temperature profile (cubic spline through ERA5 + surface t2m)
-    if len(z_tq) >= 2:
-        cs_T = CubicSpline(z_tq, T_with_surface, extrapolate=True)
+    # Temperature profile: PCHIP (shape-preserving, no overshoot) through ERA5 + t2m
+    # PCHIP is monotonic on monotonic data → preserves inversions without spurious
+    # over/undershoot at the t2m anchor (critical for FWI-quality T near surface).
+    if len(z_T) >= 2:
+        cs_T = PchipInterpolator(z_T, T_with_surface, extrapolate=True)
         T_out = cs_T(z_output)
     else:
         T_out = np.full_like(z_output, T_ref)
 
-    # Specific humidity profile (cubic spline, kg/kg) — surface-augmented
-    if q_with_surface is not None and len(z_tq) >= 2:
-        cs_q = CubicSpline(z_tq, q_with_surface, extrapolate=True)
+    # Specific humidity profile: PCHIP (non-negative + no overshoot)
+    if q_with_surface is not None and len(z_q) >= 2:
+        cs_q = PchipInterpolator(z_q, q_with_surface, extrapolate=True)
         q_out = np.maximum(cs_q(z_output), 0.0)  # q ≥ 0 always
     else:
         q_out = None
@@ -885,6 +917,19 @@ def prepare_inflow(
     import math
     wind_dir_deg = (math.degrees(math.atan2(-fx, -fy)) + 360) % 360
     result["wind_dir"] = round(wind_dir_deg, 1)
+
+    # Carry ERA5 surface vars into output JSON (for downstream audit + grid.zarr attrs)
+    for k in ("t2m_K", "d2m_K", "u10_ms", "v10_ms", "pressure_hPa"):
+        if k in profile and profile[k] is not None:
+            val = profile[k]
+            result[k] = (list(val) if hasattr(val, "__iter__") and not isinstance(val, str)
+                         else float(val))
+
+    # Provenance fields (downstream export_to_grid_zarr reads these)
+    result["timestamp"] = str(timestamp)
+    result["era5_source"] = str(era5_zarr)
+    result["site_lat"] = float(site_lat)
+    result["site_lon"] = float(site_lon)
 
     if output_json is not None:
         output_json = Path(output_json)

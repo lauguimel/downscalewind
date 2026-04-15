@@ -44,6 +44,12 @@ DOCKER_USER = f"{os.getuid()}:{os.getgid()}"
 # When using Apptainer, OF_IMAGE and TBM_IMAGE should point to .sif files.
 CONTAINER_RUNTIME = os.environ.get("CONTAINER_RUNTIME", "docker")
 
+# Grid export (OF → grid.zarr direct) — overridden by CLI flags
+GRID_EXPORT_ENABLED = True
+GRID_EXPORT_DEVICE = "cuda"
+SITE_MANIFEST: Path | None = None
+CAMPAIGN_MANIFEST: Path | None = None
+
 
 # OpenFOAM ESI v2512 bashrc path inside microfluidica/openfoam:latest SIF
 OF_ESI_BASHRC = "source /usr/lib/openfoam/openfoam2512/etc/bashrc 2>/dev/null || true"
@@ -77,18 +83,19 @@ def _container_cmd(image: str, mount_dir: Path, cmd: list[str],
             image,
         ] + cmd
 
-# TBM mesh parameters — refined vertical grid (2026-04-14)
-# Previous: height=5000, cells_z=50, grading=15 → first cell ~19m, centre ~10m
-# New:      height=2500, cells_z=80, grading=30 → first cell ~3.7m, centre ~1.8m
-# This enables resolving the surface layer (2m) where t2m/d2m/u10 are imposed.
-# Coverage up to 2500m AGL still captures synoptic-driven flows.
+# TBM mesh parameters — complex_terrain_v1 refinement (2026-04-14)
+# Campaign 9k: 67m horizontal (3 cells/block of 200m), AR=18 at first cell → too stretched
+# Current:     30m horizontal (6 cells/block of 200m, inner 2km, 66×66 inner cells)
+# AR first cell = 30/3.7 ≈ 8 (reasonable for ABL RANS with log-law)
+# Height and vertical grading unchanged (cells_z=80, 1st cell ~3.7m, centre ~1.8m)
+# Estimated cells/case : ~2M (vs 400k in 9k) → factor 5× compute
 DEFAULT_MESH = {
     "inner_size_m": 2000,
     "inner_blocks": 10,
-    "cells_per_block_xy": 3,
+    "cells_per_block_xy": 6,    # 6×6 per 200m block → 30m horizontal (was 3 → 67m)
     "cylinder_radius_m": 7000,
     "cylinder_sections": 8,
-    "radial_cells": 20,
+    "radial_cells": 30,          # more radial cells to avoid high-AR in cylinder annulus
     "radial_grading": 20,
     "height_m": 2500,
     "cells_z": 80,
@@ -96,7 +103,7 @@ DEFAULT_MESH = {
     "max_dist_proj": 20000,
     "blend_distance_m": 5000,
     "p_above_z": 10000,
-    "stl_resolution_m": 50,
+    "stl_resolution_m": 30,     # match SRTM native resolution (was 50)
 }
 
 
@@ -630,7 +637,7 @@ def solve_batch(cases: list[Path], n_iter: int, n_cores: int,
 # ===================================================================
 
 def export_site(site_dir: Path, n_iter: int) -> bool:
-    """Export solved cases to Zarr and delete raw OF dirs."""
+    """DEPRECATED — kept for 9k campaign compatibility. See export_cases_to_grid."""
     zarr_path = site_dir / f"{site_dir.name}.zarr"
     if zarr_path.exists():
         log.info("  Zarr already exists: %s", zarr_path)
@@ -661,6 +668,88 @@ def export_site(site_dir: Path, n_iter: int) -> bool:
     log.info("  Cleaned raw case dirs for %s", site_dir.name)
 
     return True
+
+
+def export_cases_to_grid(
+    site_dir: Path,
+    n_iter: int,
+    campaign_out_dir: Path,
+    site_manifest: Path | None = None,
+    campaign_manifest: Path | None = None,
+    include_turb: tuple[str, ...] = ("k", "epsilon", "nut"),
+    device: str = "cuda",
+    cleanup_raw: bool = True,
+) -> dict:
+    """Export each solved OF case directly to a grid.zarr under `cases/{site_id}_case_tsNNN/`.
+
+    Replaces the 2-step pipeline (stacked site zarr → grid.zarr via IDW) with a
+    single direct export.
+
+    Parameters
+    ----------
+    site_dir : site directory containing `case_ts*/` OF subdirs
+    n_iter : simpleFoam time directory to export
+    campaign_out_dir : root `cases/` directory of the campaign
+    site_manifest : path to `manifests/sites.yaml` (for per-site metadata)
+    campaign_manifest : path to `manifests/campaign.yaml` (for mesh/physics)
+    include_turb : extra turbulence targets to include (k, epsilon, nut)
+    device : torch device for IDW ('cuda' / 'cpu')
+    cleanup_raw : remove raw OF case dirs after successful export
+
+    Returns
+    -------
+    dict with keys n_exported, n_failed.
+    """
+    site_id = site_dir.name
+    stats = {"n_exported": 0, "n_failed": 0}
+
+    for case_dir in sorted(site_dir.glob("case_ts*")):
+        if not (case_dir / str(n_iter) / "U").exists():
+            continue  # skip unsolved
+        case_name = case_dir.name
+        out_case_dir = campaign_out_dir / f"{site_id}_{case_name}"
+        out_grid = out_case_dir / "grid.zarr"
+        if out_grid.exists():
+            log.info("  grid.zarr exists: %s", out_grid)
+            stats["n_exported"] += 1
+            continue
+
+        cmd = [
+            PYTHON, str(SCRIPTS_DIR / "export_to_grid_zarr.py"),
+            "--case-dir", str(case_dir),
+            "--time", str(n_iter),
+            "--out", str(out_grid),
+            "--device", device,
+        ]
+        if site_manifest is not None:
+            cmd += ["--site-manifest", str(site_manifest)]
+        if campaign_manifest is not None:
+            cmd += ["--campaign-manifest", str(campaign_manifest)]
+        if include_turb:
+            cmd += ["--include-turb", *include_turb]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        if result.returncode != 0:
+            log.error("  grid export FAILED for %s: %s",
+                      case_name, (result.stderr or "")[-300:])
+            stats["n_failed"] += 1
+            continue
+
+        # Copy inflow.json next to grid.zarr for traceability
+        inflow_src = case_dir / "inflow.json"
+        if inflow_src.exists():
+            shutil.copy2(inflow_src, out_case_dir / "inflow.json")
+
+        stats["n_exported"] += 1
+
+    if cleanup_raw and stats["n_failed"] == 0 and stats["n_exported"] > 0:
+        for case_dir in sorted(site_dir.glob("case_ts*")):
+            shutil.rmtree(case_dir, ignore_errors=True)
+        log.info("  Cleaned raw OF case dirs for %s", site_id)
+
+    log.info("  grid export: %d exported, %d failed",
+             stats["n_exported"], stats["n_failed"])
+    return stats
 
 
 # ===================================================================
@@ -793,9 +882,26 @@ def process_site(
         status["n_solved"] = already_solved
         log.info("  All %d cases already solved", already_solved)
 
-    # ---- Step 5: Export Zarr + cleanup ----
+    # ---- Step 5: Export grid.zarr + cleanup ----
     if status["n_solved"] > 0:
-        status["zarr_ok"] = export_site(site_dir, n_iter)
+        campaign_cases_dir = campaign_dir.parent / "cases"
+        if GRID_EXPORT_ENABLED:
+            stats = export_cases_to_grid(
+                site_dir=site_dir,
+                n_iter=n_iter,
+                campaign_out_dir=campaign_cases_dir,
+                site_manifest=SITE_MANIFEST,
+                campaign_manifest=CAMPAIGN_MANIFEST,
+                include_turb=("k", "epsilon", "nut"),
+                device=GRID_EXPORT_DEVICE,
+                cleanup_raw=True,
+            )
+            status["zarr_ok"] = (stats["n_failed"] == 0 and stats["n_exported"] > 0)
+            status["n_grid_exported"] = stats["n_exported"]
+            status["n_grid_failed"] = stats["n_failed"]
+        else:
+            # Legacy path (stacked site zarr via export_campaign_zarr)
+            status["zarr_ok"] = export_site(site_dir, n_iter)
 
     return status
 
@@ -855,6 +961,15 @@ def main():
                         help=f"OpenFOAM container image (default: {OF_IMAGE})")
     parser.add_argument("--tbm-image", default=None,
                         help=f"TBM container image (default: {TBM_IMAGE})")
+    parser.add_argument("--site-manifest", type=Path, default=None,
+                        help="manifests/sites.yaml for per-site metadata injection in grid.zarr")
+    parser.add_argument("--campaign-manifest", type=Path, default=None,
+                        help="manifests/campaign.yaml for mesh/physics metadata")
+    parser.add_argument("--grid-export", choices=["on", "off"], default="on",
+                        help="Enable direct OF → grid.zarr export (new pipeline). "
+                             "Set 'off' to use legacy stacked site zarr (export_campaign_zarr).")
+    parser.add_argument("--grid-export-device", default="cuda",
+                        help="torch device for IDW interpolation ('cuda' or 'cpu')")
     args = parser.parse_args()
 
     # Apply runtime overrides to module-level variables
@@ -865,6 +980,10 @@ def main():
         _mod.OF_IMAGE = args.of_image
     if args.tbm_image:
         _mod.TBM_IMAGE = args.tbm_image
+    _mod.GRID_EXPORT_ENABLED = (args.grid_export == "on")
+    _mod.GRID_EXPORT_DEVICE = args.grid_export_device
+    _mod.SITE_MANIFEST = args.site_manifest
+    _mod.CAMPAIGN_MANIFEST = args.campaign_manifest
 
     # Load run matrix
     run_matrix = load_run_matrix(args.run_matrix)

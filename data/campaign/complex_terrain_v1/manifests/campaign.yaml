@@ -1,0 +1,76 @@
+schema_version: 1
+campaign: complex_terrain_v1
+created: '2026-04-14'
+description: >
+  Multi-site CFD campaign for wind + T + q downscaling surrogate, focused on
+  terrain where CFD adds value over ERA5 25 km (fire-prone Mediterranean,
+  mountains, onshore wind farms in complex terrain). Supersedes the 9k campaign.
+
+mesh:
+  inner_size_m: 2000
+  horizontal_resolution_m: 30.0
+  cells_per_block_xy: 6         # 6×6 per 200 m block → 30 m
+  inner_blocks: 10
+  height_m: 2500
+  cells_z: 80
+  grading_z: 30
+  first_cell_m_approx: 3.7
+  aspect_ratio_first_cell: 8.1  # horizontal_resolution_m / first_cell_m_approx
+  cylinder_radius_m: 7000
+  cylinder_sections: 8
+  radial_cells: 30
+  radial_grading: 20
+  stl_resolution_m: 30          # match SRTM native
+
+solver:
+  name: simpleFoam
+  n_iter: 2000
+  turbulence_model: kOmegaSST
+  transport_T: passive          # scalarTransport function object
+  transport_q: passive
+
+physics:
+  coriolis_enabled: true
+  canopy_enabled: false
+  wall_function: parente2011     # ABL log-law with stability correction
+
+inflow:
+  pressure_levels_used: true
+  surface_anchor:
+    T_q: [t2m, d2m]              # z=2m
+    u_v: [u10, v10]              # z=10m (anchored in 2026-04-14 fix)
+  interpolation:
+    method: cubic_spline
+    layer_1_top_m: 100.0
+    layer_2_top_m: 2000.0
+    layer_3: era5_direct
+  source: data/raw/era5_campaign_v3/
+
+era5_ingest:
+  domain_bbox: [35.75, -10.0, 55.25, 25.0]   # [lat_min, lon_min, lat_max, lon_max]
+  periods:
+    - [2017-05-01, 2017-06-30]    # Perdigão IOP (spring, training)
+    - [2022-06-01, 2022-09-30]    # JJA fire season (fire weather, validation)
+  levels_hPa: [200, 300, 500, 700, 850, 925, 975, 1000]
+  surface_vars: [t2m, d2m, u10, v10, sp]
+  single_request: true            # ingest_era5_europe.py
+  sources:
+    europe_spring: data/raw/era5_europe.zarr
+    europe_jja2022: data/raw/era5_europe_2022jja.zarr
+
+output:
+  grid_size: 128                  # 128×128 horizontal
+  grid_resolution_m: 46.875       # 6 km / 128 = 46.875 m (matches 3 km half-extent)
+  z_levels_agl_m: [5, 5.89, 6.94, 8.17, 9.63, 11.34, 13.36, 15.74, 18.54, 21.84,
+                   25.73, 30.31, 35.71, 42.07, 49.56, 58.38, 68.78, 81.03, 95.46,
+                   112.45, 132.47, 156.05, 183.82, 216.52, 255.04, 300.42, 353.88,
+                   416.85, 491.02, 578.40, 681.34, 802.65]  # 32 log-spaced
+  half_extent_m: 3000.0
+  r_context_m: 4000.0             # OF cells radius read for IDW source
+  extra_targets: [k, epsilon, nut]
+
+tracking:
+  git_commit: null                # populate at run-time via git rev-parse
+  git_dirty: null
+  solver_image: 'microfluidica/openfoam:latest'
+  tbm_image: 'terrainblockmesher:of24'

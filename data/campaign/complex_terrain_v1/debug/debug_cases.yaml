@@ -1,0 +1,95 @@
+schema_version: 1
+description: >
+  Three debug cases to validate the complex_terrain_v1 pipeline before
+  production campaign launch (post HPC maintenance 2026-04-15 20h).
+  Each case targets a different regime to exercise the inflow + mesh fixes.
+
+cases:
+  perdigao_iop_nocturnal:
+    site_id: debug_perdigao
+    lat: 39.7129
+    lon: -7.7360
+    elevation_m: 485.0
+    timestamp: '2017-05-04T22:00:00'
+    era5_source: data/raw/era5_perdigao.zarr
+    rationale: >
+      Perdigão IOP (EU IntensiveObs 2017), 48 instrumented towers available.
+      Nocturnal stable, weak wind → tests stability correction + inflow
+      reconstruction with low u*.
+    expected_outcomes:
+      T_surface_K: [285.0, 291.0]       # cool nocturnal
+      u10_ms_abs: [2.0, 5.0]
+      converged: true
+    obs_reference: data/raw/perdigao_obs.zarr
+
+  fr_pue_canicule:
+    site_id: debug_fr_pue
+    lat: 43.7414
+    lon: 3.5958
+    elevation_m: 270.0
+    timestamp: '2022-08-10T12:00:00'
+    era5_source: data/raw/era5_fr-pue.zarr
+    rationale: >
+      FR-Puéchabon (ICOS flux site) during 2022 Mediterranean heatwave.
+      T surface ERA5 ~34°C → tests new t2m/d2m surface anchor. Previously
+      CFD gave T_surface=28°C (v1 bug) → must now approach ERA5 t2m.
+    expected_outcomes:
+      T_surface_K: [305.0, 309.0]       # 32-36°C
+      u10_ms_abs: [2.0, 4.0]             # light SW flow
+      converged: true
+    obs_reference: data/raw/icos_fr_pue.zarr
+
+  es_lju_synoptic:
+    site_id: debug_es_lju
+    lat: 37.1283
+    lon: -2.9531
+    elevation_m: 1600.0
+    timestamp: '2022-02-25T12:00:00'
+    era5_source: data/raw/era5_es-lju.zarr
+    rationale: >
+      Sierra Nevada (ES-LJu ICOS) during February 2022 synoptic event.
+      Observed 27.9 m/s NE at sensor. Tests CFD value-add on complex
+      terrain with strong synoptic forcing (regime where neutral RANS
+      should beat coarse ERA5). High-altitude site probes BC anchoring.
+    expected_outcomes:
+      T_surface_K: [268.0, 276.0]       # cool altitude
+      u10_ms_abs: [10.0, 25.0]           # strong NE wind
+      converged: true
+    obs_reference: data/raw/icos_es_lju.zarr
+
+validation_gates:
+  # All cases must pass these quantitative gates before production launch
+  - name: converged
+    description: Solver converged (residuals U and p < 5e-3)
+    applies_to: all
+    tolerance: strict
+
+  - name: T_in_range
+    description: T at sensor height within expected bracket (±2K)
+    applies_to: all
+    tolerance: soft
+
+  - name: u_in_range
+    description: |u| at sensor height within expected bracket (±30%)
+    applies_to: all
+    tolerance: soft
+
+  - name: AR_first_cell
+    description: Aspect ratio of first cell < 10 (mesh quality)
+    applies_to: all
+    target_value: 8.1
+    max_tolerance: 10.0
+
+  - name: inflow_surface_anchor
+    description: |
+      Inflow profile passes through ERA5 u10 at z=10m (within 5%).
+      Validates the u10/v10 anchor fix.
+    applies_to: all
+    tolerance: 0.05
+
+  - name: inflow_T_anchor
+    description: |
+      Inflow T at z=2m equals ERA5 t2m (within 1K).
+      Validates the t2m anchor fix.
+    applies_to: all
+    tolerance: 1.0

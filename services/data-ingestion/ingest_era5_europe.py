@@ -34,13 +34,16 @@ PRESSURE_VARIABLES = [
     "geopotential", "temperature", "specific_humidity",
 ]
 SURFACE_VARIABLES = [
-    "10m_u_component_of_wind", "10m_v_component_of_wind", "2m_temperature",
+    "10m_u_component_of_wind", "10m_v_component_of_wind",
+    "2m_temperature", "2m_dewpoint_temperature",
+    "surface_pressure",
 ]
 CDS_TO_SHORT = {
     "u_component_of_wind": "u", "v_component_of_wind": "v",
     "geopotential": "z", "temperature": "t", "specific_humidity": "q",
     "10m_u_component_of_wind": "u10", "10m_v_component_of_wind": "v10",
-    "2m_temperature": "t2m",
+    "2m_temperature": "t2m", "2m_dewpoint_temperature": "d2m",
+    "surface_pressure": "sp",
 }
 HOURS_6H = ["00:00", "06:00", "12:00", "18:00"]
 
