@@ -90,12 +90,12 @@ def _container_cmd(image: str, mount_dir: Path, cmd: list[str],
 # Height and vertical grading unchanged (cells_z=80, 1st cell ~3.7m, centre ~1.8m)
 # Estimated cells/case : ~2M (vs 400k in 9k) → factor 5× compute
 DEFAULT_MESH = {
-    "inner_size_m": 2000,
-    "inner_blocks": 10,
-    "cells_per_block_xy": 6,    # 6×6 per 200m block → 30m horizontal (was 3 → 67m)
-    "cylinder_radius_m": 7000,
+    "inner_size_m": 6000,        # 6 km × 6 km inner (matches ML grid half_extent 3000m)
+    "inner_blocks": 30,          # 30 × 200 m blocks → 6 km
+    "cells_per_block_xy": 6,     # 6 × 6 per 200 m block → 30 m horizontal
+    "cylinder_radius_m": 10000,  # 20 km diameter — buffer outside 6 km inner
     "cylinder_sections": 8,
-    "radial_cells": 30,          # more radial cells to avoid high-AR in cylinder annulus
+    "radial_cells": 30,          # radial cells in octagonal annulus
     "radial_grading": 20,
     "height_m": 2500,
     "cells_z": 80,
@@ -103,7 +103,7 @@ DEFAULT_MESH = {
     "max_dist_proj": 20000,
     "blend_distance_m": 5000,
     "p_above_z": 10000,
-    "stl_resolution_m": 30,     # match SRTM native resolution (was 50)
+    "stl_resolution_m": 30,      # match SRTM native resolution
 }
 
 

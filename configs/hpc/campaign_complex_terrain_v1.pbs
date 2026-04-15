@@ -1,0 +1,110 @@
+#!/bin/bash -l
+#PBS -N ct_v1_cfd
+#PBS -l select=1:ncpus=48:mem=96GB
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -m ae
+#PBS -J 1-10
+
+# complex_terrain_v1 CFD campaign — PBS array of 10 jobs, each processes a shard
+# of the run_matrix. Use $PBS_ARRAY_INDEX (1..10) to partition the 750 sites /
+# 11k runs across jobs.
+#
+# Scope: 750 sites × 15 timestamps = ~11k runs at 30m horizontal / 2M cells/case.
+# Expected per-case: ~2 min solve on 24 cores (k=kOmegaSST, passive T/q).
+# Expected per-job: ~75 sites, ~1100 runs, ~37h at 24s-effective/case parallelised.
+#
+# Prerequisites (one-shot, before qsub):
+#   1. rsync per-site ERA5 zarrs to /scratch/maitreje/dsw/era5_campaign_v3/
+#   2. sites.csv + run_matrix.csv in data/campaign/complex_terrain_v1/
+#   3. manifests/ populated (sites.yaml, campaign.yaml)
+#
+# Launch:
+#   qsub -J 1-10 configs/hpc/campaign_complex_terrain_v1.pbs
+
+set -euo pipefail
+cd "$HOME/dsw"
+
+OF_SIF="$HOME/dsw/containers/openfoam_v2512.sif"
+TBM_SIF="$HOME/dsw/containers/terrainblockmesher.sif"
+SRTM="$HOME/dsw/data/srtm_europe.tif"
+CAMPAIGN_DIR="$HOME/dsw/data/campaign/complex_terrain_v1"
+ERA5_DIR="/scratch/maitreje/dsw/era5_campaign_v3"
+RUN_MATRIX="${CAMPAIGN_DIR}/run_matrix.csv"
+SITE_MANIFEST="${CAMPAIGN_DIR}/manifests/sites.yaml"
+CAMPAIGN_MANIFEST="${CAMPAIGN_DIR}/manifests/campaign.yaml"
+SHARD_ID="${PBS_ARRAY_INDEX:-1}"
+N_SHARDS=10
+
+# Output on scratch (cases can be large, cleaned after grid.zarr export)
+OUTPUT="/scratch/maitreje/dsw/complex_terrain_v1/shard_$(printf '%02d' "$SHARD_ID")"
+mkdir -p "$OUTPUT"
+
+echo "====================================================="
+echo "  complex_terrain_v1 — shard ${SHARD_ID}/${N_SHARDS}"
+echo "  Date:    $(date)"
+echo "  Node:    $(hostname)"
+echo "  Cores:   $(nproc)"
+echo "  Output:  $OUTPUT"
+echo "====================================================="
+
+# ── Pre-flight ────────────────────────────────────────────────────────
+for f in "$OF_SIF" "$TBM_SIF" "$RUN_MATRIX" "$SRTM" "$SITE_MANIFEST" "$CAMPAIGN_MANIFEST"; do
+    [ -e "$f" ] && echo "OK: $f" || { echo "MISSING: $f"; exit 1; }
+done
+[ -d "$ERA5_DIR" ] && echo "OK: $ERA5_DIR ($(ls $ERA5_DIR | wc -l) files)" || {
+    echo "MISSING: $ERA5_DIR — upload per-site ERA5 first"; exit 1; }
+
+module load apptainer 2>/dev/null || true
+export CONTAINER_RUNTIME=apptainer
+
+python -c "import numpy, pandas, xarray, zarr, rasterio, pyproj, jinja2, scipy, torch, yaml; \
+           print('Python deps OK:', torch.__version__)" \
+    || { echo "ERROR: missing Python deps (numpy/pandas/xarray/zarr/rasterio/pyproj/jinja2/scipy/torch/yaml)"; exit 1; }
+
+apptainer exec "$OF_SIF" bash -c "source /usr/lib/openfoam/openfoam2512/etc/bashrc && simpleFoam -help" \
+    >/dev/null 2>&1 && echo "OF SIF OK" || { echo "ERROR: OF SIF broken"; exit 1; }
+
+# ── Shard the run matrix (poor-man's partitioning by site_id hash) ────
+SHARD_MATRIX="${OUTPUT}/run_matrix_shard_${SHARD_ID}.csv"
+python - <<PYEOF
+import csv, hashlib
+shard = $SHARD_ID
+nshards = $N_SHARDS
+with open("$RUN_MATRIX") as f, open("$SHARD_MATRIX", "w", newline="") as g:
+    rdr = csv.DictReader(f)
+    wrtr = csv.DictWriter(g, fieldnames=rdr.fieldnames)
+    wrtr.writeheader()
+    kept = 0
+    for row in rdr:
+        # Partition by site_id (watertight: all timestamps of a site in same shard)
+        h = int(hashlib.sha1(row["site_id"].encode()).hexdigest(), 16)
+        if (h % nshards) == (shard - 1):
+            wrtr.writerow(row)
+            kept += 1
+    print(f"shard {shard}: {kept} runs")
+PYEOF
+
+echo
+echo "=== Launching shard $SHARD_ID ($(date)) ==="
+
+python services/module2a-cfd/run_multisite_campaign.py \
+    --run-matrix "$SHARD_MATRIX" \
+    --srtm "$SRTM" \
+    --era5-zarr "$ERA5_DIR/era5_site_placeholder.zarr" \
+    --output "$OUTPUT" \
+    --n-iter 2000 \
+    --n-cores 24 \
+    --n-parallel 1 \
+    --runtime apptainer \
+    --of-image "$OF_SIF" \
+    --tbm-image "$TBM_SIF" \
+    --site-manifest "$SITE_MANIFEST" \
+    --campaign-manifest "$CAMPAIGN_MANIFEST" \
+    --grid-export on \
+    --grid-export-device cuda
+
+echo
+echo "=== Shard $SHARD_ID complete ($(date)) ==="
+echo "grid.zarr cases in: $OUTPUT/cases/"
+ls "$OUTPUT/cases/" 2>&1 | head -5

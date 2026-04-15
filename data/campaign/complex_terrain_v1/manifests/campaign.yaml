@@ -7,20 +7,21 @@ description: >
   mountains, onshore wind farms in complex terrain). Supersedes the 9k campaign.
 
 mesh:
-  inner_size_m: 2000
+  inner_size_m: 6000            # 6 km × 6 km inner (matches ML grid half_extent)
   horizontal_resolution_m: 30.0
-  cells_per_block_xy: 6         # 6×6 per 200 m block → 30 m
-  inner_blocks: 10
+  cells_per_block_xy: 6         # 6 × 6 per 200 m block → 30 m
+  inner_blocks: 30              # 30 × 200 m → 6 km
   height_m: 2500
   cells_z: 80
   grading_z: 30
   first_cell_m_approx: 3.7
   aspect_ratio_first_cell: 8.1  # horizontal_resolution_m / first_cell_m_approx
-  cylinder_radius_m: 7000
+  cylinder_radius_m: 10000       # 20 km diameter — buffer outside 6 km inner
   cylinder_sections: 8
   radial_cells: 30
   radial_grading: 20
-  stl_resolution_m: 30          # match SRTM native
+  stl_resolution_m: 30           # match SRTM native
+  approx_cells_per_case: 3_700_000
 
 solver:
   name: simpleFoam

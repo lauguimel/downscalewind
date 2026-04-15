@@ -1,0 +1,3 @@
+site_id,lat,lon,group
+bbox_SW,35.5,-10.0,bbox
+bbox_NE,55.0,26.0,bbox

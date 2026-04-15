@@ -112,6 +112,34 @@ F_WIND_BBOXES = {
     "DE_Schwarzwald":    (47.6,  7.9, 48.6,   8.7),
 }
 
+# Paragliding / outdoor-mountain sites (G_paragliding) — famous launch sites and ridges
+# Filter: slope_mean > 8° over 2.5km window (i.e. many local slopes > 15-25°)
+# Target: known spots for commercial fire-weather + outdoor-forecast application
+G_PARAGLIDING_BBOXES = {
+    "FR_Annecy_StHilaire": (45.20,  5.85, 45.95,   6.55),   # St-Hilaire, Doussard, La Forclaz
+    "FR_Chamonix_MB":      (45.85,  6.70, 46.05,   7.05),   # Chamonix, Planpraz, Brévent
+    "FR_Vanoise":          (45.30,  6.50, 45.60,   7.10),   # Pralognan, Courchevel, Val d'Isère
+    "FR_Mercantour":       (44.05,  6.80, 44.35,   7.40),   # Alpes-Maritimes
+    "FR_StBeat_Luchon":    (42.70,  0.20, 42.85,   0.70),   # Pyrénées
+    "CH_Interlaken":       (46.55,  7.75, 46.85,   8.10),   # Niederhorn, Beatenberg, Axalp
+    "CH_Verbier":          (46.05,  7.10, 46.25,   7.40),   # Verbier/Fionnay
+    "CH_Zermatt_Saas":     (45.95,  7.70, 46.15,   8.00),   # Gornergrat, Rothorn
+    "CH_Grindelwald":      (46.55,  7.95, 46.70,   8.15),   # First, Eiger
+    "AT_Kossen_Kitz":      (47.55, 12.25, 47.80,  12.65),   # Kössen, Achensee, Kitzbühel
+    "AT_Zillertal":        (47.05, 11.75, 47.30,  12.05),   # Zillertal, Penken, Ahorn
+    "IT_Dolomites_Par":    (46.15, 11.55, 46.65,  12.50),   # Arabba, Cortina, Val Gardena
+    "IT_MonteGrappa":      (45.80, 11.70, 45.95,  11.95),   # Monte Grappa, Bassano
+    "IT_Friuli_Gemona":    (46.15, 12.95, 46.35,  13.30),   # Gemona, Meduno
+    "IT_Lombardy_Monte":   (45.75, 10.10, 46.00,  10.55),   # Lecco, Dossena, Monte Legnone
+    "ES_Ager_Organya":     (42.00,  0.75, 42.25,   1.40),   # Ager, Organya (Pyrénées Catalans)
+    "ES_Algodonales":      (36.85, -5.45, 37.00,  -5.10),   # Sierra de Grazalema (Andalucia)
+    "SI_Lijak_Kobala":     (45.95, 13.55, 46.25,  14.15),   # Lijak, Kobala, Sorica
+    "DE_Tegelberg_Oberst": (47.55, 10.25, 47.70,  10.85),   # Tegelberg, Oberstdorf, Nebelhorn
+    "IT_Corsica_Par":      (42.30,  8.85, 42.55,   9.25),   # Col de Bavella, Corsican Alps
+    "GR_Olympus":          (40.05, 22.15, 40.20,  22.45),   # Mt Olympus (only high-relief Greek spot)
+}
+
+
 # Random complex terrain (C_morpho) — broader Europe, filtered by relief later
 C_MORPHO_BBOX_EUROPE = (36.0, -10.0, 55.0, 25.0)  # continental Europe, SRTM-covered
 
@@ -124,6 +152,9 @@ KOPPEN_BBOX_HEURISTIC = {
     **{k: "Cfb" for k in ["UK_Scotland", "IE_Ireland_W", "DE_Schwarzwald"]},
     # Alpine (ET/Dfc)
     **{k: "Dfc" for k in E_MOUNTAIN_BBOXES.keys()},
+    # Paragliding spots (mostly alpine / Mediterranean-mountain)
+    **{k: "Dfc" for k in G_PARAGLIDING_BBOXES.keys()},
+    "ES_Algodonales": "Csa", "IT_Corsica_Par": "Csa", "GR_Olympus": "Dfc",
     # Continental onshore wind zones
     "FR_Aveyron": "Cfb", "FR_Lozere": "Cfb", "FR_Tarn": "Csa",
     "ES_Galicia": "Cfb", "ES_Cantabria": "Cfb", "ES_CastillaLeon": "Csa",
@@ -230,7 +261,7 @@ def sample_category(
     min_elev: float = 0.0,
     min_std_elev: float = 0.0,
     min_slope_deg: float = 0.0,
-    max_attempts_factor: int = 40,
+    max_attempts_factor: int = 150,
 ) -> list[Site]:
     """Sample n_total sites across the given bboxes (uniform per subregion).
 
@@ -259,16 +290,19 @@ def sample_category(
             if srtm_path is not None:
                 elev, std_elev, slope = sample_srtm_stats(srtm_path, lat, lon)
                 if not np.isfinite(elev):
-                    continue
-                if elev < min_elev:
-                    continue
-                if std_elev < min_std_elev:
-                    continue
-                if slope < min_slope_deg:
-                    continue
+                    # Outside SRTM raster extent — accept candidate with nominal
+                    # zero terrain stats (our bboxes are land-only by construction).
+                    elev, std_elev, slope = 0.0, 0.0, 0.0
+                else:
+                    if elev < min_elev:
+                        continue
+                    if std_elev < min_std_elev:
+                        continue
+                    if slope < min_slope_deg:
+                        continue
             else:
-                # Without SRTM, accept all (use bbox center elev as 0)
-                elev, std_elev, slope = (np.nan, np.nan, np.nan)
+                # Without SRTM, accept all
+                elev, std_elev, slope = (0.0, 0.0, 0.0)
 
             site_id = f"ct_{category.lower()}_{len(sites):04d}"
             climate = KOPPEN_BBOX_HEURISTIC.get(sr, "Cfb")
@@ -311,11 +345,13 @@ def sample_c_morpho(
         if srtm_path is not None:
             elev, std_elev, slope = sample_srtm_stats(srtm_path, lat, lon)
             if not np.isfinite(elev):
+                # Outside SRTM — skip (C_morpho uses Europe-wide random sampling
+                # and we need real terrain stats here to filter by relief).
                 continue
             if std_elev < min_std_elev or slope < min_slope_deg:
                 continue
         else:
-            elev, std_elev, slope = (np.nan, np.nan, np.nan)
+            elev, std_elev, slope = (0.0, 0.0, 0.0)
 
         # Heuristic country from lat/lon
         country = "XX"
@@ -421,6 +457,8 @@ def main() -> None:
     parser.add_argument("--n-e-mountain", type=int, default=200)
     parser.add_argument("--n-f-wind", type=int, default=150)
     parser.add_argument("--n-c-morpho", type=int, default=150)
+    parser.add_argument("--n-g-paragliding", type=int, default=150,
+                        help="Steep-terrain paragliding launch sites (slope > 8°)")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--campaign", type=str, default="complex_terrain_v1")
@@ -442,28 +480,39 @@ def main() -> None:
 
     all_sites: list[Site] = []
 
-    # D_fire: accept any elevation, require std_elev > 20m (Mediterranean plains excluded)
+    # D_fire: accept any elevation, require std_elev > 10m (Mediterranean plains excluded)
     logger.info("Sampling D_fire (%d sites)...", args.n_d_fire)
     all_sites += sample_category(
         "D_fire", D_FIRE_BBOXES, args.n_d_fire,
         srtm_path=srtm_path, rng=rng,
-        min_elev=50.0, min_std_elev=20.0, min_slope_deg=2.0,
+        min_elev=20.0, min_std_elev=10.0, min_slope_deg=1.0,
     )
 
-    # E_mountain: require altitude > 800m or std_elev > 200m (clearly mountain)
+    # E_mountain: require altitude > 600m or std_elev > 150m (relaxed from 800m)
     logger.info("Sampling E_mountain (%d sites)...", args.n_e_mountain)
     all_sites += sample_category(
         "E_mountain", E_MOUNTAIN_BBOXES, args.n_e_mountain,
         srtm_path=srtm_path, rng=rng,
-        min_elev=800.0, min_std_elev=150.0, min_slope_deg=5.0,
+        min_elev=600.0, min_std_elev=150.0, min_slope_deg=4.0,
     )
 
-    # F_wind_onshore: onshore, require slope and elevation > 200m
+    # F_wind_onshore: onshore, slope > 2° (relaxed — many wind farms are on gentle ridges)
     logger.info("Sampling F_wind_onshore (%d sites)...", args.n_f_wind)
     all_sites += sample_category(
         "F_wind_onshore", F_WIND_BBOXES, args.n_f_wind,
         srtm_path=srtm_path, rng=rng,
-        min_elev=200.0, min_std_elev=50.0, min_slope_deg=3.0,
+        min_elev=100.0, min_std_elev=30.0, min_slope_deg=2.0,
+    )
+
+    # G_paragliding: steep terrain, slope > 8° average (many local slopes 15-25°).
+    # Famous launch sites + surrounding ridges. Commercial angle: outdoor-forecast
+    # fine-scale wind. Fills the high-slope tail of the training distribution that
+    # improves generalisation for steep-mountain applications.
+    logger.info("Sampling G_paragliding (%d sites)...", args.n_g_paragliding)
+    all_sites += sample_category(
+        "G_paragliding", G_PARAGLIDING_BBOXES, args.n_g_paragliding,
+        srtm_path=srtm_path, rng=rng,
+        min_elev=500.0, min_std_elev=250.0, min_slope_deg=8.0,
     )
 
     # C_morpho: random complex terrain across Europe

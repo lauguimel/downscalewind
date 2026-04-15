@@ -63,42 +63,80 @@ def compute_bbox(sites_csv: Path, margin: float = 0.5) -> dict:
     }
 
 
+def _nc_is_valid(path: Path) -> bool:
+    """Return True if path exists and can be opened as a NetCDF by xarray."""
+    if not path.exists() or path.stat().st_size < 1024:
+        return False
+    try:
+        import xarray as xr
+        with xr.open_dataset(path) as _ds:
+            _ds.load()
+        return True
+    except Exception as exc:
+        log.warning("  %s exists but is not a valid NetCDF (%s) — will redownload",
+                    path.name, type(exc).__name__)
+        return False
+
+
 def download_month(client, year: int, month: int, bbox: dict, target_path: Path):
-    """Download one month of ERA5 for the bbox."""
+    """Download one month of ERA5 for the bbox.
+
+    Resumes across script restarts: if `_pl_{y}_{m}.nc` / `_sf_{y}_{m}.nc` already
+    exist AND are valid NetCDF, skip the CDS request (CDS URLs expire after ~1h so
+    partial files from expired sessions must be re-downloaded from scratch; invalid
+    partial files are deleted and redownloaded).
+    """
     import calendar
     n_days = calendar.monthrange(year, month)[1]
     days = [f"{d:02d}" for d in range(1, n_days + 1)]
 
-    # Pressure levels
-    log.info(f"  Downloading pressure levels {year}-{month:02d}...")
-    pl_request = {
-        "product_type": "reanalysis",
-        "format": "netcdf",
-        "variable": PRESSURE_VARIABLES,
-        "pressure_level": [str(p) for p in PRESSURE_LEVELS],
-        "year": str(year),
-        "month": f"{month:02d}",
-        "day": days,
-        "time": HOURS_6H,
-        "area": [bbox["north"], bbox["west"], bbox["south"], bbox["east"]],
-    }
     pl_path = target_path.parent / f"_pl_{year}_{month:02d}.nc"
-    client.retrieve("reanalysis-era5-pressure-levels", pl_request, str(pl_path))
+    sf_path = target_path.parent / f"_sf_{year}_{month:02d}.nc"
+
+    # Pressure levels
+    if _nc_is_valid(pl_path):
+        log.info(f"  Pressure {year}-{month:02d}: skipping (valid NetCDF exists, %.0f MB)",
+                 pl_path.stat().st_size / 1e6)
+    else:
+        if pl_path.exists():
+            log.info("  Removing orphaned partial %s (%.0f MB)",
+                     pl_path.name, pl_path.stat().st_size / 1e6)
+            pl_path.unlink()
+        log.info(f"  Downloading pressure levels {year}-{month:02d}...")
+        pl_request = {
+            "product_type": "reanalysis",
+            "format": "netcdf",
+            "variable": PRESSURE_VARIABLES,
+            "pressure_level": [str(p) for p in PRESSURE_LEVELS],
+            "year": str(year),
+            "month": f"{month:02d}",
+            "day": days,
+            "time": HOURS_6H,
+            "area": [bbox["north"], bbox["west"], bbox["south"], bbox["east"]],
+        }
+        client.retrieve("reanalysis-era5-pressure-levels", pl_request, str(pl_path))
 
     # Surface
-    log.info(f"  Downloading surface {year}-{month:02d}...")
-    sf_request = {
-        "product_type": "reanalysis",
-        "format": "netcdf",
-        "variable": SURFACE_VARIABLES,
-        "year": str(year),
-        "month": f"{month:02d}",
-        "day": days,
-        "time": HOURS_6H,
-        "area": [bbox["north"], bbox["west"], bbox["south"], bbox["east"]],
-    }
-    sf_path = target_path.parent / f"_sf_{year}_{month:02d}.nc"
-    client.retrieve("reanalysis-era5-single-levels", sf_request, str(sf_path))
+    if _nc_is_valid(sf_path):
+        log.info(f"  Surface {year}-{month:02d}: skipping (valid NetCDF exists, %.0f MB)",
+                 sf_path.stat().st_size / 1e6)
+    else:
+        if sf_path.exists():
+            log.info("  Removing orphaned partial %s (%.0f MB)",
+                     sf_path.name, sf_path.stat().st_size / 1e6)
+            sf_path.unlink()
+        log.info(f"  Downloading surface {year}-{month:02d}...")
+        sf_request = {
+            "product_type": "reanalysis",
+            "format": "netcdf",
+            "variable": SURFACE_VARIABLES,
+            "year": str(year),
+            "month": f"{month:02d}",
+            "day": days,
+            "time": HOURS_6H,
+            "area": [bbox["north"], bbox["west"], bbox["south"], bbox["east"]],
+        }
+        client.retrieve("reanalysis-era5-single-levels", sf_request, str(sf_path))
 
     return pl_path, sf_path
 
@@ -121,7 +159,7 @@ def nc_to_arrays(pl_path: Path, sf_path: Path) -> dict:
     time_var = "valid_time" if "valid_time" in pl_ds.dims else "time"
     times = pl_ds[time_var].values
 
-    return {
+    out = {
         "times": times.astype("datetime64[ns]"),
         "lats": pl_ds.latitude.values.astype(np.float32),
         "lons": pl_ds.longitude.values.astype(np.float32),
@@ -135,6 +173,12 @@ def nc_to_arrays(pl_path: Path, sf_path: Path) -> dict:
         "v10": sf_ds.v10.values.astype(np.float32),
         "t2m": sf_ds.t2m.values.astype(np.float32),
     }
+    # Optional surface vars (may be absent in legacy downloads without the
+    # 2m_dewpoint_temperature / surface_pressure patch applied)
+    for var in ("d2m", "sp"):
+        if var in sf_ds.data_vars:
+            out[var] = sf_ds[var].values.astype(np.float32)
+    return out
 
 
 def main():
@@ -200,7 +244,8 @@ def main():
         "lons": all_data[0]["lons"],
         "levels": all_data[0]["levels"],
     }
-    for var in ["u", "v", "z", "t", "q", "u10", "v10", "t2m"]:
+    surface_optional = [v for v in ("d2m", "sp") if all(v in d for d in all_data)]
+    for var in ["u", "v", "z", "t", "q", "u10", "v10", "t2m"] + surface_optional:
         merged[var] = np.concatenate([d[var] for d in all_data], axis=0)
 
     log.info("Final shape: %d times × %d levels × %d × %d",
@@ -222,7 +267,7 @@ def main():
         pressure.create_array(var, data=merged[var])
 
     surface = store.create_group("surface")
-    for var in ["u10", "v10", "t2m"]:
+    for var in ["u10", "v10", "t2m"] + surface_optional:
         surface.create_array(var, data=merged[var])
 
     log.info("Done: %s", args.output)
