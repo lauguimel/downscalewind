@@ -147,17 +147,29 @@ def extract_stl(
 
     with rasterio.open(srtm_tif) as src:
         window = window_from_bounds(lon_min, lat_min, lon_max, lat_max, src.transform)
-        data = src.read(1, window=window)
+        src_nodata = src.nodata if src.nodata is not None else -32768.0
+        # boundless=True + fill_value=nodata so out-of-raster pixels are flagged
+        # (prevents silent zero-filling for sites partially outside the SRTM extent)
+        data = src.read(1, window=window, boundless=True, fill_value=src_nodata).astype(np.float32)
 
-        if data.size == 0 or np.all(data == src.nodata):
-            raise ValueError(f"No SRTM data for site ({site_lat:.3f}, {site_lon:.3f})")
+        if data.size == 0:
+            raise ValueError(f"SRTM read returned empty array for site ({site_lat:.3f}, {site_lon:.3f})")
+        # Accept cases where most of the bbox is nodata (coastal islands, SRTM gaps) as
+        # long as there are ENOUGH valid pixels to seed the fallback elevation; sub-5%
+        # coverage still permits STL with a flat nominal floor at that min altitude.
+        valid_fraction = float(np.sum(data != src_nodata)) / data.size
+        if valid_fraction < 0.01:
+            raise ValueError(
+                f"SRTM coverage < 1% for site ({site_lat:.3f}, {site_lon:.3f}) — "
+                "bbox likely outside raster; skipping site.")
 
-        # Resample to target resolution
+        # Resample to target resolution — initialise destination to the SRTM nodata
+        # value so unreached pixels remain flagged as invalid (not a silent zero).
         from rasterio.transform import from_bounds
         from rasterio.warp import reproject, Resampling
 
         dst_transform = from_bounds(x0 - half, y0 - half, x0 + half, y0 + half, nx, ny)
-        dst_array = np.zeros((ny, nx), dtype=np.float32)
+        dst_array = np.full((ny, nx), src_nodata, dtype=np.float32)
 
         reproject(
             source=data,
@@ -166,11 +178,14 @@ def extract_stl(
             src_crs=src.crs,
             dst_transform=dst_transform,
             dst_crs=utm_epsg,
+            src_nodata=src_nodata,
+            dst_nodata=src_nodata,
             resampling=Resampling.bilinear,
         )
 
-    # Replace nodata with min valid elevation
-    valid_mask = dst_array > -500
+    # Replace nodata with min valid elevation (use explicit nodata comparison, not
+    # a `-500` threshold, so legitimate sub-sea-level valid pixels are not dropped)
+    valid_mask = np.isfinite(dst_array) & (dst_array != src_nodata) & (dst_array > -500)
     if not valid_mask.any():
         raise ValueError(f"All nodata for site ({site_lat:.3f}, {site_lon:.3f})")
     z_min_valid = float(dst_array[valid_mask].min())
@@ -573,7 +588,7 @@ def solve_case(case_dir: Path, n_iter: int, n_cores: int) -> bool:
     mpi_flags = ["--oversubscribe", "--allow-run-as-root"] if CONTAINER_RUNTIME == "apptainer" else []
     result = _docker_of(
         ["mpirun"] + mpi_flags + ["-np", str(n_cores), "simpleFoam", "-parallel"],
-        timeout=3600)
+        timeout=5400)  # 90 min safety margin (38 min typical on 4.3M cells, 24c)
     (case_dir / "log.simpleFoam").write_text(result.stdout + result.stderr)
 
     # chown all files back to user (Docker only — Apptainer preserves UID)

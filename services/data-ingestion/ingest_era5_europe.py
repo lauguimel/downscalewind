@@ -255,7 +255,14 @@ def main():
     # Write to Zarr
     import zarr
     log.info("Writing Zarr to %s", args.output)
-    store = zarr.open_group(str(args.output), mode="w")
+    # Force zarr v2 format for compatibility with consumers on older zarr installs
+    # (Aqua runs zarr 2.18 with Python 3.9; zarr 3.x writers produce v3 by default
+    # which is unreadable on v2 clients).
+    try:
+        store = zarr.open_group(str(args.output), mode="w", zarr_format=2)
+    except TypeError:
+        # zarr < 3.x: v2 is the only format, no kwarg needed
+        store = zarr.open_group(str(args.output), mode="w")
     coords = store.create_group("coords")
     coords.create_array("time", data=merged["times"].astype(np.int64))
     coords.create_array("lat", data=merged["lats"])

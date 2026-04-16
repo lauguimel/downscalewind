@@ -32,14 +32,21 @@ solvers
     }
 
     // -- Pressure --
-    //    PCG+DIC: robust for all mesh sizes (no coarsening threshold issues).
+    //    GAMG (algebraic multigrid): 3-5× faster than PCG+DIC on meshes > 500k cells.
+    //    On 4.3M-cell 6×6km inner mesh the first iteration drops from ~5 min to ~5 s;
+    //    full 2000-iter case: ~38 min vs unfeasible hours with PCG.
     p
     {
-        solver          PCG;
-        preconditioner  DIC;
-        tolerance       1e-7;
-        relTol          0.01;
-        maxIter         200;
+        solver              GAMG;
+        smoother            GaussSeidel;
+        tolerance           1e-7;
+        relTol              0.01;
+        nPreSweeps          0;
+        nPostSweeps         2;
+        cacheAgglomeration  true;
+        nCellsInCoarsestLevel 100;
+        agglomerator        faceAreaPair;
+        mergeLevels         1;
     }
 
     pFinal

@@ -24,6 +24,19 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _ensure_zarr_compat():
+    """Monkey-patch zarr Group.create_array for zarr v2 (which only has create_dataset).
+    zarr v3 has create_array natively; v2 exposes create_dataset with the same call form.
+    """
+    import zarr
+    try:
+        HierGroup = zarr.hierarchy.Group
+    except AttributeError:
+        return
+    if not hasattr(HierGroup, "create_array"):
+        HierGroup.create_array = HierGroup.create_dataset
+
+
 def find_3x3_indices(lat: float, lon: float,
                      lats: np.ndarray, lons: np.ndarray) -> tuple:
     """Find indices of the 3×3 ERA5 grid centered on (lat, lon).
@@ -83,11 +96,12 @@ def extract_site(europe_data: dict, site_id: str, lat: float, lon: float,
         )
 
     surface = store.create_group("surface")
-    for var in ["u10", "v10", "t2m"]:
-        surface.create_array(
-            var,
-            data=europe_data[var][:, i_slice, j_slice].copy()
-        )
+    for var in ["u10", "v10", "t2m", "d2m", "sp"]:
+        if var in europe_data:
+            surface.create_array(
+                var,
+                data=europe_data[var][:, i_slice, j_slice].copy()
+            )
 
     return True
 
@@ -100,7 +114,8 @@ def main():
     )
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--europe-zarr", required=True, type=Path)
+    parser.add_argument("--europe-zarr", required=True, type=Path, nargs="+",
+                        help="One or more Europe ERA5 zarrs (concatenated on time)")
     parser.add_argument("--sites", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--max-sites", type=int, default=None)
@@ -108,24 +123,55 @@ def main():
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load Europe ERA5 in memory
     import zarr
-    logger.info("Loading %s into memory...", args.europe_zarr)
-    z = zarr.open_group(str(args.europe_zarr), mode="r")
+    _ensure_zarr_compat()
+
+    # Load all Europe ERA5 zarrs and concat on time axis
+    sources = args.europe_zarr if isinstance(args.europe_zarr, list) else [args.europe_zarr]
+    stacks = []
+    for src in sources:
+        logger.info("Loading %s into memory...", src)
+        z = zarr.open_group(str(src), mode="r")
+        d = {
+            "times": np.array(z["coords/time"][:]),
+            "lats": np.array(z["coords/lat"][:]),
+            "lons": np.array(z["coords/lon"][:]),
+            "levels": np.array(z["coords/level"][:]),
+        }
+        for var in ["u", "v", "z", "t", "q"]:
+            d[var] = np.array(z[f"pressure/{var}"][:])
+        for var in ["u10", "v10", "t2m", "d2m", "sp"]:
+            if var in z["surface"]:
+                d[var] = np.array(z[f"surface/{var}"][:])
+        stacks.append(d)
+
+    # Verify lat/lon/levels consistent across sources
+    for d in stacks[1:]:
+        if not (np.array_equal(d["lats"], stacks[0]["lats"])
+                and np.array_equal(d["lons"], stacks[0]["lons"])
+                and np.array_equal(d["levels"], stacks[0]["levels"])):
+            raise ValueError("Source zarrs have mismatched lat/lon/levels grid")
+
     europe_data = {
-        "times": np.array(z["coords/time"][:]),
-        "lats": np.array(z["coords/lat"][:]),
-        "lons": np.array(z["coords/lon"][:]),
-        "levels": np.array(z["coords/level"][:]),
+        "lats": stacks[0]["lats"],
+        "lons": stacks[0]["lons"],
+        "levels": stacks[0]["levels"],
     }
+    # Concat times + all data arrays time-wise, sorted ascending
+    all_times = np.concatenate([d["times"] for d in stacks])
+    order = np.argsort(all_times)
+    europe_data["times"] = all_times[order]
     for var in ["u", "v", "z", "t", "q"]:
-        europe_data[var] = np.array(z[f"pressure/{var}"][:])
-    for var in ["u10", "v10", "t2m"]:
-        europe_data[var] = np.array(z[f"surface/{var}"][:])
-    logger.info("Loaded: %d times, %d levels, lats %.2f-%.2f, lons %.2f-%.2f",
+        europe_data[var] = np.concatenate([d[var] for d in stacks], axis=0)[order]
+    for var in ["u10", "v10", "t2m", "d2m", "sp"]:
+        if all(var in d for d in stacks):
+            europe_data[var] = np.concatenate([d[var] for d in stacks], axis=0)[order]
+
+    logger.info("Concatenated: %d times, %d levels, lats %.2f-%.2f, lons %.2f-%.2f; surface vars: %s",
                 len(europe_data["times"]), len(europe_data["levels"]),
                 europe_data["lats"][-1], europe_data["lats"][0],
-                europe_data["lons"][0], europe_data["lons"][-1])
+                europe_data["lons"][0], europe_data["lons"][-1],
+                [v for v in ("u10", "v10", "t2m", "d2m", "sp") if v in europe_data])
 
     # Read sites
     with open(args.sites) as f:
