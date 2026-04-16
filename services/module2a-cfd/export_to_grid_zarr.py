@@ -482,7 +482,19 @@ def export_case_to_grid(
 
     # ── Write grid.zarr ──
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    store = zarr.open_group(str(out_path), mode="w")
+    # zarr v2/v3 compat: monkey-patch v2 Group.create_dataset → create_array name,
+    # and force zarr v2 format on writes for portability with older readers (Aqua
+    # Python 3.9 + zarr 2.18 cannot read zarr v3 stores).
+    try:
+        HierGroup = zarr.hierarchy.Group
+        if not hasattr(HierGroup, "create_array"):
+            HierGroup.create_array = HierGroup.create_dataset
+    except AttributeError:
+        pass  # zarr 3.x: native create_array
+    try:
+        store = zarr.open_group(str(out_path), mode="w", zarr_format=2)
+    except TypeError:
+        store = zarr.open_group(str(out_path), mode="w")
 
     coords_grp = store.create_group("coords")
     coords_grp.create_array("x_1d", data=x_1d.astype(np.float32))
