@@ -271,6 +271,8 @@ def export_regular_grid(
     z_levels: np.ndarray | None = None,
     era5_profiles: dict | None = None,
     z0_data: tuple[np.ndarray, np.ndarray] | None = None,
+    era5_3d_profiles: dict | None = None,
+    era5_surface_3x3: dict | None = None,
 ) -> None:
     """Export regular grid for U-Net 3D surrogate.
 
@@ -432,6 +434,18 @@ def export_regular_grid(
             if val is not None:
                 era5_grp.create_array(var, data=val)
 
+    # ERA5 3×3 AGL block (consumed by Wind9kDataset era5_mode="3d"/"grad")
+    if era5_3d_profiles is not None:
+        era5_3d_grp = inp.create_group("era5_3d")
+        for var, val in era5_3d_profiles.items():
+            if val is not None:
+                era5_3d_grp.create_array(var, data=np.asarray(val, dtype=np.float32))
+    # ERA5 surface 3×3 (t2m, d2m, u10, v10)
+    if era5_surface_3x3 is not None:
+        era5_surf_grp = inp.create_group("era5_surface")
+        for var, val in era5_surface_3x3.items():
+            era5_surf_grp.create_array(var, data=np.asarray(val, dtype=np.float32))
+
     # Target channels (full CFD solution)
     tgt = store.create_group("target")
     tgt.create_array("U", data=U_grid)
@@ -497,8 +511,52 @@ def export_case(
     # Read ERA5 inflow profiles
     inflow = read_inflow(case_dir)
     era5_profiles = None
+    era5_3d_profiles = None
+    era5_surface_3x3 = None
     if inflow is not None:
         era5_profiles = interpolate_era5_profiles(inflow, Z_LEVELS_AGL)
+
+        grid_block = inflow.get("era5_grid")
+        if grid_block is not None:
+            try:
+                from init_from_era5 import build_era5_3d_agl
+            except ImportError:
+                import sys as _sys
+                _sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from init_from_era5 import build_era5_3d_agl  # type: ignore  # noqa
+
+            # Site ground elevation — the 128×128 terrain is recomputed in
+            # export_regular_grid, so here we approximate from the full field
+            # min z near (x,y)=(0,0). Good enough for AGL reference.
+            xy = np.sqrt(fields["x"] ** 2 + fields["y"] ** 2)
+            near_center_mask = xy < 200.0
+            if near_center_mask.any():
+                site_ground_elev = float(fields["z"][near_center_mask].min())
+            else:
+                site_ground_elev = float(fields["z"].min())
+
+            fd_x = float(inflow.get("flowDir_x", 1.0))
+            fd_y = float(inflow.get("flowDir_y", 0.0))
+            u_star = float(inflow.get("u_star", 0.3))
+            z0 = float(inflow.get("z0_eff", inflow.get("z0", 0.05)))
+            p_surf = (float(inflow["p_profile"][0])
+                      if inflow.get("p_profile") else 101325.0)
+
+            era5_3d_profiles = build_era5_3d_agl(
+                era5_grid=grid_block,
+                z_levels_agl=Z_LEVELS_AGL,
+                site_ground_elev_m=site_ground_elev,
+                u_star=u_star, z0=z0,
+                fd_x=fd_x, fd_y=fd_y,
+                p_surf_Pa=p_surf,
+            )
+
+            era5_surface_3x3 = {}
+            for key in ("t2m", "d2m", "u10", "v10"):
+                if key in grid_block:
+                    era5_surface_3x3[key] = np.asarray(grid_block[key], dtype=np.float32)
+            if not era5_surface_3x3:
+                era5_surface_3x3 = None
 
     # Read z0 field
     z0_data = read_z0_field(case_dir)
@@ -528,6 +586,8 @@ def export_case(
         grid_size=grid_size,
         era5_profiles=era5_profiles,
         z0_data=z0_data,
+        era5_3d_profiles=era5_3d_profiles,
+        era5_surface_3x3=era5_surface_3x3,
     )
 
     # Save inflow metadata

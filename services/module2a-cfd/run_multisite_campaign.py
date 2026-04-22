@@ -98,8 +98,8 @@ DEFAULT_MESH = {
     "radial_cells": 30,          # radial cells in octagonal annulus
     "radial_grading": 20,
     "height_m": 2500,
-    "cells_z": 80,
-    "grading_z": 30,
+    "cells_z": 40,               # ~10m near-wall (validated mesh C, AR ratio 3 vs 8)
+    "grading_z": 15,             # mild vertical grading; AR_max ~74 (vs 193 with cells_z=80)
     "max_dist_proj": 20000,
     "blend_distance_m": 5000,
     "p_above_z": 10000,
@@ -417,6 +417,7 @@ def setup_case(
     site_lon: float,
     mesh_cfg: dict,
     n_iter: int,
+    worldcover_tif: Path | None = None,
 ) -> bool:
     """Set up one case: copy mesh, prepare inflow, render templates, init fields.
 
@@ -456,6 +457,19 @@ def setup_case(
     with open(inflow_json) as f:
         inflow = json.load(f)
 
+    # Interpolate ERA5 values at domain top (AGL) for top-patch inletOutlet BC
+    domain_top_agl = float(mesh_cfg["height_m"])
+    z_prof = inflow.get("z_levels", inflow.get("z_m", []))
+    if z_prof:
+        import numpy as np
+        z_arr = np.asarray(z_prof, dtype=float)
+        ux_prof = np.asarray(inflow.get("ux_profile", inflow.get("u_ms", [])))
+        uy_prof = np.asarray(inflow.get("uy_profile", inflow.get("v_ms", [])))
+        T_prof = np.asarray(inflow.get("T_profile", inflow.get("T_K", [])))
+        inflow["u_top"] = float(np.interp(domain_top_agl, z_arr, ux_prof))
+        inflow["v_top"] = float(np.interp(domain_top_agl, z_arr, uy_prof))
+        inflow["T_top"] = float(np.interp(domain_top_agl, z_arr, T_prof)) if len(T_prof) else inflow.get("T_ref", 288.15)
+
     # --- Render Jinja2 templates ---
     from jinja2 import Environment, FileSystemLoader
 
@@ -463,6 +477,7 @@ def setup_case(
     n_sections = mesh_cfg.get("cylinder_sections", 8)
     lateral_patches = [f"section_{i}" for i in range(n_sections)]
 
+    z0_mapped = bool(worldcover_tif and worldcover_tif.exists())
     jinja_ctx = {
         "domain": {
             "octagonal": True,
@@ -481,6 +496,7 @@ def setup_case(
         "physics": {
             "coriolis": True,
             "T_ref_K": inflow.get("T_ref", 288.15),
+            "z0_mapped": z0_mapped,
         },
         "canopy": {"enabled": False},
         "inflow": inflow,
@@ -499,6 +515,33 @@ def setup_case(
         rendered = tmpl.render(**jinja_ctx)
         out_file.parent.mkdir(parents=True, exist_ok=True)
         out_file.write_text(rendered)
+
+    # --- Generate spatially-varying z0 from WorldCover (optional) ---
+    if z0_mapped:
+        try:
+            result = subprocess.run(
+                [PYTHON, str(SCRIPTS_DIR / "generate_z0_field.py"),
+                 "--case-dir", str(case_dir),
+                 "--worldcover", str(worldcover_tif),
+                 "--site-lat", str(site_lat),
+                 "--site-lon", str(site_lon),
+                 "--patch", "terrain"],
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode != 0:
+                log.warning("  generate_z0_field failed for %s: %s — falling back to uniform z0",
+                            case_dir.name, (result.stderr or "")[-200:])
+                # Re-render templates with z0_mapped=False so BCs revert to uniform
+                jinja_ctx["physics"]["z0_mapped"] = False
+                for tmpl_path in sorted(template_dir.rglob("*.j2")):
+                    if tmpl_path.name in skip:
+                        continue
+                    rel = tmpl_path.relative_to(template_dir)
+                    out_file = case_dir / rel.with_suffix("")
+                    rendered = env.get_template(str(rel)).render(**jinja_ctx)
+                    out_file.write_text(rendered)
+        except Exception as e:
+            log.warning("  generate_z0_field exception for %s: %s", case_dir.name, e)
 
     # --- Init from ERA5 ---
     init_script = SCRIPTS_DIR / "init_from_era5.py"
@@ -793,6 +836,7 @@ def process_site(
     n_cores: int,
     max_parallel: int,
     dry_run: bool = False,
+    worldcover_dir: Path | None = None,
 ) -> dict:
     """Process one site end-to-end. Returns status dict."""
     site_lat = float(runs[0]["lat"])
@@ -871,9 +915,12 @@ def process_site(
 
         log.info("  Setting up %s (%s)", case_name, ts)
         try:
+            wc_tif = (worldcover_dir / f"{site_id}.tif"
+                      if worldcover_dir is not None else None)
             ok = setup_case(
                 case_dir, mesh_dir, era5_zarr, ts,
                 site_lat, site_lon, mesh_cfg, n_iter,
+                worldcover_tif=wc_tif,
             )
             if ok:
                 case_dirs.append(case_dir)
@@ -985,6 +1032,9 @@ def main():
                              "Set 'off' to use legacy stacked site zarr (export_campaign_zarr).")
     parser.add_argument("--grid-export-device", default="cuda",
                         help="torch device for IDW interpolation ('cuda' or 'cpu')")
+    parser.add_argument("--worldcover-dir", type=Path, default=None,
+                        help="Directory containing per-site WorldCover GeoTIFFs "
+                             "(<site_id>.tif). Activates spatially-varying z0.")
     args = parser.parse_args()
 
     # Apply runtime overrides to module-level variables
@@ -1041,6 +1091,7 @@ def main():
                 n_cores=args.n_cores,
                 max_parallel=args.n_parallel,
                 dry_run=args.dry_run,
+                worldcover_dir=args.worldcover_dir,
             )
         except Exception as e:
             log.error("SITE %s CRASHED: %s", site_id, e, exc_info=True)

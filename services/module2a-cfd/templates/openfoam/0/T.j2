@@ -56,8 +56,8 @@ boundaryField
     top
     {
         type            inletOutlet;
-        inletValue      uniform {{ inflow.T_ref }};
-        value           uniform {{ inflow.T_ref }};
+        inletValue      uniform {{ inflow.T_top | default(inflow.T_ref) }};
+        value           uniform {{ inflow.T_top | default(inflow.T_ref) }};
     }
 
     terrain

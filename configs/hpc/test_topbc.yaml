@@ -1,0 +1,81 @@
+# Single-case top BC test — ct_d_fire_0029 with ERA5 inletOutlet at domain top
+# Uses existing mesh, runs setup_case + solve_case (2000 iter, 12 cores)
+#
+# Generate:  python ~/Documents/Clouds/UGA/Recherche/HPC/aqua/templates/generate.py configs/hpc/test_topbc.yaml -o configs/hpc/test_topbc.pbs
+# Submit:    scp configs/hpc/test_topbc.pbs aqua:/tmp/ && ssh aqua qsub /tmp/test_topbc.pbs
+
+job_name: topbc_2k
+ncpus: 12
+mem: 24GB
+walltime: "02:00:00"
+
+env_vars:
+  CONTAINER_RUNTIME: apptainer
+
+variables:
+  OF_SIF: $HOME/dsw/containers/openfoam_v2512.sif
+  TBM_SIF: $HOME/dsw/containers/terrainblockmesher.sif
+  SCRIPT_DIR: $HOME/dsw/services/module2a-cfd
+  MESH_DIR: /scratch/maitreje/dsw/mesh_test/topbc_ct_d_fire_0029/mesh
+  CASE_DIR: /scratch/maitreje/dsw/mesh_test/topbc_ct_d_fire_0029/case_test
+  ERA5: /scratch/maitreje/dsw/era5_campaign_v3/era5_ct_d_fire_0029.zarr
+
+pre_commands:
+  - "export CONTAINER_RUNTIME OF_SIF TBM_SIF"
+  - "for f in $OF_SIF $TBM_SIF $ERA5 $MESH_DIR/constant/polyMesh/points; do [ -e \"$f\" ] && echo \"OK: $f\" || { echo \"MISSING: $f\"; exit 1; }; done"
+  - "python -c 'import numpy,pandas,xarray,zarr,rasterio,pyproj,jinja2,scipy; print(\"Python deps OK\")'"
+  - "apptainer exec $OF_SIF bash -c 'source /usr/lib/openfoam/openfoam2512/etc/bashrc && simpleFoam -help > /dev/null 2>&1' && echo 'OF SIF OK'"
+  - "rm -rf $CASE_DIR"
+
+command: |
+  cd $SCRIPT_DIR && python -c "
+  import sys, json, time, re
+  sys.path.insert(0, '.')
+  from pathlib import Path
+  import run_multisite_campaign as RMC
+  RMC.OF_IMAGE = '$OF_SIF'
+  RMC.TBM_IMAGE = '$TBM_SIF'
+  from run_multisite_campaign import setup_case, solve_case, DEFAULT_MESH
+
+  mesh_dir = Path('$MESH_DIR')
+  case_dir = Path('$CASE_DIR')
+  era5 = Path('$ERA5')
+  mesh_cfg = dict(DEFAULT_MESH)
+  n_iter = 2000
+
+  print('=== setup_case ===')
+  t0 = time.time()
+  ok = setup_case(case_dir, mesh_dir, era5, '2017-06-17T12:00:00',
+                  43.7363, 2.7449, mesh_cfg, n_iter)
+  print('setup_case %s in %.1f s' % ('OK' if ok else 'FAIL', time.time()-t0))
+  if not ok:
+      sys.exit(1)
+
+  with open(case_dir / '0' / 'U') as f:
+      txt = f.read()
+  idx = txt.find('    top')
+  print('=== Top BC in 0/U ===')
+  print(txt[idx:idx+300])
+
+  print('=== Solve (n_iter=%d, n_cores=12) ===' % n_iter)
+  t0 = time.time()
+  ok = solve_case(case_dir, n_iter, 12)
+  wall = time.time() - t0
+  print('Solve done in %.1f s (ok=%s)' % (wall, ok))
+
+  fmm = case_dir / 'postProcessing' / 'fieldMinMax' / '0' / 'fieldMinMax.dat'
+  if fmm.exists():
+      umax_traj = []
+      for line in open(fmm):
+          if 'mag(U)' in line:
+              m = re.match(r'^\s*(\d+)\s+mag\(U\)\s+\S+\s+\(\S+\s+\S+\s+\S+\)\s+\S+\s+(\S+)', line)
+              if m:
+                  umax_traj.append((int(m.group(1)), float(m.group(2))))
+      if umax_traj:
+          for i, u in umax_traj:
+              if i % 200 == 0 or i == umax_traj[-1][0]:
+                  print('  iter=%d U_max=%.3f' % (i, u))
+          summary = {'wall_time_s': wall, 'final_iter': umax_traj[-1][0],
+                     'final_U_max': umax_traj[-1][1]}
+          json.dump(summary, open(str(case_dir.parent / 'summary.json'), 'w'), indent=2)
+  "

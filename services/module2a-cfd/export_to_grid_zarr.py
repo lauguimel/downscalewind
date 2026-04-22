@@ -435,8 +435,55 @@ def export_case_to_grid(
     # ── Inflow profiles → ERA5 1D on AGL levels ──
     inflow = load_inflow(case_dir)
     era5_profiles = None
+    era5_3d_profiles = None
+    era5_surface_out = None
     if inflow is not None:
         era5_profiles = interpolate_inflow_profiles(inflow, Z_LEVELS_AGL)
+
+        # 3×3 AGL block for training input/era5_3d/
+        # (consumed by Wind9kDataset with era5_mode="3d" or "grad")
+        grid_block = inflow.get("era5_grid")
+        if grid_block is not None:
+            try:
+                from init_from_era5 import build_era5_3d_agl
+            except ImportError:
+                import sys as _sys
+                _sys.path.insert(0, str(Path(__file__).resolve().parent))
+                from init_from_era5 import build_era5_3d_agl  # type: ignore  # noqa
+
+            # Site ground elevation from the 128×128 terrain grid (already computed above)
+            cy, cx = grid_size // 2, grid_size // 2
+            site_ground_elev = float(terrain_2d[cy, cx])
+
+            fd_x = float(inflow.get("flowDir_x", 1.0))
+            fd_y = float(inflow.get("flowDir_y", 0.0))
+            u_star = float(inflow.get("u_star", 0.3))
+            z0 = float(inflow.get("z0_eff", inflow.get("z0", 0.05)))
+            p_surf = (float(inflow["p_profile"][0])
+                      if inflow.get("p_profile") else 101325.0)
+
+            era5_3d_profiles = build_era5_3d_agl(
+                era5_grid=grid_block,
+                z_levels_agl=Z_LEVELS_AGL,
+                site_ground_elev_m=site_ground_elev,
+                u_star=u_star, z0=z0,
+                fd_x=fd_x, fd_y=fd_y,
+                p_surf_Pa=p_surf,
+            )
+            logger.info("era5_3d built: u %s, center-site 1D vs 3D[1,1] max|Δu|=%.3f m/s",
+                        era5_3d_profiles["u"].shape,
+                        float(np.max(np.abs(era5_3d_profiles["u"][1, 1, :]
+                                            - era5_profiles["u"])))
+                        if era5_profiles is not None and era5_3d_profiles["u"].shape[0] >= 2
+                        else -1.0)
+
+            # ERA5 surface 3×3 (t2m, d2m, u10, v10) — broadcast-friendly
+            era5_surface_out = {}
+            for key in ("t2m", "d2m", "u10", "v10"):
+                if key in grid_block:
+                    era5_surface_out[key] = np.asarray(grid_block[key], dtype=np.float32)
+            if not era5_surface_out:
+                era5_surface_out = None
 
     # ── Residuals (CFD - ERA5 lifted) ──
     U_res = T_res = q_res = None
@@ -510,16 +557,18 @@ def export_case_to_grid(
         for var, val in era5_profiles.items():
             if val is not None:
                 era5_grp.create_array(var, data=val)
-    # ERA5 3×3 grid (optional, provided externally)
-    if era5_3d is not None:
+    # ERA5 3×3 grid: CLI override takes precedence; otherwise use block from inflow.json
+    era5_3d_to_write = era5_3d if era5_3d is not None else era5_3d_profiles
+    if era5_3d_to_write is not None:
         era5_3d_grp = inp.create_group("era5_3d")
-        for var, val in era5_3d.items():  # type: ignore[attr-defined]
+        for var, val in era5_3d_to_write.items():  # type: ignore[attr-defined]
             if val is not None:
                 era5_3d_grp.create_array(var, data=np.asarray(val, dtype=np.float32))
     # ERA5 surface 3×3 (t2m, d2m, u10, v10)
-    if era5_surface_3x3 is not None:
+    era5_surf_to_write = era5_surface_3x3 if era5_surface_3x3 is not None else era5_surface_out
+    if era5_surf_to_write is not None:
         era5_surf_grp = inp.create_group("era5_surface")
-        for var, val in era5_surface_3x3.items():
+        for var, val in era5_surf_to_write.items():
             era5_surf_grp.create_array(var, data=np.asarray(val, dtype=np.float32))
 
     tgt = store.create_group("target")

@@ -66,8 +66,12 @@ HUB_HEIGHT = 80.0     # m  (hub height for normalisation)
 Z_SURF     = 10.0     # m  ERA5 10-m wind reference height
 
 # Layer boundaries
-Z_LAYER1_TOP = 100.0   # m  — top of log-law layer
-Z_LAYER2_TOP = 2000.0  # m  — top of cubic-spline layer (above = ERA5 direct)
+Z_LAYER1_TOP = 100.0   # m  — top of pure log-law layer (legacy, kept for output grid)
+Z_LAYER2_TOP = 2000.0  # m  — top of cubic-spline layer (legacy, kept for output grid)
+
+# Smooth blend log-law / ERA5 (replaces hard Layer1/Layer2 join that caused saut)
+Z_BLEND_LOW  = 50.0    # m  — below: pure log-law (surface layer well-defined)
+Z_BLEND_HIGH = 250.0   # m  — above: pure ERA5 (above ERA5 1000hPa ~138m)
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +438,103 @@ def extract_era5_profile(
 
 
 # ---------------------------------------------------------------------------
+# ERA5 3×3 grid block extraction (for 3D lateral BCs in init_from_era5)
+# ---------------------------------------------------------------------------
+
+def extract_era5_grid_block(
+    era5_data: dict,
+    timestamp: np.datetime64,
+    site_lat: float,
+    site_lon: float,
+    half_window: int = 1,
+) -> dict:
+    """Extract a (2*hw+1)² block of ERA5 columns around the site.
+
+    Unlike ``extract_era5_profile`` (single bilinear column), this preserves
+    the horizontal variation of ERA5 across the CFD domain. Downstream,
+    ``init_from_era5.py`` uses the block to build BCs that vary in (x,y,z).
+
+    No anchor is applied here — anchoring (t2m at z=2m, d2m→q at z=2m) is done
+    downstream per-corner so the raw ERA5 data remain authoritative.
+
+    Parameters
+    ----------
+    era5_data : dict
+        Same structure as for ``extract_era5_profile``.
+    timestamp : np.datetime64
+        Target timestamp (nearest ERA5 time step).
+    site_lat, site_lon : float
+        Site coordinates.
+    half_window : int
+        1 → 3×3 grid (default), 0 → 1×1 (degenerate, no horizontal info).
+
+    Returns
+    -------
+    dict with keys (all JSON-serialisable lists):
+        lats   (N,)         ascending [°]
+        lons   (N,)         ascending [°]
+        z_geo  (N, N, L)    geometric height [m], per-corner per-level
+        u, v, T (N, N, L)   per-corner vertical profiles
+        q      (N, N, L)    optional
+        t2m, d2m, u10, v10 (N, N)  optional surface anchors
+        timestamp : str
+    where N = 2*half_window + 1.
+    """
+    times = era5_data["times"]
+    dt = np.abs(times - timestamp)
+    t_idx = int(np.argmin(dt))
+
+    lats_all = np.asarray(era5_data["lats"])
+    lons_all = np.asarray(era5_data["lons"])
+
+    i_center = int(np.argmin(np.abs(lats_all - site_lat)))
+    j_center = int(np.argmin(np.abs(lons_all - site_lon)))
+
+    i_lo, i_hi = i_center - half_window, i_center + half_window + 1
+    j_lo, j_hi = j_center - half_window, j_center + half_window + 1
+    if i_lo < 0 or i_hi > len(lats_all) or j_lo < 0 or j_hi > len(lons_all):
+        raise ValueError(
+            f"Site (lat={site_lat}, lon={site_lon}) too close to ERA5 grid edge "
+            f"for half_window={half_window}. "
+            f"Slice [{i_lo}:{i_hi}, {j_lo}:{j_hi}] out of bounds "
+            f"([0:{len(lats_all)}, 0:{len(lons_all)}])."
+        )
+
+    # Reverse axes if ERA5 descending (lat[0]=N by convention)
+    lat_order = slice(None, None, -1) if lats_all[0] > lats_all[-1] else slice(None)
+    lon_order = slice(None, None, -1) if lons_all[0] > lons_all[-1] else slice(None)
+
+    lats_sub = lats_all[i_lo:i_hi][lat_order]
+    lons_sub = lons_all[j_lo:j_hi][lon_order]
+
+    def slice_block_3d(arr):
+        sub = arr[t_idx, :, i_lo:i_hi, j_lo:j_hi][:, lat_order, lon_order]
+        return np.transpose(sub, (1, 2, 0))  # (lat, lon, level)
+
+    def slice_block_2d(arr):
+        return arr[t_idx, i_lo:i_hi, j_lo:j_hi][lat_order, lon_order]
+
+    z_geo = slice_block_3d(era5_data["z"]) / G  # geopotential → height
+
+    block = {
+        "lats":   [float(v) for v in lats_sub],
+        "lons":   [float(v) for v in lons_sub],
+        "z_geo":  z_geo.tolist(),
+        "u":      slice_block_3d(era5_data["u"]).tolist(),
+        "v":      slice_block_3d(era5_data["v"]).tolist(),
+        "T":      slice_block_3d(era5_data["t"]).tolist(),
+    }
+    if era5_data.get("q") is not None:
+        block["q"] = slice_block_3d(era5_data["q"]).tolist()
+    for name in ("t2m", "d2m", "u10", "v10"):
+        if era5_data.get(name) is not None:
+            block[name] = slice_block_2d(era5_data[name]).tolist()
+
+    block["timestamp"] = str(timestamp)
+    return block
+
+
+# ---------------------------------------------------------------------------
 # Effective roughness length from raster
 # ---------------------------------------------------------------------------
 
@@ -628,7 +729,10 @@ def reconstruct_inlet_profile(
 
     # u* from reference height (z=10m if u10/v10 available, else lowest pressure level)
     u_star = estimate_ustar(spd_ref, z_ref, z0_eff, L_mo)
-    u_star = max(u_star, 0.05)  # physical lower bound
+    # Numerical floor (avoid div-by-zero in log-law denominators) — not a physical clip.
+    # Previous floor 0.05 caused log-law over-prediction near surface on calm cases
+    # → discontinuity with ERA5 lowest pressure level → SIMPLE divergence.
+    u_star = max(u_star, 0.005)
 
     logger.debug(
         "u_star=%.3f m/s, z0_eff=%.4f m, L_mo=%s m, T_ref=%.1f K",
@@ -646,48 +750,32 @@ def reconstruct_inlet_profile(
     z_output = np.sort(np.unique(z_output))
 
     # -----------
-    # Layer 1 : log law (0 → Z_LAYER1_TOP)
+    # Smooth blend: pure log-law for z < Z_BLEND_LOW (50m), pure ERA5 for
+    # z > Z_BLEND_HIGH (250m), smoothstep transition between. This avoids the
+    # hard discontinuity at z=100m that the previous Layer1/Layer2 hard join
+    # introduced, while preserving the surface-layer log-law and the synoptic
+    # ERA5 free atmosphere.
     # -----------
-    mask1 = z_output <= Z_LAYER1_TOP
-    z1    = z_output[mask1]
-    spd1  = log_law_speed(z1, u_star, z0_eff, L_mo)
+    # Pure log-law on full z_output (extrapolated above Z_BLEND_LOW for blending)
+    spd_log_full = log_law_speed(z_output, u_star, z0_eff, L_mo)
 
-    # -----------
-    # Layer 2 : cubic spline (Z_LAYER1_TOP → Z_LAYER2_TOP)
-    # -----------
-    # Include the top of layer 1 as a boundary condition
-    era5_in_layer2 = (z_era5 >= Z_LAYER1_TOP) & (z_era5 <= Z_LAYER2_TOP + 500)
-    z_knots   = np.concatenate([[Z_LAYER1_TOP], z_era5[era5_in_layer2]])
-    spd_era5  = np.hypot(u_era5, v_era5)
-    spd_knots = np.concatenate([
-        [float(log_law_speed(np.array([Z_LAYER1_TOP]), u_star, z0_eff, L_mo).item())],
-        spd_era5[era5_in_layer2],
-    ])
-
-    z_knots, unique_idx = np.unique(z_knots, return_index=True)
-    spd_knots = spd_knots[unique_idx]
-
-    if len(z_knots) >= 2:
-        cs_spd = CubicSpline(z_knots, spd_knots, extrapolate=True)
-    else:
-        cs_spd = lambda z: spd_knots[0] * np.ones_like(z)  # noqa
-
-    mask2 = (z_output > Z_LAYER1_TOP) & (z_output <= Z_LAYER2_TOP)
-    z2    = z_output[mask2]
-    spd2  = cs_spd(z2)
-    spd2  = np.maximum(spd2, 0.0)
-
-    # -----------
-    # Layer 3 : ERA5 direct (above Z_LAYER2_TOP)
-    # -----------
-    mask3 = z_output > Z_LAYER2_TOP
-    z3    = z_output[mask3]
-    spd_era5_full = np.hypot(u_era5, v_era5)
+    # Pure ERA5 PCHIP on full z_output (no log-law knot artifice)
     if len(z_era5) >= 2:
-        cs_upper = CubicSpline(z_era5, spd_era5_full, extrapolate=True)
-        spd3 = np.maximum(cs_upper(z3), 0.0)
+        cs_u_era5 = PchipInterpolator(z_era5, u_era5, extrapolate=True)
+        cs_v_era5 = PchipInterpolator(z_era5, v_era5, extrapolate=True)
     else:
-        spd3 = np.full_like(z3, spd_era5_full[-1])
+        cs_u_era5 = lambda z: np.full_like(z, u_era5[0])  # noqa
+        cs_v_era5 = lambda z: np.full_like(z, v_era5[0])  # noqa
+    u_era5_full = cs_u_era5(z_output)
+    v_era5_full = cs_v_era5(z_output)
+    spd_era5_full = np.hypot(u_era5_full, v_era5_full)
+
+    # Smoothstep weight: 1 below Z_BLEND_LOW, 0 above Z_BLEND_HIGH (cubic Hermite)
+    t = np.clip((z_output - Z_BLEND_LOW) / (Z_BLEND_HIGH - Z_BLEND_LOW), 0.0, 1.0)
+    w_log = 1.0 - t * t * (3.0 - 2.0 * t)  # 1 at low, 0 at high, smooth
+
+    # Blended speed (info only — actual u/v are blended below)
+    speed_out = np.maximum(w_log * spd_log_full + (1.0 - w_log) * spd_era5_full, 0.0)
 
     # Temperature profile: PCHIP (shape-preserving, no overshoot) through ERA5 + t2m
     # PCHIP is monotonic on monotonic data → preserves inversions without spurious
@@ -713,30 +801,17 @@ def reconstruct_inlet_profile(
     else:
         p_out = np.full_like(z_output, P0)
 
-    # Combine all layers — speed profile
-    speed_out = np.concatenate([spd1, spd2, spd3])
-
-    # Component profiles u(z), v(z) — direction varies with height
-    # Layer 1 (log-law): use surface direction (constant, correct for BL)
-    # Layer 2+3: cubic spline on ERA5 u(z), v(z) independently
-    if len(z_era5) >= 2:
-        cs_u = CubicSpline(z_era5, u_era5, extrapolate=True)
-        cs_v = CubicSpline(z_era5, v_era5, extrapolate=True)
-    else:
-        cs_u = lambda z: np.full_like(z, u_era5[0])  # noqa
-        cs_v = lambda z: np.full_like(z, v_era5[0])  # noqa
-
-    u_out = np.zeros_like(z_output)
-    v_out = np.zeros_like(z_output)
-
-    # Layer 1: surface direction × log-law speed
-    u_out[mask1] = spd1 * flow_dir_x
-    v_out[mask1] = spd1 * flow_dir_y
-
-    # Layer 2+3: ERA5 component splines (direction varies with height)
-    mask23 = ~mask1
-    u_out[mask23] = cs_u(z_output[mask23])
-    v_out[mask23] = cs_v(z_output[mask23])
+    # Component profiles u(z), v(z) — smooth blend log-law (surface direction)
+    # with ERA5 PCHIP (height-varying direction). Same w_log weight as for speed.
+    # Below Z_BLEND_LOW: pure log-law × surface direction (well-defined surface layer).
+    # Above Z_BLEND_HIGH: pure ERA5 components (height-varying direction = Ekman/synoptic).
+    # In between: cubic Hermite blend, giving C0 + C1 continuity.
+    u_log_full = spd_log_full * flow_dir_x
+    v_log_full = spd_log_full * flow_dir_y
+    u_out = w_log * u_log_full + (1.0 - w_log) * u_era5_full
+    v_out = w_log * v_log_full + (1.0 - w_log) * v_era5_full
+    # Recompute speed from blended components (most accurate for vector field)
+    speed_out = np.hypot(u_out, v_out)
 
     # Values at hub height
     hub_mask = np.searchsorted(z_output, HUB_HEIGHT)
@@ -812,6 +887,7 @@ def prepare_inflow(
     site_lon: float,
     z0_tif: Path | str | None = None,
     output_json: Path | str | None = None,
+    no_surface_uv: bool = False,
 ) -> dict:
     """Full pipeline: ERA5 zarr → inlet profile JSON.
 
@@ -873,6 +949,20 @@ def prepare_inflow(
     logger.info("Extracting ERA5 profile at %s, lat=%.3f lon=%.3f", timestamp, site_lat, site_lon)
     profile = extract_era5_profile(era5_data, ts, site_lat, site_lon)
 
+    # 3×3 ERA5 block for 3D lateral BCs (bilinear xy + PCHIP z in init_from_era5)
+    try:
+        era5_grid_block = extract_era5_grid_block(era5_data, ts, site_lat, site_lon,
+                                                  half_window=1)
+    except ValueError as exc:
+        logger.warning("Cannot extract 3×3 ERA5 block (%s) — BCs will fall back to 1D", exc)
+        era5_grid_block = None
+
+    # Optional: drop u10/v10 surface anchor (= 9k behaviour, only pressure levels)
+    if no_surface_uv:
+        for k in ("u10_ms", "v10_ms"):
+            profile.pop(k, None)
+        logger.info("no_surface_uv=True — using lowest pressure level as wind reference (9k behaviour)")
+
     # Effective roughness length
     if z0_tif is not None:
         # Infer upstream direction from ERA5 lowest-level wind
@@ -931,6 +1021,10 @@ def prepare_inflow(
     result["site_lat"] = float(site_lat)
     result["site_lon"] = float(site_lon)
 
+    # 3×3 ERA5 block for 3D lateral BCs (init_from_era5 consumes this)
+    if era5_grid_block is not None:
+        result["era5_grid"] = era5_grid_block
+
     if output_json is not None:
         output_json = Path(output_json)
         output_json.parent.mkdir(parents=True, exist_ok=True)
@@ -962,6 +1056,8 @@ if __name__ == "__main__":
     parser.add_argument("--case",    required=True,
                         help="Timestamp ISO-8601 (e.g. 2017-05-15T12:00)")
     parser.add_argument("--output",  default=None, help="Output JSON path")
+    parser.add_argument("--no-surface-uv", action="store_true",
+                        help="Disable u10/v10 surface anchor (9k behaviour)")
     args = parser.parse_args()
 
     # Resolve site coords
@@ -985,6 +1081,7 @@ if __name__ == "__main__":
         site_lon=lon,
         z0_tif=args.z0map,
         output_json=args.output,
+        no_surface_uv=args.no_surface_uv,
     )
 
     print(f"u_hub    = {result['u_hub']:.2f} m/s")

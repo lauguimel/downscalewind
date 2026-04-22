@@ -32,21 +32,17 @@ solvers
     }
 
     // -- Pressure --
-    //    GAMG (algebraic multigrid): 3-5× faster than PCG+DIC on meshes > 500k cells.
-    //    On 4.3M-cell 6×6km inner mesh the first iteration drops from ~5 min to ~5 s;
-    //    full 2000-iter case: ~38 min vs unfeasible hours with PCG.
+    //    PCG+DIC: robust on terrain meshes with degenerate cells (under-determined,
+    //    high AR). GAMG occasionally diverges with FPE in scale() on alpine/steep
+    //    sites; PCG converges reliably and is essentially as fast on ~2M-cell meshes.
+    //    Validated on 50+ sites incl. paragliding/Alps with Mesh C config.
     p
     {
-        solver              GAMG;
-        smoother            GaussSeidel;
-        tolerance           1e-7;
-        relTol              0.01;
-        nPreSweeps          0;
-        nPostSweeps         2;
-        cacheAgglomeration  true;
-        nCellsInCoarsestLevel 100;
-        agglomerator        faceAreaPair;
-        mergeLevels         1;
+        solver          PCG;
+        preconditioner  DIC;
+        tolerance       1e-7;
+        relTol          0.01;
+        maxIter         200;
     }
 
     pFinal
@@ -205,8 +201,11 @@ potentialFlow
 // ---------------------------------------------------------------------------
 SIMPLE
 {
-    consistent      yes;        // SIMPLEC: pressure-corrected URF, allows U~0.7 vs 0.3
-    nNonOrthogonalCorrectors {{ solver.n_non_ortho_correctors | default(0) }};
+    // SIMPLEC with intermediate relax (U=0.5, k/eps=0.5) for 3D lateral BCs.
+    // Strict SIMPLE (consistent=no, U=0.3) diverged on 6/10 test sites
+    // (growth mode). SIMPLEC U=0.7 oscillated on flat sites. U=0.5 compromise.
+    consistent      yes;
+    nNonOrthogonalCorrectors {{ solver.n_non_ortho_correctors | default(3) }};
 
     // Bounds to prevent k/epsilon from going to zero or negative on complex terrain.
     // epsilonMin=1e-8 is critical: if epsilon→0, nut=Cmu*k²/epsilon→∞, G→∞,
@@ -262,9 +261,10 @@ relaxationFactors
         T               0.3;
         "(k|epsilon)"   0.05;   // very conservative — prevent eps wall function shock
 {% else %}
-        U               0.7;
-        k               0.7;
-        epsilon         0.7;
+        // SIMPLEC intermediate relax — trade-off vs oscillation & growth mode
+        U               0.5;
+        k               0.5;
+        epsilon         0.5;
 {% if solver.thermal | default(false) or solver.transport_T | default(false) %}
         T               0.5;
 {% endif %}

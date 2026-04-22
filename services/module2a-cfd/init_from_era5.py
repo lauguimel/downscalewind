@@ -417,6 +417,389 @@ def interpolate_profiles_at_z(
 
 
 # ---------------------------------------------------------------------------
+# 3D lateral BC: bilinear(lat, lon) + PCHIP(z) + log-law blend
+# ---------------------------------------------------------------------------
+
+# Blend window (must match prepare_inflow.py Z_BLEND_LOW / Z_BLEND_HIGH)
+Z_BLEND_LOW  = 50.0    # m — below: pure log-law
+Z_BLEND_HIGH = 250.0   # m — above: pure ERA5
+G_GEO        = 9.80665 # m/s² — gravity used to build z_geo = geopotential / g
+
+
+def _e_sat_pa(T_K: np.ndarray) -> np.ndarray:
+    """Saturation vapour pressure over water [Pa], Bolton 1980 formula."""
+    Tc = T_K - 273.15
+    return 611.2 * np.exp(17.67 * Tc / (Tc + 243.5))
+
+
+def _d2m_to_q(d2m_K: float, p_surf_Pa: float = 101325.0) -> float:
+    """Convert 2-m dew-point temperature to specific humidity.
+
+    q = 0.622 · e_sat(Td) / (p - 0.378 · e_sat(Td))
+    """
+    e = float(_e_sat_pa(np.asarray(d2m_K)))
+    return 0.622 * e / max(p_surf_Pa - 0.378 * e, 1.0)
+
+
+def _build_corner_pchip(era5_grid: dict, field: str, p_surf_Pa: float = 101325.0):
+    """Build an (N, N) array of PchipInterpolator instances for a field.
+
+    Anchors surface values per corner when relevant:
+        - T : prepend (z=2m, t2m)
+        - q : prepend (z=2m, q_from_d2m)
+    u, v, p use raw pressure-level columns (log-law blend handles near-surface).
+
+    Parameters
+    ----------
+    era5_grid : dict
+        Block produced by ``extract_era5_grid_block`` in prepare_inflow.
+    field : str
+        One of ``u, v, T, q``.
+    p_surf_Pa : float
+        Surface pressure [Pa], used only to convert d2m → q.
+
+    Returns
+    -------
+    interps : ndarray of PchipInterpolator, shape (N, N)
+    """
+    from scipy.interpolate import PchipInterpolator
+
+    z_geo = np.asarray(era5_grid["z_geo"])   # (N, N, L)
+    data  = np.asarray(era5_grid[field])     # (N, N, L)
+    N = z_geo.shape[0]
+    interps = np.empty((N, N), dtype=object)
+
+    for i in range(N):
+        for j in range(N):
+            z_col = np.asarray(z_geo[i, j, :], dtype=float)
+            v_col = np.asarray(data[i, j, :], dtype=float)
+            order = np.argsort(z_col)
+            z_s = z_col[order]
+            v_s = v_col[order]
+
+            # Anchor surface for T and q
+            if field == "T" and "t2m" in era5_grid:
+                t2m_val = float(np.asarray(era5_grid["t2m"])[i, j])
+                z_s = np.concatenate([[2.0], z_s])
+                v_s = np.concatenate([[t2m_val], v_s])
+            elif field == "q" and "d2m" in era5_grid:
+                d2m_val = float(np.asarray(era5_grid["d2m"])[i, j])
+                q2m = _d2m_to_q(d2m_val, p_surf_Pa)
+                z_s = np.concatenate([[2.0], z_s])
+                v_s = np.concatenate([[q2m], v_s])
+
+            # Enforce strict monotonic increase (PCHIP requirement)
+            for m in range(1, len(z_s)):
+                if z_s[m] <= z_s[m - 1]:
+                    z_s[m] = z_s[m - 1] + 1e-3
+
+            interps[i, j] = PchipInterpolator(z_s, v_s, extrapolate=True)
+
+    return interps
+
+
+def interpolate_profiles_at_xyz(
+    face_centres: np.ndarray,
+    era5_grid: dict,
+    site_lat: float,
+    site_lon: float,
+    u_star: float,
+    z0: float,
+    fd_x: float,
+    fd_y: float,
+    T_ref: float = 300.0,
+    is_bbsf: bool = False,
+    p_surf_Pa: float = 101325.0,
+    site_ground_elev_m: float | None = None,
+) -> dict[str, np.ndarray]:
+    """Per-face BC: bilinear(lat, lon) + PCHIP(z) + log-law blend under 250 m.
+
+    Wind strategy (see feedback BC 3D — 2026-04-21):
+      - Below Z_BLEND_LOW: pure log-law with site-scalar u_star, z0, oriented
+        by site-scalar (fd_x, fd_y).
+      - Above Z_BLEND_HIGH: pure ERA5 u, v components (direction varies in
+        space → Ekman spiral preserved).
+      - In the blend window: smootherstep weighting, component-wise on ux/uy.
+    T, q use raw ERA5 PCHIP with t2m/d2m surface anchor per corner.
+
+    Parameters
+    ----------
+    face_centres : (N, 3) array
+        Boundary face centres in mesh-local coords. Site is at (x=0, y=0).
+    era5_grid : dict
+        3×3 block from ``extract_era5_grid_block`` embedded in inflow JSON.
+    site_lat, site_lon : float
+        Site coordinates (origin of the local frame).
+    u_star, z0 : float
+        Scalar (site-level) friction velocity [m/s] and roughness [m].
+    fd_x, fd_y : float
+        Unit vector of the *site-level* inflow direction.
+    T_ref, is_bbsf, p_surf_Pa : as in ``interpolate_profiles_at_z``.
+
+    Returns
+    -------
+    dict with keys 'U' (N,3), 'k' (N,), 'epsilon' (N,), 'T' (N,), 'q' (N,)?, 'p_rgh' (N,).
+    """
+    lats = np.asarray(era5_grid["lats"], dtype=float)   # (M,) ascending
+    lons = np.asarray(era5_grid["lons"], dtype=float)
+    M = len(lats)
+    if M < 2 or len(lons) < 2:
+        raise ValueError("era5_grid must have at least 2×2 corners")
+    has_q = "q" in era5_grid and era5_grid["q"] is not None
+
+    interps = {
+        "u": _build_corner_pchip(era5_grid, "u", p_surf_Pa),
+        "v": _build_corner_pchip(era5_grid, "v", p_surf_Pa),
+        "T": _build_corner_pchip(era5_grid, "T", p_surf_Pa),
+    }
+    if has_q:
+        interps["q"] = _build_corner_pchip(era5_grid, "q", p_surf_Pa)
+
+    # (x, y) → (lat, lon) via first-order flat-earth approximation
+    DEG_PER_M_LAT = 1.0 / 111_000.0
+    DEG_PER_M_LON = 1.0 / (111_000.0 * float(np.cos(np.radians(site_lat))))
+
+    face_lat = site_lat + face_centres[:, 1] * DEG_PER_M_LAT
+    face_lon = site_lon + face_centres[:, 0] * DEG_PER_M_LON
+    face_z   = np.maximum(face_centres[:, 2], 0.1)
+    N_faces  = len(face_centres)
+
+    # Enclosing 2×2 sub-cell in the lat/lon grid
+    def cell_index(grid: np.ndarray, x: np.ndarray) -> np.ndarray:
+        idx = np.searchsorted(grid, x) - 1
+        return np.clip(idx, 0, len(grid) - 2)
+
+    i_lat = cell_index(lats, face_lat)  # (N_faces,)
+    j_lon = cell_index(lons, face_lon)
+
+    face_lat_c = np.clip(face_lat, lats[0], lats[-1])
+    face_lon_c = np.clip(face_lon, lons[0], lons[-1])
+
+    w_lat = (face_lat_c - lats[i_lat]) / (lats[i_lat + 1] - lats[i_lat])
+    w_lon = (face_lon_c - lons[j_lon]) / (lons[j_lon + 1] - lons[j_lon])
+
+    # Evaluate every corner's PCHIP at every face_z, then bilinear-combine.
+    # (M, M, N_faces) is ~9 × N_faces floats — cheap.
+    n_faces_idx = np.arange(N_faces)
+
+    def combine(field: str) -> np.ndarray:
+        all_corners = np.empty((M, M, N_faces), dtype=float)
+        for i in range(M):
+            for j in range(M):
+                all_corners[i, j, :] = interps[field][i, j](face_z)
+        a00 = all_corners[i_lat,     j_lon,     n_faces_idx]
+        a01 = all_corners[i_lat,     j_lon + 1, n_faces_idx]
+        a10 = all_corners[i_lat + 1, j_lon,     n_faces_idx]
+        a11 = all_corners[i_lat + 1, j_lon + 1, n_faces_idx]
+        return ((1 - w_lat) * (1 - w_lon) * a00
+                + (1 - w_lat) * w_lon       * a01
+                + w_lat       * (1 - w_lon) * a10
+                + w_lat       * w_lon       * a11)
+
+    ux_era5 = combine("u")
+    uy_era5 = combine("v")
+    T_face  = combine("T")
+    q_face  = combine("q") if has_q else None
+
+    # Log-law + blend are defined in AGL (z above ground), not MSL.
+    # The cylinder lateral surface has a vertical STACK of faces at each angular
+    # position (the mesh has cells_z faces per column). Local ground at a given
+    # (x, y) is the minimum z of THAT column. This matters on steep terrain
+    # where the cylinder floor varies by hundreds of meters between angles.
+    # Prior versions used face_z (MSL) directly which injected a spurious
+    # ~5 m/s log-law contribution at the first lateral row and caused a
+    # non-monotonic |U| "saut" in the blend zone.
+    xy_key = np.round(face_centres[:, :2] / 5.0).astype(np.int64)
+    # Group face indices by (x, y) bin to find the per-column z_min
+    z_min_col = np.full(N_faces, np.inf)
+    # np.unique with return_inverse gives a compact column index
+    _, inv = np.unique(xy_key, axis=0, return_inverse=True)
+    n_cols = int(inv.max()) + 1
+    z_by_col = np.full(n_cols, np.inf)
+    for k in range(N_faces):
+        if face_centres[k, 2] < z_by_col[inv[k]]:
+            z_by_col[inv[k]] = face_centres[k, 2]
+    z_min_col = z_by_col[inv]
+    # Fallback to supplied site_ground_elev_m if column grouping failed
+    if site_ground_elev_m is not None:
+        # If too few columns were detected (e.g. degenerate), fall back
+        if n_cols < 4:
+            z_min_col = np.full(N_faces, float(site_ground_elev_m))
+    z_agl = np.maximum(face_z - z_min_col, 0.1)
+
+    # Log-law (site-scalar u_star, z0) blended component-wise with ERA5
+    speed_log = np.maximum((u_star / KAPPA) * np.log((z_agl + z0) / z0), 0.0)
+
+    t = np.clip((z_agl - Z_BLEND_LOW) / (Z_BLEND_HIGH - Z_BLEND_LOW), 0.0, 1.0)
+    alpha = t * t * t * (t * (t * 6.0 - 15.0) + 10.0)  # smootherstep
+
+    U = np.zeros((N_faces, 3))
+    U[:, 0] = (1.0 - alpha) * speed_log * fd_x + alpha * ux_era5
+    U[:, 1] = (1.0 - alpha) * speed_log * fd_y + alpha * uy_era5
+
+    # k uniform; epsilon consistent with epsilonWallFunction (matches _z version)
+    k_val = u_star ** 2 / CMU ** 0.5
+    k = np.full(N_faces, k_val)
+    _y_wall = 10.0
+    eps_val = CMU ** 0.75 * k_val ** 1.5 / (KAPPA * _y_wall)
+    epsilon = np.full(N_faces, eps_val)
+
+    p_rgh = np.zeros(N_faces)  # Lagrange multiplier in Boussinesq
+
+    out = {"U": U, "k": k, "epsilon": epsilon, "T": T_face, "p_rgh": p_rgh}
+    if q_face is not None:
+        out["q"] = np.maximum(q_face, 0.0)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 3D AGL profile block (consumed by training export — Wind9kDataset schema)
+# ---------------------------------------------------------------------------
+
+def build_era5_3d_agl(
+    era5_grid: dict,
+    z_levels_agl: np.ndarray,
+    site_ground_elev_m: float,
+    u_star: float,
+    z0: float,
+    fd_x: float,
+    fd_y: float,
+    p_surf_Pa: float = 101325.0,
+) -> dict[str, np.ndarray]:
+    """Per-corner AGL profiles for the training grid.zarr `input/era5_3d/`.
+
+    Produces 3×3 × len(z_levels_agl) arrays of u, v, T, q, k matching the
+    schema expected by ``services/module2b-surrogate/src/dataset_wind9k.py``.
+    Per corner, the surface layer is log-law with site-scalar ``u_star`` and
+    ``z0`` (component-wise blend with ERA5 between Z_BLEND_LOW and
+    Z_BLEND_HIGH), matching `interpolate_profiles_at_xyz`.
+
+    The AGL reference is taken at the site (``site_ground_elev_m``) for all
+    9 corners. This is an approximation — the true AGL of a corner depends on
+    that corner's own terrain elevation, but ERA5 ground elevation varies by
+    <200 m over 25 km which is small relative to the log-spaced 5 m–5 km grid.
+
+    Returns
+    -------
+    dict with float32 arrays:
+        lat, lon : (N,)
+        u, v, T, q, k : (N, N, len(z_levels_agl))
+    where N is len(era5_grid["lats"]) (typically 3).
+    """
+    z_levels_agl = np.asarray(z_levels_agl, dtype=np.float64)
+    n_z = len(z_levels_agl)
+    lats = np.asarray(era5_grid["lats"], dtype=np.float32)
+    lons = np.asarray(era5_grid["lons"], dtype=np.float32)
+    M = len(lats)
+    has_q = "q" in era5_grid and era5_grid["q"] is not None
+
+    # Build per-corner PCHIP with surface anchors (uses z_agl = z_geo - site_ground)
+    interps_uv: dict[str, np.ndarray] = {"u": np.empty((M, M), dtype=object),
+                                         "v": np.empty((M, M), dtype=object)}
+    interps_Tq: dict[str, np.ndarray] = {"T": np.empty((M, M), dtype=object)}
+    if has_q:
+        interps_Tq["q"] = np.empty((M, M), dtype=object)
+
+    from scipy.interpolate import PchipInterpolator
+
+    z_geo = np.asarray(era5_grid["z_geo"], dtype=np.float64)  # (M, M, L)
+    u_raw = np.asarray(era5_grid["u"], dtype=np.float64)
+    v_raw = np.asarray(era5_grid["v"], dtype=np.float64)
+    T_raw = np.asarray(era5_grid["T"], dtype=np.float64)
+    q_raw = np.asarray(era5_grid["q"], dtype=np.float64) if has_q else None
+    t2m = np.asarray(era5_grid.get("t2m", np.full((M, M), np.nan)), dtype=np.float64)
+    d2m = np.asarray(era5_grid.get("d2m", np.full((M, M), np.nan)), dtype=np.float64)
+
+    def _strict_mono(z: np.ndarray) -> np.ndarray:
+        z = z.copy()
+        for m in range(1, len(z)):
+            if z[m] <= z[m - 1]:
+                z[m] = z[m - 1] + 1e-3
+        return z
+
+    # Minimum AGL above which ERA5 pressure-level data is kept (below: drop).
+    # ERA5 extrapolates below-ground levels to unphysical cold / zero-wind
+    # values — if we let those through the PCHIP, they corrupt the anchored
+    # surface value (t2m at z=2 would get "interpolated" between 297K and
+    # the below-ground extrapolated ~270K level squeezed next to it by
+    # strict-monotonic clamping).
+    Z_ERA5_MIN_AGL = 3.0  # m, > anchor z=2m
+
+    for i in range(M):
+        for j in range(M):
+            z_agl = z_geo[i, j, :] - site_ground_elev_m
+            order = np.argsort(z_agl)
+            z_sorted = z_agl[order]
+            valid = z_sorted > Z_ERA5_MIN_AGL
+            if valid.sum() < 2:
+                # Degenerate column (ERA5 entirely below-ground under the site).
+                # Clamp to 2 highest levels so PCHIP still builds.
+                valid = np.zeros_like(valid)
+                valid[-2:] = True
+            z_s = z_sorted[valid]
+            u_s = u_raw[i, j, order][valid]
+            v_s = v_raw[i, j, order][valid]
+            T_s_raw = T_raw[i, j, order][valid]
+
+            # u, v : no surface anchor (log-law blend overrides below 250 m)
+            interps_uv["u"][i, j] = PchipInterpolator(
+                _strict_mono(z_s), u_s, extrapolate=True)
+            interps_uv["v"][i, j] = PchipInterpolator(
+                _strict_mono(z_s), v_s, extrapolate=True)
+
+            # T with t2m anchor at z=2m
+            if np.isfinite(t2m[i, j]):
+                z_s_T = np.concatenate([[2.0], z_s])
+                T_s = np.concatenate([[t2m[i, j]], T_s_raw])
+            else:
+                z_s_T, T_s = z_s, T_s_raw
+            interps_Tq["T"][i, j] = PchipInterpolator(
+                _strict_mono(z_s_T), T_s, extrapolate=True)
+
+            if has_q:
+                q_s_raw = q_raw[i, j, order][valid]
+                if np.isfinite(d2m[i, j]):
+                    q2m = _d2m_to_q(float(d2m[i, j]), p_surf_Pa)
+                    z_s_q = np.concatenate([[2.0], z_s])
+                    q_s = np.concatenate([[q2m], q_s_raw])
+                else:
+                    z_s_q, q_s = z_s, q_s_raw
+                interps_Tq["q"][i, j] = PchipInterpolator(
+                    _strict_mono(z_s_q), q_s, extrapolate=True)
+
+    # Evaluate per-corner + apply log-law blend (same as interpolate_profiles_at_xyz)
+    speed_log = np.maximum(
+        (u_star / KAPPA) * np.log((z_levels_agl + z0) / z0), 0.0)
+    t_blend = np.clip(
+        (z_levels_agl - Z_BLEND_LOW) / (Z_BLEND_HIGH - Z_BLEND_LOW), 0.0, 1.0)
+    alpha = t_blend * t_blend * t_blend * (t_blend * (t_blend * 6.0 - 15.0) + 10.0)
+
+    out_u = np.zeros((M, M, n_z), dtype=np.float32)
+    out_v = np.zeros((M, M, n_z), dtype=np.float32)
+    out_T = np.zeros((M, M, n_z), dtype=np.float32)
+    out_q = np.zeros((M, M, n_z), dtype=np.float32)
+
+    for i in range(M):
+        for j in range(M):
+            ux_era5 = interps_uv["u"][i, j](z_levels_agl)
+            uy_era5 = interps_uv["v"][i, j](z_levels_agl)
+            out_u[i, j, :] = ((1.0 - alpha) * speed_log * fd_x + alpha * ux_era5).astype(np.float32)
+            out_v[i, j, :] = ((1.0 - alpha) * speed_log * fd_y + alpha * uy_era5).astype(np.float32)
+            out_T[i, j, :] = interps_Tq["T"][i, j](z_levels_agl).astype(np.float32)
+            if has_q:
+                out_q[i, j, :] = np.maximum(
+                    interps_Tq["q"][i, j](z_levels_agl), 0.0).astype(np.float32)
+
+    k_val = u_star ** 2 / CMU ** 0.5
+    out_k = np.full((M, M, n_z), k_val, dtype=np.float32)
+
+    return {
+        "lat": lats, "lon": lons,
+        "u": out_u, "v": out_v, "T": out_T, "q": out_q, "k": out_k,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Patch internalField (existing logic, improved regex)
 # ---------------------------------------------------------------------------
 
@@ -762,7 +1145,39 @@ def init_from_era5(
     # Auto-detect lateral patches (cylindrical → "lateral"; box → cardinal four)
     lateral_patches = detect_lateral_patches(boundary_faces)
 
-    # Compute profiles at each patch's face centres and write boundaryData
+    # Compute profiles at each patch's face centres and write boundaryData.
+    # If the inflow JSON carries a 3×3 ERA5 block, use 3D BCs
+    # (bilinear lat/lon + PCHIP z + log-law blend); else fall back to the
+    # legacy 1D profile (vertical-only, uniform horizontal).
+    era5_grid = inflow.get("era5_grid")
+    site_lat = inflow.get("site_lat")
+    site_lon = inflow.get("site_lon")
+    use_3d_bc = era5_grid is not None and site_lat is not None and site_lon is not None
+    if use_3d_bc:
+        logger.info("Using 3D lateral BCs: bilinear(lat,lon) + PCHIP(z) + log-law blend "
+                    "[grid %dx%d, site=(%.3f, %.3f)]",
+                    len(era5_grid["lats"]), len(era5_grid["lons"]), site_lat, site_lon)
+    else:
+        logger.info("era5_grid absent from inflow JSON — using legacy 1D lateral BCs")
+
+    # Surface pressure for d2m → q conversion (use bottom of p_profile if available)
+    if "p_profile" in inflow and len(inflow["p_profile"]) > 0:
+        p_surf_Pa = float(inflow["p_profile"][0])
+    else:
+        p_surf_Pa = 101325.0
+
+    # Site ground elevation (MSL) for AGL conversion in the log-law blend.
+    # The lateral cylinder drapes over terrain → min z across all lateral
+    # face centres ≈ terrain minimum. Used globally so all patches share the
+    # same AGL reference.
+    lateral_min_z = None
+    for pname, fc in boundary_faces.items():
+        if pname in lateral_patches and len(fc) > 0:
+            zmin = float(fc[:, 2].min())
+            lateral_min_z = zmin if lateral_min_z is None else min(lateral_min_z, zmin)
+    if lateral_min_z is not None:
+        logger.info("Site ground elevation (lateral min z) = %.1f m MSL", lateral_min_z)
+
     patch_fields: dict[str, dict[str, np.ndarray]] = {}
 
     for patch_name, face_centres in boundary_faces.items():
@@ -771,11 +1186,22 @@ def init_from_era5(
         if len(face_centres) == 0:
             continue
 
-        pf = interpolate_profiles_at_z(
-            face_centres[:, 2], speed_interp, T_interp, p_interp,
-            fd_x, fd_y, u_star, z0, T_ref, is_bbsf=is_bbsf,
-            ux_interp=ux_interp, uy_interp=uy_interp, q_interp=q_interp,
-        )
+        if use_3d_bc:
+            pf = interpolate_profiles_at_xyz(
+                face_centres, era5_grid,
+                site_lat=float(site_lat), site_lon=float(site_lon),
+                u_star=u_star, z0=z0,
+                fd_x=fd_x, fd_y=fd_y,
+                T_ref=T_ref, is_bbsf=is_bbsf,
+                p_surf_Pa=p_surf_Pa,
+                site_ground_elev_m=lateral_min_z,
+            )
+        else:
+            pf = interpolate_profiles_at_z(
+                face_centres[:, 2], speed_interp, T_interp, p_interp,
+                fd_x, fd_y, u_star, z0, T_ref, is_bbsf=is_bbsf,
+                ux_interp=ux_interp, uy_interp=uy_interp, q_interp=q_interp,
+            )
 
         fields = {
             "U": pf["U"],

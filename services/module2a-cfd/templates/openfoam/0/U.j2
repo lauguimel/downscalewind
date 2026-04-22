@@ -64,16 +64,11 @@ boundaryField
 {% endfor %}
     top
     {
-{%- if solver.top_bc_U | default("inletOutlet") == "inletOutlet" %}
-        // inletOutlet: zeroGrad on outflow, fixed on inflow. More stable than PIOV.
+        // inletOutlet with ERA5 wind at domain top altitude (AGL).
+        // zeroGrad on outflow; on inflow imposes ERA5 u/v at z = height_m.
         type            inletOutlet;
-        inletValue      uniform ( {{ "%.6f" | format(inflow.u_hub * fd_x) }} {{ "%.6f" | format(inflow.u_hub * fd_y) }} 0 );
-        value           uniform ( {{ "%.6f" | format(inflow.u_hub * fd_x) }} {{ "%.6f" | format(inflow.u_hub * fd_y) }} 0 );
-{%- else %}
-        // pressureInletOutletVelocity: allows waves to exit, imposes U on inflow.
-        type            pressureInletOutletVelocity;
-        value           uniform ( {{ "%.6f" | format(inflow.u_hub * fd_x) }} {{ "%.6f" | format(inflow.u_hub * fd_y) }} 0 );
-{%- endif %}
+        inletValue      uniform ( {{ "%.6f" | format(inflow.u_top) }} {{ "%.6f" | format(inflow.v_top) }} 0 );
+        value           uniform ( {{ "%.6f" | format(inflow.u_top) }} {{ "%.6f" | format(inflow.v_top) }} 0 );
     }
 
     terrain
