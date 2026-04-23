@@ -1,6 +1,6 @@
 #!/bin/bash -l
 #PBS -N ct_v1_cfd
-#PBS -l select=1:ncpus=48:mem=96GB
+#PBS -l select=1:ncpus=24:mem=48GB
 #PBS -l walltime=24:00:00
 #PBS -j oe
 #PBS -m ae
@@ -27,7 +27,7 @@ cd "$HOME/dsw"
 
 OF_SIF="$HOME/dsw/containers/openfoam_v2512.sif"
 TBM_SIF="$HOME/dsw/containers/terrainblockmesher.sif"
-SRTM="$HOME/dsw/data/srtm_europe.tif"
+SRTM="/scratch/maitreje/dsw/srtm_tiles_30m"
 CAMPAIGN_DIR="$HOME/dsw/data/campaign/complex_terrain_v1"
 ERA5_DIR="/scratch/maitreje/dsw/era5_campaign_v3"
 RUN_MATRIX="${CAMPAIGN_DIR}/run_matrix.csv"
@@ -58,9 +58,10 @@ done
 module load apptainer 2>/dev/null || true
 export CONTAINER_RUNTIME=apptainer
 
-python -c "import numpy, pandas, xarray, zarr, rasterio, pyproj, jinja2, scipy, torch, yaml; \
-           print('Python deps OK:', torch.__version__)" \
-    || { echo "ERROR: missing Python deps (numpy/pandas/xarray/zarr/rasterio/pyproj/jinja2/scipy/torch/yaml)"; exit 1; }
+python -c "import numpy, pandas, xarray, zarr, rasterio, pyproj, jinja2, scipy, yaml; \
+           print('Python deps OK')" \
+    || { echo "ERROR: missing Python deps"; exit 1; }
+# torch is optional (GPU IDW); CPU fallback uses scipy.cKDTree
 
 apptainer exec "$OF_SIF" bash -c "source /usr/lib/openfoam/openfoam2512/etc/bashrc && simpleFoam -help" \
     >/dev/null 2>&1 && echo "OF SIF OK" || { echo "ERROR: OF SIF broken"; exit 1; }
@@ -93,7 +94,7 @@ python services/module2a-cfd/run_multisite_campaign.py \
     --srtm "$SRTM" \
     --era5-zarr "$ERA5_DIR/era5_site_placeholder.zarr" \
     --output "$OUTPUT" \
-    --n-iter 2000 \
+    --n-iter 1000 \
     --n-cores 24 \
     --n-parallel 1 \
     --runtime apptainer \
@@ -102,7 +103,7 @@ python services/module2a-cfd/run_multisite_campaign.py \
     --site-manifest "$SITE_MANIFEST" \
     --campaign-manifest "$CAMPAIGN_MANIFEST" \
     --grid-export on \
-    --grid-export-device cuda
+    --grid-export-device cpu
 
 echo
 echo "=== Shard $SHARD_ID complete ($(date)) ==="
