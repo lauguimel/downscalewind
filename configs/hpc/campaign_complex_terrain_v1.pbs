@@ -4,7 +4,7 @@
 #PBS -l walltime=24:00:00
 #PBS -j oe
 #PBS -m ae
-#PBS -J 1-10
+#PBS -J 1-50
 
 # complex_terrain_v1 CFD campaign — PBS array of 10 jobs, each processes a shard
 # of the run_matrix. Use $PBS_ARRAY_INDEX (1..10) to partition the 750 sites /
@@ -34,7 +34,7 @@ RUN_MATRIX="${CAMPAIGN_DIR}/run_matrix.csv"
 SITE_MANIFEST="${CAMPAIGN_DIR}/manifests/sites.yaml"
 CAMPAIGN_MANIFEST="${CAMPAIGN_DIR}/manifests/campaign.yaml"
 SHARD_ID="${PBS_ARRAY_INDEX:-1}"
-N_SHARDS=10
+N_SHARDS=50
 
 # Output on scratch (cases can be large, cleaned after grid.zarr export)
 OUTPUT="/scratch/maitreje/dsw/complex_terrain_v1/shard_$(printf '%02d' "$SHARD_ID")"
