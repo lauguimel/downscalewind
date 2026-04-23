@@ -1,0 +1,47 @@
+#!/bin/bash -l
+#PBS -N v2_test
+#PBS -l select=1:ncpus=12:mem=24GB
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -m n
+
+cd $PBS_O_WORKDIR
+
+# --- Variables ---
+OF_SIF="$HOME/dsw/containers/openfoam_v2512.sif"
+TBM_SIF="$HOME/dsw/containers/terrainblockmesher.sif"
+SRTM="/scratch/maitreje/dsw/srtm_tiles_30m"
+SCRIPT_DIR="$HOME/dsw/services/module2a-cfd"
+ERA5_DIR="/scratch/maitreje/dsw/era5_campaign_v3"
+OUTPUT_BASE="/scratch/maitreje/dsw/mesh_test/v2_validation"
+N_ITER="1000"
+
+# --- Receive parameters from qsub -v ---
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-apptainer}"
+SITE_ID="${SITE_ID:-ct_c_morpho_0044}"
+LAT="${LAT:-46.84232}"
+LON="${LON:-10.70924}"
+
+# --- Pre-flight checks ---
+export CONTAINER_RUNTIME OF_SIF TBM_SIF
+ERA5=${ERA5_DIR}/era5_${SITE_ID}.zarr
+OUTDIR=${OUTPUT_BASE}/${SITE_ID}
+MESH_DIR=${OUTDIR}/mesh
+CASE_DIR=${OUTDIR}/case_test
+for f in $OF_SIF $TBM_SIF $ERA5 $SRTM; do [ -e "$f" ] && echo "OK: $f" || { echo "MISSING: $f"; exit 1; }; done
+python -c 'import numpy,pandas,xarray,zarr,rasterio,pyproj,jinja2,scipy; print("Python deps OK")'
+apptainer exec $OF_SIF bash -c 'source /usr/lib/openfoam/openfoam2512/etc/bashrc && simpleFoam -help > /dev/null 2>&1' && echo 'OF SIF OK'
+
+# --- Run ---
+cd $SCRIPT_DIR && python test_mesh_variant.py \
+  --site-id $SITE_ID \
+  --lat $LAT --lon $LON \
+  --timestamp "2017-06-17T12:00:00" \
+  --output-dir $OUTDIR \
+  --era5-zarr $ERA5 \
+  --srtm $SRTM \
+  --n-iter $N_ITER --n-cores 12 \
+  --runtime apptainer \
+  --of-image $OF_SIF \
+  --tbm-image $TBM_SIF
+

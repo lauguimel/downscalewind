@@ -1,0 +1,51 @@
+# Campaign v2 validation — 6 diverse sites, 1000 iter, SIMPLEC U=0.5, ERA5 top BC
+#
+# Generate:
+#   python ~/Documents/Clouds/UGA/Recherche/HPC/aqua/templates/generate.py \
+#     configs/hpc/test_v2_6sites.yaml -o configs/hpc/test_v2_6sites.pbs
+#
+# Submit one site at a time via qsub -v:
+#   qsub -v "SITE_ID=ct_c_morpho_0044,LAT=46.84232,LON=10.70924" configs/hpc/test_v2_6sites.pbs
+
+job_name: v2_test
+ncpus: 12
+mem: 24GB
+walltime: "02:00:00"
+
+env_vars:
+  CONTAINER_RUNTIME: apptainer
+  SITE_ID: ct_c_morpho_0044
+  LAT: "46.84232"
+  LON: "10.70924"
+
+variables:
+  OF_SIF: $HOME/dsw/containers/openfoam_v2512.sif
+  TBM_SIF: $HOME/dsw/containers/terrainblockmesher.sif
+  SRTM: /scratch/maitreje/dsw/srtm_tiles_30m
+  SCRIPT_DIR: $HOME/dsw/services/module2a-cfd
+  ERA5_DIR: /scratch/maitreje/dsw/era5_campaign_v3
+  OUTPUT_BASE: /scratch/maitreje/dsw/mesh_test/v2_validation
+  N_ITER: "1000"
+
+pre_commands:
+  - "export CONTAINER_RUNTIME OF_SIF TBM_SIF"
+  - "ERA5=${ERA5_DIR}/era5_${SITE_ID}.zarr"
+  - "OUTDIR=${OUTPUT_BASE}/${SITE_ID}"
+  - "MESH_DIR=${OUTDIR}/mesh"
+  - "CASE_DIR=${OUTDIR}/case_test"
+  - "for f in $OF_SIF $TBM_SIF $ERA5 $SRTM; do [ -e \"$f\" ] && echo \"OK: $f\" || { echo \"MISSING: $f\"; exit 1; }; done"
+  - "python -c 'import numpy,pandas,xarray,zarr,rasterio,pyproj,jinja2,scipy; print(\"Python deps OK\")'"
+  - "apptainer exec $OF_SIF bash -c 'source /usr/lib/openfoam/openfoam2512/etc/bashrc && simpleFoam -help > /dev/null 2>&1' && echo 'OF SIF OK'"
+
+command: |
+  cd $SCRIPT_DIR && python test_mesh_variant.py \
+    --site-id $SITE_ID \
+    --lat $LAT --lon $LON \
+    --timestamp "2017-06-17T12:00:00" \
+    --output-dir $OUTDIR \
+    --era5-zarr $ERA5 \
+    --srtm $SRTM \
+    --n-iter $N_ITER --n-cores 12 \
+    --runtime apptainer \
+    --of-image $OF_SIF \
+    --tbm-image $TBM_SIF

@@ -1,0 +1,78 @@
+#!/bin/bash -l
+#PBS -N mesh_chk
+#PBS -l select=1:ncpus=4:mem=16GB
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -m n
+
+cd $PBS_O_WORKDIR
+
+# --- Variables ---
+OF_SIF="$HOME/dsw/containers/openfoam_v2512.sif"
+TBM_SIF="$HOME/dsw/containers/terrainblockmesher.sif"
+SRTM="/scratch/maitreje/dsw/srtm_tiles_30m"
+SCRIPT_DIR="$HOME/dsw/services/module2a-cfd"
+OUTPUT_BASE="/scratch/maitreje/dsw/mesh_test/v2_meshcheck"
+
+# --- Receive parameters from qsub -v ---
+CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-apptainer}"
+SITE_ID="${SITE_ID:-ct_g_paragliding_0017}"
+LAT="${LAT:-45.48022}"
+LON="${LON:-7.01736}"
+
+# --- Pre-flight checks ---
+export CONTAINER_RUNTIME OF_SIF TBM_SIF
+for f in $OF_SIF $TBM_SIF $SRTM; do [ -e "$f" ] && echo "OK: $f" || { echo "MISSING: $f"; exit 1; }; done
+
+# --- Run ---
+cd $SCRIPT_DIR && python3 -c "
+import sys, time
+sys.path.insert(0, '.')
+from pathlib import Path
+import run_multisite_campaign as RMC
+RMC.OF_IMAGE = '$OF_SIF'
+RMC.TBM_IMAGE = '$TBM_SIF'
+from run_multisite_campaign import (
+    DEFAULT_MESH, extract_stl, _read_stl_zmin, write_tbm_dict,
+    run_tbm_mesh, _container_cmd, log)
+import subprocess, logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
+
+mesh_cfg = dict(DEFAULT_MESH)
+outdir = Path('$OUTPUT_BASE/$SITE_ID')
+mesh_dir = outdir / 'mesh'
+
+# STL
+stl_path = mesh_dir / 'constant' / 'triSurface' / 'terrain.stl'
+log.info('=== STL extraction ===')
+t0 = time.time()
+if not stl_path.exists():
+    terrain_z_min = extract_stl(
+        Path('$SRTM'), $LAT, $LON,
+        mesh_cfg['cylinder_radius_m'],
+        mesh_cfg['stl_resolution_m'], stl_path)
+else:
+    terrain_z_min = _read_stl_zmin(stl_path)
+log.info('STL done in %.1f s, z_min=%.1f', time.time() - t0, terrain_z_min)
+
+# TBM mesh
+log.info('=== terrainBlockMesher ===')
+t0 = time.time()
+write_tbm_dict(mesh_cfg, 'terrain.stl', mesh_dir, terrain_z_min)
+if not run_tbm_mesh(mesh_dir, mesh_cfg):
+    log.error('TBM failed')
+    sys.exit(1)
+log.info('TBM done in %.1f s', time.time() - t0)
+
+# checkMesh
+log.info('=== checkMesh ===')
+cmd = _container_cmd(RMC.OF_IMAGE, mesh_dir,
+    ['bash', '-c', 'cd /home/ofuser/run && checkMesh -allTopology -allGeometry 2>&1'])
+r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+print(r.stdout[-2000:])
+if 'Failed' in r.stdout:
+    log.error('checkMesh FAILED')
+else:
+    log.info('checkMesh PASSED')
+"
+

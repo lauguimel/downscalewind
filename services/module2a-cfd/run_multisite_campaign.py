@@ -111,6 +111,46 @@ DEFAULT_MESH = {
 # 1. STL extraction from regional DEM
 # ===================================================================
 
+def _open_srtm_tiles(tile_dir: Path, lon_min: float, lat_min: float,
+                     lon_max: float, lat_max: float):
+    """Open and mosaic SRTM .hgt tiles covering a bounding box.
+
+    Returns (data, transform, crs, nodata) matching a single-file rasterio read.
+    """
+    import rasterio
+    from rasterio.merge import merge
+    import math, gzip
+
+    lat_lo, lat_hi = int(math.floor(lat_min)), int(math.floor(lat_max))
+    lon_lo, lon_hi = int(math.floor(lon_min)), int(math.floor(lon_max))
+
+    datasets = []
+    for lat in range(lat_lo, lat_hi + 1):
+        for lon in range(lon_lo, lon_hi + 1):
+            ns = "N" if lat >= 0 else "S"
+            ew = "E" if lon >= 0 else "W"
+            name = f"{ns}{abs(lat):02d}{ew}{abs(lon):03d}"
+            hgt = tile_dir / f"{name}.hgt"
+            hgt_gz = tile_dir / f"{name}.hgt.gz"
+            if not hgt.exists() and hgt_gz.exists():
+                with gzip.open(hgt_gz, "rb") as gz, open(hgt, "wb") as out:
+                    out.write(gz.read())
+            if hgt.exists():
+                datasets.append(rasterio.open(hgt))
+
+    if not datasets:
+        raise ValueError(
+            f"No SRTM tiles found in {tile_dir} for bbox "
+            f"[{lon_min:.2f},{lon_max:.2f}]x[{lat_min:.2f},{lat_max:.2f}]")
+
+    mosaic, mosaic_transform = merge(datasets)
+    nodata = datasets[0].nodata if datasets[0].nodata is not None else -32768.0
+    crs = datasets[0].crs
+    for ds in datasets:
+        ds.close()
+    return mosaic[0], mosaic_transform, crs, nodata
+
+
 def extract_stl(
     srtm_tif: Path,
     site_lat: float,
@@ -121,13 +161,13 @@ def extract_stl(
 ) -> float:
     """Extract terrain STL from regional SRTM for one site.
 
+    srtm_tif can be a single GeoTIFF or a directory of SRTM .hgt tiles.
     Returns terrain_z_min (for TBM p_corner).
     """
     import rasterio
     from pyproj import Transformer
     from rasterio.windows import from_bounds as window_from_bounds
 
-    # Determine UTM zone from longitude
     utm_zone = int((site_lon + 180) / 6) + 1
     hemisphere = "north" if site_lat >= 0 else "south"
     utm_epsg = f"EPSG:326{utm_zone:02d}" if hemisphere == "north" else f"EPSG:327{utm_zone:02d}"
@@ -136,52 +176,52 @@ def extract_stl(
     transformer_to_wgs = Transformer.from_crs(utm_epsg, "EPSG:4326", always_xy=True)
 
     x0, y0 = transformer_to_utm.transform(site_lon, site_lat)
-    domain_m = 2 * radius_m + 2000  # STL slightly larger than cylinder
+    domain_m = 2 * radius_m + 2000
     half = domain_m / 2
 
-    # Convert corners back to WGS84 for rasterio window
     lon_min, lat_min = transformer_to_wgs.transform(x0 - half, y0 - half)
     lon_max, lat_max = transformer_to_wgs.transform(x0 + half, y0 + half)
 
     nx = ny = int(domain_m / stl_res_m)
 
-    with rasterio.open(srtm_tif) as src:
-        window = window_from_bounds(lon_min, lat_min, lon_max, lat_max, src.transform)
-        src_nodata = src.nodata if src.nodata is not None else -32768.0
-        # boundless=True + fill_value=nodata so out-of-raster pixels are flagged
-        # (prevents silent zero-filling for sites partially outside the SRTM extent)
-        data = src.read(1, window=window, boundless=True, fill_value=src_nodata).astype(np.float32)
+    srtm_path = Path(srtm_tif)
+    if srtm_path.is_dir():
+        data, src_transform, src_crs, src_nodata = _open_srtm_tiles(
+            srtm_path, lon_min, lat_min, lon_max, lat_max)
+        data = data.astype(np.float32)
+    else:
+        with rasterio.open(srtm_tif) as src:
+            window = window_from_bounds(lon_min, lat_min, lon_max, lat_max, src.transform)
+            src_nodata = src.nodata if src.nodata is not None else -32768.0
+            data = src.read(1, window=window, boundless=True, fill_value=src_nodata).astype(np.float32)
+            src_transform = src.window_transform(window)
+            src_crs = src.crs
 
-        if data.size == 0:
-            raise ValueError(f"SRTM read returned empty array for site ({site_lat:.3f}, {site_lon:.3f})")
-        # Accept cases where most of the bbox is nodata (coastal islands, SRTM gaps) as
-        # long as there are ENOUGH valid pixels to seed the fallback elevation; sub-5%
-        # coverage still permits STL with a flat nominal floor at that min altitude.
-        valid_fraction = float(np.sum(data != src_nodata)) / data.size
-        if valid_fraction < 0.01:
-            raise ValueError(
-                f"SRTM coverage < 1% for site ({site_lat:.3f}, {site_lon:.3f}) — "
-                "bbox likely outside raster; skipping site.")
+    if data.size == 0:
+        raise ValueError(f"SRTM read returned empty array for site ({site_lat:.3f}, {site_lon:.3f})")
+    valid_fraction = float(np.sum(data != src_nodata)) / data.size
+    if valid_fraction < 0.01:
+        raise ValueError(
+            f"SRTM coverage < 1% for site ({site_lat:.3f}, {site_lon:.3f}) — "
+            "bbox likely outside raster; skipping site.")
 
-        # Resample to target resolution — initialise destination to the SRTM nodata
-        # value so unreached pixels remain flagged as invalid (not a silent zero).
-        from rasterio.transform import from_bounds
-        from rasterio.warp import reproject, Resampling
+    from rasterio.transform import from_bounds
+    from rasterio.warp import reproject, Resampling
 
-        dst_transform = from_bounds(x0 - half, y0 - half, x0 + half, y0 + half, nx, ny)
-        dst_array = np.full((ny, nx), src_nodata, dtype=np.float32)
+    dst_transform = from_bounds(x0 - half, y0 - half, x0 + half, y0 + half, nx, ny)
+    dst_array = np.full((ny, nx), src_nodata, dtype=np.float32)
 
-        reproject(
-            source=data,
-            destination=dst_array,
-            src_transform=src.window_transform(window),
-            src_crs=src.crs,
-            dst_transform=dst_transform,
-            dst_crs=utm_epsg,
-            src_nodata=src_nodata,
-            dst_nodata=src_nodata,
-            resampling=Resampling.bilinear,
-        )
+    reproject(
+        source=data,
+        destination=dst_array,
+        src_transform=src_transform,
+        src_crs=src_crs,
+        dst_transform=dst_transform,
+        dst_crs=utm_epsg,
+        src_nodata=src_nodata,
+        dst_nodata=src_nodata,
+        resampling=Resampling.bilinear,
+    )
 
     # Replace nodata with min valid elevation (use explicit nodata comparison, not
     # a `-500` threshold, so legitimate sub-sea-level valid pixels are not dropped)
@@ -190,6 +230,24 @@ def extract_stl(
         raise ValueError(f"All nodata for site ({site_lat:.3f}, {site_lon:.3f})")
     z_min_valid = float(dst_array[valid_mask].min())
     dst_array[~valid_mask] = z_min_valid
+
+    # Slope-adaptive smoothing: Gaussian filter weighted by local slope.
+    # Preserves flat terrain, softens ridges/cliffs that cause negative-volume cells.
+    slope_threshold = 20.0  # degrees — smooth above this
+    dx = domain_m / nx
+    gz = np.gradient(dst_array, dx)
+    slope_deg = np.degrees(np.arctan(np.sqrt(gz[0]**2 + gz[1]**2)))
+    max_slope = float(slope_deg.max())
+    if max_slope > slope_threshold:
+        from scipy.ndimage import gaussian_filter
+        sigma = max(3.0, (max_slope - slope_threshold) / 10.0)  # adaptive: 3 cells at 30°, 6 at 80°
+        smoothed = gaussian_filter(dst_array, sigma=sigma)
+        # Blend: 0 where slope < threshold, 1 where slope > threshold + 10°
+        blend = np.clip((slope_deg - slope_threshold) / 10.0, 0.0, 1.0)
+        dst_array = (1 - blend) * dst_array + blend * smoothed
+        log.info("  Terrain smoothing: max_slope=%.1f° > %.0f°, σ=%.0f cells, "
+                 "%.1f%% pixels blended", max_slope, slope_threshold, sigma,
+                 100 * (blend > 0).mean())
 
     terrain_z_min = z_min_valid - 50
 
@@ -295,9 +353,14 @@ blockManager
 
             transitionFunction
             {{
-                type    linear;
+                type    smooth;
             }}
         }}
+    }}
+
+    orthogonalizeUpwardSplines
+    {{
+        splineNormalDist  {m.get("ortho_normal_dist", 5)};
     }}
 }}
 
@@ -369,6 +432,27 @@ def run_tbm_mesh(mesh_dir: Path, mesh_cfg: dict) -> bool:
         return False
 
     log.info("  Mesh done in %.0f s", time.time() - t0)
+    return True
+
+
+def check_mesh_quality(mesh_dir: Path) -> bool:
+    """Run checkMesh and return False if negative-volume cells are found."""
+    cmd = _container_cmd(OF_IMAGE, mesh_dir,
+        ["bash", "-c", "cd /home/ofuser/run && checkMesh 2>&1"])
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    output = result.stdout
+    (mesh_dir / "log.checkMesh").write_text(output)
+
+    if "negative volume" in output.lower():
+        import re
+        m = re.search(r"Minimum negative volume:\s*([-\d.e+]+).*?Number of negative volume cells:\s*(\d+)", output)
+        n_neg = int(m.group(2)) if m else -1
+        log.error("  checkMesh: %d negative-volume cells — mesh unusable", n_neg)
+        return False
+    if "Mesh OK" in output:
+        log.info("  checkMesh: OK")
+    else:
+        log.warning("  checkMesh: quality warnings (no negative volumes)")
     return True
 
 
@@ -892,6 +976,10 @@ def process_site(
     write_tbm_dict(mesh_cfg, "terrain.stl", mesh_dir, terrain_z_min)
     if not run_tbm_mesh(mesh_dir, mesh_cfg):
         log.error("  Mesh FAILED for %s — skipping site", site_id)
+        return status
+
+    if not check_mesh_quality(mesh_dir):
+        log.error("  Mesh quality FAILED for %s — skipping site", site_id)
         return status
 
     if not run_write_cell_centres(mesh_dir):
