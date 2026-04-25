@@ -1,0 +1,112 @@
+#!/bin/bash -l
+#PBS -N v2_solve
+#PBS -l select=1:ncpus=12:mem=24GB
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -m n
+#PBS -J 1-820
+
+# Phase 2: setup + solve all timestamps for one site (12-core MPI).
+# Requires phase 1 mesh to exist. Skips sites without valid mesh.
+#
+# Launch:  qsub -J 1-820 campaign_v2_phase2_solve.pbs
+
+set -euo pipefail
+cd "$HOME/dsw"
+
+OF_SIF="$HOME/dsw/containers/openfoam_v2512.sif"
+TBM_SIF="$HOME/dsw/containers/terrainblockmesher.sif"
+CAMPAIGN_DIR="$HOME/dsw/data/campaign/complex_terrain_v1"
+ERA5_DIR="/scratch/maitreje/dsw/era5_campaign_v3"
+OUTPUT="/scratch/maitreje/dsw/complex_terrain_v1"
+SITES_LIST="${CAMPAIGN_DIR}/sites_list.txt"
+IDX=${PBS_ARRAY_INDEX:-1}
+N_ITER=300
+N_CORES=12
+
+export CONTAINER_RUNTIME=apptainer
+
+SITE_ID=$(sed -n "${IDX}p" "$SITES_LIST")
+SITE_DIR="${OUTPUT}/sites/${SITE_ID}"
+MESH_DIR="${SITE_DIR}/mesh"
+
+# Skip if no valid mesh
+if [ ! -f "${MESH_DIR}/constant/polyMesh/points" ]; then
+    echo "No mesh for $SITE_ID — skipping (mesh failed or not run)"
+    exit 0
+fi
+
+echo "=== Phase 2: solve $SITE_ID (idx=$IDX) ==="
+
+# Get timestamps for this site
+TIMESTAMPS=$(python3 -c "
+import csv
+ts = []
+with open('${CAMPAIGN_DIR}/run_matrix.csv') as f:
+    for row in csv.DictReader(f):
+        if row['site_id'] == '${SITE_ID}':
+            ts.append(row['timestamp'])
+print(' '.join(ts))
+")
+read LAT LON < <(python3 -c "
+import csv
+with open('${CAMPAIGN_DIR}/run_matrix.csv') as f:
+    for row in csv.DictReader(f):
+        if row['site_id'] == '${SITE_ID}':
+            print(row['lat'], row['lon'])
+            break
+")
+
+ERA5="${ERA5_DIR}/era5_${SITE_ID}.zarr"
+if [ ! -d "$ERA5" ]; then
+    echo "MISSING ERA5: $ERA5"
+    exit 1
+fi
+
+cd "$HOME/dsw/services/module2a-cfd"
+python3 -c "
+import sys, time, json
+sys.path.insert(0, '.')
+from pathlib import Path
+import run_multisite_campaign as RMC
+RMC.OF_IMAGE = '${OF_SIF}'
+RMC.TBM_IMAGE = '${TBM_SIF}'
+from run_multisite_campaign import setup_case, solve_case, DEFAULT_MESH, log
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
+
+mesh_dir = Path('${MESH_DIR}')
+era5 = Path('${ERA5}')
+mesh_cfg = dict(DEFAULT_MESH)
+timestamps = '${TIMESTAMPS}'.split()
+
+log.info('Site ${SITE_ID}: %d timestamps, mesh at %s', len(timestamps), mesh_dir)
+
+ok_count = 0
+fail_count = 0
+for i, ts in enumerate(timestamps):
+    case_dir = Path('${SITE_DIR}') / f'case_ts{i:03d}'
+    final_U = case_dir / '${N_ITER}' / 'U'
+    if final_U.exists():
+        ok_count += 1
+        continue
+
+    log.info('  [%d/%d] %s', i+1, len(timestamps), ts)
+    t0 = time.time()
+    ok = setup_case(case_dir, mesh_dir, era5, ts,
+                    ${LAT}, ${LON}, mesh_cfg, ${N_ITER})
+    if not ok:
+        log.error('  setup FAILED for %s', ts)
+        fail_count += 1
+        continue
+    ok = solve_case(case_dir, ${N_ITER}, ${N_CORES})
+    wall = time.time() - t0
+    if ok:
+        ok_count += 1
+        log.info('  OK in %.0f s', wall)
+    else:
+        fail_count += 1
+        log.error('  SOLVE FAILED in %.0f s', wall)
+
+log.info('=== ${SITE_ID} DONE: %d OK, %d FAIL out of %d ===', ok_count, fail_count, len(timestamps))
+"
