@@ -167,8 +167,7 @@ def read_boundary_info(case_dir: Path) -> dict[str, dict]:
 def read_boundary_face_centres(case_dir: Path) -> dict[str, np.ndarray]:
     """Compute face centres for each boundary patch from the mesh.
 
-    Reads constant/polyMesh/{points, faces, boundary} and computes
-    face centres as the mean of vertex coordinates for each face.
+    Only reads the boundary faces (not all 6M+ internal faces) for speed.
 
     Returns
     -------
@@ -176,7 +175,7 @@ def read_boundary_face_centres(case_dir: Path) -> dict[str, np.ndarray]:
     """
     poly = case_dir / "constant" / "polyMesh"
 
-    # --- Read points ---
+    # --- Read points (binary-safe: parse the coordinate block only) ---
     points_text = (poly / "points").read_text()
     match = re.search(r'^\s*(\d+)\s*\(', points_text, re.MULTILINE)
     if not match:
@@ -188,33 +187,50 @@ def read_boundary_face_centres(case_dir: Path) -> dict[str, np.ndarray]:
     )
     points = np.array([[float(x), float(y), float(z)] for x, y, z in coords[:n_points]])
 
-    # --- Read faces ---
-    faces_text = (poly / "faces").read_text()
-    match = re.search(r'^\s*(\d+)\s*\(', faces_text, re.MULTILINE)
-    if not match:
-        raise ValueError("Cannot parse faces file")
-    n_faces = int(match.group(1))
-    block = faces_text[match.end():]
-    # Each face: N(v0 v1 v2 ...) — parse all
-    face_entries = re.findall(r'\d+\(([^)]+)\)', block)
-    faces = []
-    for entry in face_entries[:n_faces]:
-        verts = [int(v) for v in entry.split()]
-        faces.append(verts)
-
     # --- Read boundary patches ---
     patches = read_boundary_info(case_dir)
 
-    # --- Compute face centres for each boundary patch ---
+    # Only need boundary faces: skip 6M+ internal faces entirely.
+    min_start = min(p["startFace"] for p in patches.values())
+    max_end = max(p["startFace"] + p["nFaces"] for p in patches.values())
+    n_boundary_faces = max_end - min_start
+
+    faces_path = poly / "faces"
+    boundary_faces = []
+    face_idx = 0
+    with open(faces_path) as f:
+        # Skip header until we find the count line "N\n(\n"
+        in_list = False
+        for line in f:
+            stripped = line.strip()
+            if not in_list:
+                if stripped == "(":
+                    in_list = True
+                continue
+            if stripped == ")":
+                break
+            if face_idx < min_start:
+                face_idx += 1
+                continue
+            if face_idx >= max_end:
+                break
+            # Parse face: "4(v0 v1 v2 v3)" or "4 (v0 v1 v2 v3)"
+            m = re.match(r'\d+\(([^)]+)\)', stripped)
+            if m:
+                boundary_faces.append([int(v) for v in m.group(1).split()])
+            face_idx += 1
+
+    logger.debug("Read %d boundary faces (skipped %d internal)", len(boundary_faces), min_start)
+
     result = {}
     for patch_name, info in patches.items():
-        start = info["startFace"]
+        start = info["startFace"] - min_start
         n = info["nFaces"]
         centres = np.zeros((n, 3))
         for i in range(n):
-            face_idx = start + i
-            if face_idx < len(faces):
-                verts = faces[face_idx]
+            idx = start + i
+            if idx < len(boundary_faces):
+                verts = boundary_faces[idx]
                 centres[i] = points[verts].mean(axis=0)
         result[patch_name] = centres
         if n > 0:
