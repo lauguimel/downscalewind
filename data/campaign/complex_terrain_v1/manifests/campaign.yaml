@@ -70,6 +70,30 @@ output:
   r_context_m: 4000.0             # OF cells radius read for IDW source
   extra_targets: [k, epsilon, nut]
 
+qa:
+  script: services/module2a-cfd/freeze_dataset_v2.py
+  thresholds:
+    max_speed_ms: 50.0
+    T_min_K: 200.0
+    T_max_K: 350.0
+    q_min_kgkg: 0.0
+    q_max_kgkg: 0.05
+    k_min: 0.0
+    Ux_residual_converged: 1e-2
+  tiers:
+    gold: "all QA checks pass, no flags"
+    silver: "mild flags only (k_min, Ux_residual) — usable with lower weight"
+    rejected: "diverged, mesh_failed, or critical field outlier"
+  splits:
+    method: geographic_stratified_by_group
+    seed: 42
+    fractions: {train: 0.70, val: 0.15, test: 0.15}
+  deliverables:
+    - manifests/dataset_v2_status.csv
+    - manifests/dataset_v2_manifest.yaml
+    - manifests/dataset_v2_splits.yaml
+    - manifests/dataset_v2_qa_summary.md
+
 tracking:
   git_commit: null                # populate at run-time via git rev-parse
   git_dirty: null

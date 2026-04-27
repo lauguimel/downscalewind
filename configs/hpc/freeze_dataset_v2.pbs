@@ -1,0 +1,40 @@
+#!/bin/bash -l
+#PBS -N freeze_v2
+#PBS -l select=1:ncpus=4:mem=16GB
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -m ae
+
+# Phase 0: Scan, classify, QA, and freeze campaign v2 dataset.
+# Single-node job — reads OF fields sequentially.
+#
+# Launch:  qsub freeze_dataset_v2.pbs
+
+set -euo pipefail
+cd "$HOME/dsw"
+
+CAMPAIGN_DIR="/scratch/maitreje/dsw/complex_terrain_v1"
+SITES_CSV="$HOME/dsw/data/campaign/complex_terrain_v1/sites.csv"
+OUTPUT_DIR="${CAMPAIGN_DIR}/manifests"
+
+conda activate downscalewind
+
+echo "=== Phase 0: freeze dataset v2 ==="
+echo "Campaign: ${CAMPAIGN_DIR}"
+echo "Sites CSV: ${SITES_CSV}"
+echo "Output: ${OUTPUT_DIR}"
+echo ""
+
+cd "$HOME/dsw/services/module2a-cfd"
+
+python freeze_dataset_v2.py \
+    --campaign-dir "${CAMPAIGN_DIR}" \
+    --sites-csv "${SITES_CSV}" \
+    --n-iter 300 \
+    --n-timestamps 15 \
+    --output-dir "${OUTPUT_DIR}" \
+    --qa-fields
+
+echo ""
+echo "=== Done. Outputs in ${OUTPUT_DIR} ==="
+ls -lh "${OUTPUT_DIR}"/dataset_v2_*
