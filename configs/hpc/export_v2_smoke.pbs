@@ -1,0 +1,54 @@
+#!/bin/bash -l
+#PBS -N export_v2_smoke
+#PBS -l select=1:ncpus=1:mem=8GB
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -m n
+
+# Phase 0.5 — smoke test: export 3 cases to native-grid grid.zarr.
+# Validates export_to_grid_zarr_v2.py + export_v2_batch.py before launching the
+# full array.
+
+cd $PBS_O_WORKDIR
+
+CAMPAIGN=/scratch/maitreje/dsw/complex_terrain_v1
+ERA5=/scratch/maitreje/dsw/era5_campaign_v3
+OUT=/scratch/maitreje/dsw/training_v2
+LOG=$HOME/dsw/data/campaign/complex_terrain_v1/manifests/export_v2_smoke.log
+
+mkdir -p "$OUT" "$(dirname $LOG)"
+
+cd $HOME/dsw/services/module2a-cfd
+
+python3 -u export_v2_batch.py \
+  --status-csv $CAMPAIGN/manifests/dataset_v2_status.csv \
+  --sites-csv  $HOME/dsw/data/campaign/complex_terrain_v1/sites.csv \
+  --run-matrix $HOME/dsw/data/campaign/complex_terrain_v1/run_matrix.csv \
+  --campaign-dir $CAMPAIGN/sites \
+  --era5-dir   $ERA5 \
+  --output-dir $OUT \
+  --tiers gold silver \
+  --max-cases 3 \
+  2>&1 | tee $LOG
+
+echo "--- output dir ---"
+ls -la $OUT/
+echo "--- inspect first grid.zarr ---"
+first=$(ls -d $OUT/*/grid.zarr | head -1)
+if [ -n "$first" ]; then
+  python3 -c "
+import zarr, numpy as np
+g = zarr.open_group('$first', mode='r')
+print('Top-level groups:', list(g))
+print('coords:', dict((k, np.asarray(g['coords/'+k]).shape) for k in g['coords']))
+print('input attrs:', dict(g['input'].attrs))
+print('input/era5_3d:', list(g['input/era5_3d']))
+print('target shapes:', dict((k, np.asarray(g['target/'+k]).shape) for k in g['target']))
+U = np.asarray(g['target/U'])
+print(f'U range: {U.min():.2f} … {U.max():.2f}, |U| mean={np.linalg.norm(U,axis=-1).mean():.2f}')
+T = np.asarray(g['target/T'])
+print(f'T range: {T.min():.1f} … {T.max():.1f}')
+z = np.asarray(g['coords/z'])
+print(f'z range: {z.min():.1f} … {z.max():.1f},  bottom z spread (terrain): {z[:,:,0].min():.1f}…{z[:,:,0].max():.1f}')
+"
+fi

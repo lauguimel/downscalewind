@@ -1,0 +1,44 @@
+schema_version: 1
+dataset: complex_terrain_v2
+frozen_at: '2026-05-01T05:39:25Z'
+qa_thresholds:
+  max_speed_ms: 50.0
+  T_min_K: 200.0
+  T_max_K: 350.0
+  q_min_kgkg: 0.0
+  q_max_kgkg: 0.05
+  k_min: 0.0
+  Ux_residual_converged: 0.01
+counts:
+  total_cases: 12109
+  gold: 8596
+  silver: 656
+  rejected: 2857
+  sites_usable: 630
+  sites_total: 820
+by_status:
+  early_converged: 910
+  solved: 8685
+  diverged: 2511
+  mesh_failed: 3
+by_split:
+  train: 6567
+  val: 1300
+  test: 1385
+by_group:
+  C_morpho: 1859
+  D_fire: 2744
+  E_mountain: 1757
+  F_wind_onshore: 2196
+  G_paragliding: 696
+splits:
+  method: geographic_stratified_by_group
+  seed: 42
+  fractions:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  n_sites:
+    train: 573
+    val: 121
+    test: 126

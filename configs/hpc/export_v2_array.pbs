@@ -1,0 +1,35 @@
+#!/bin/bash -l
+#PBS -N export_v2
+#PBS -l select=1:ncpus=1:mem=8GB
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -m n
+#PBS -J 1-20
+
+# Phase 0.5 — sharded export campaign v2 → native-grid grid.zarr.
+# Each shard processes ~470 of the ~9300 (gold ∪ silver) cases.
+# Idempotent: skips cases whose grid.zarr already exists.
+
+cd $PBS_O_WORKDIR
+
+CAMPAIGN=/scratch/maitreje/dsw/complex_terrain_v1
+ERA5=/scratch/maitreje/dsw/era5_campaign_v3
+OUT=/scratch/maitreje/dsw/training_v2
+LOG_DIR=$HOME/dsw/data/campaign/complex_terrain_v1/manifests
+SHARD=${PBS_ARRAY_INDEX:-1}
+N_SHARDS=20
+
+mkdir -p "$OUT" "$LOG_DIR"
+
+cd $HOME/dsw/services/module2a-cfd
+
+python3 -u export_v2_batch.py \
+  --status-csv $CAMPAIGN/manifests/dataset_v2_status.csv \
+  --sites-csv  $HOME/dsw/data/campaign/complex_terrain_v1/sites.csv \
+  --run-matrix $HOME/dsw/data/campaign/complex_terrain_v1/run_matrix.csv \
+  --campaign-dir $CAMPAIGN/sites \
+  --era5-dir   $ERA5 \
+  --output-dir $OUT \
+  --tiers gold silver \
+  --shard $SHARD --n-shards $N_SHARDS \
+  2>&1 | tee $LOG_DIR/export_v2_shard_${SHARD}.log

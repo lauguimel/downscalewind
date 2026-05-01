@@ -51,6 +51,28 @@ kraken-sim load data/campaign/cases/campaign.yaml
 
 # Tests (no test suite yet — debug_notebook.py serves as integration test)
 cd services/module1-temporal && marimo run debug_notebook.py
+
+# Campaign v2 — Phase 0 dataset freeze (sharded, 20-job PBS array)
+qsub configs/hpc/freeze_phase0_array.pbs                # ~30 min wall
+ssh maitreje@aqua 'cd ~/dsw/services/module2a-cfd && \
+  python3 merge_freeze_shards.py \
+    --output-dir /scratch/maitreje/dsw/complex_terrain_v1/manifests \
+    --sites-csv ~/dsw/data/campaign/complex_terrain_v1/sites.csv \
+    --n-shards 20'                                       # produces dataset_v2_*.csv|yaml|md
+
+# Campaign v2 — relaunch partial sites (population A, n_solved >= 11)
+ssh maitreje@aqua 'cd ~/dsw/services/module2a-cfd && \
+  python3 relaunch_partial_sites.py \
+    --status-csv /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_status.csv \
+    --campaign-dir ~/dsw/data/campaign/complex_terrain_v1 \
+    --pbs-template ~/dsw/configs/hpc/campaign_v2_phase2_solve.pbs \
+    --output-pbs ~/dsw/configs/hpc/campaign_v2_phase2_partial.pbs \
+    --min-n-solved 11'
+qsub configs/hpc/campaign_v2_phase2_partial.pbs
+
+# Campaign v2 — native-grid export OF → grid.zarr (180×180×40)
+qsub configs/hpc/export_v2_smoke.pbs                     # smoke 3 cases, ~5 min
+qsub configs/hpc/export_v2_array.pbs                     # 20-shard array, ~25 min wall total
 ```
 
 ## Architecture
@@ -97,6 +119,22 @@ validation/      → reads all outputs, produces metrics + figures
 - Source terms: Coriolis + plant canopy drag (fvOptions)
 - Land cover: ESA WorldCover 2021 (10 m) + ETH Canopy Height 2020 (10 m)
 - Pipeline: SRTM→STL→build_domain_fms→cartesianMesh→solver→kraken-sim→Parquet→Zarr
+
+### Campaign v2 — Phase 0 freeze + native-grid export (2026-05-01)
+- **Mesh**: TBM hybrid — inner block 180×180×40 cells (6km × 6km × 2.5km, 33m horizontal,
+  vertical grading 1:15) + outer cylindrical buffer (radial 30 cells, 8 sections,
+  R=10km). Total ≈ 2.16M cells per case.
+- **Phase 0 freeze** scans solved cases, runs physical QA, assigns gold/silver/rejected
+  tiers (`freeze_dataset_v2.py` + `merge_freeze_shards.py`). Splits: watertight
+  per-site (seed=42), 70/15/15 by `group`. Manifest: `dataset_v2_status.csv` +
+  `dataset_v2_manifest.yaml` + `dataset_v2_splits.yaml` + `dataset_v2_qa_summary.md`.
+- **Native-grid export** OF → `grid.zarr` (`export_to_grid_zarr_v2.py`): 1 OF cell
+  ↔ 1 PyTorch voxel, no IDW. Coords are terrain-following (`coords/z[180,180,40]`
+  is the real cell-center altitude). One ~120 MB grid.zarr per case in
+  `/scratch/maitreje/dsw/training_v2/<site_id>_case_tsNNN/`.
+- **Inputs preserved**: terrain, z0_eff, lat (Coriolis), ERA5 3×3 × {u,v,T,q} ×
+  N_pressure_levels, ERA5 surface t2m/d2m/u10/v10, inflow_meta. Convention
+  designed so `surrogate(input)` can in principle replicate `OpenFOAM(input)`.
 
 ## Data Splits (never change)
 - train: 2016-01-01 → 2016-10-31

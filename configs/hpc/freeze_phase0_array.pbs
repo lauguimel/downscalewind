@@ -1,0 +1,38 @@
+#!/bin/bash -l
+#PBS -N freeze_v2_shard
+#PBS -l select=1:ncpus=1:mem=4GB
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -m n
+#PBS -J 1-20
+
+cd $PBS_O_WORKDIR
+
+# --- Variables ---
+CAMPAIGN_DIR="/scratch/maitreje/dsw/complex_terrain_v1"
+SITES_CSV="$HOME/dsw/data/campaign/complex_terrain_v1/sites.csv"
+MANIFESTS_DIR="/scratch/maitreje/dsw/complex_terrain_v1/manifests"
+LOG_DIR="$HOME/dsw/data/campaign/complex_terrain_v1/manifests"
+SCRIPT_DIR="$HOME/dsw/services/module2a-cfd"
+N_ITER="300"
+N_SHARDS="20"
+
+# --- Pre-flight checks ---
+SHARD=${PBS_ARRAY_INDEX:-1}
+mkdir -p $MANIFESTS_DIR $LOG_DIR
+[ -d $CAMPAIGN_DIR ] || { echo MISSING:$CAMPAIGN_DIR; exit 1; }
+[ -f $SITES_CSV ] || { echo MISSING:$SITES_CSV; exit 1; }
+[ -f $SCRIPT_DIR/freeze_dataset_v2.py ] || { echo MISSING:freeze_dataset_v2.py; exit 1; }
+
+# --- Run ---
+SHARD=${PBS_ARRAY_INDEX:-1}
+cd $SCRIPT_DIR
+python3 -u freeze_dataset_v2.py \
+  --campaign-dir $CAMPAIGN_DIR \
+  --sites-csv $SITES_CSV \
+  --n-iter $N_ITER \
+  --output-dir $MANIFESTS_DIR \
+  --shard $SHARD \
+  --n-shards $N_SHARDS \
+  2>&1 | tee $LOG_DIR/freeze_phase0_shard_${SHARD}.log
+

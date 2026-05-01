@@ -571,6 +571,10 @@ def write_qa_summary(records: list[dict], sites_meta: dict, output: Path) -> Non
               help="Read OF fields for QA (slower but thorough).")
 @click.option("--max-sites", type=int, default=None,
               help="Limit to N sites (for testing).")
+@click.option("--shard", type=int, default=None,
+              help="Shard index (1..n-shards). Process only sites with idx %% n-shards == shard-1.")
+@click.option("--n-shards", type=int, default=None,
+              help="Total number of shards. Required if --shard is set.")
 def main(
     campaign_dir: Path,
     sites_csv: Path,
@@ -579,6 +583,8 @@ def main(
     output_dir: Path | None,
     qa_fields: bool,
     max_sites: int | None,
+    shard: int | None,
+    n_shards: int | None,
 ):
     """Phase 0: freeze campaign v2 dataset."""
     logging.basicConfig(
@@ -590,6 +596,12 @@ def main(
     if output_dir is None:
         output_dir = campaign_dir / "manifests"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    is_sharded = shard is not None
+    if is_sharded:
+        if n_shards is None or shard < 1 or shard > n_shards:
+            raise click.BadParameter(f"--shard {shard} invalid for --n-shards {n_shards}")
+        logger.info("Sharded mode: shard %d of %d", shard, n_shards)
 
     # Load site metadata
     sites_meta = {}
@@ -610,6 +622,10 @@ def main(
 
     if max_sites is not None:
         site_dirs = site_dirs[:max_sites]
+
+    if is_sharded:
+        site_dirs = [d for i, d in enumerate(site_dirs) if i % n_shards == (shard - 1)]
+        logger.info("Shard %d/%d: processing %d sites", shard, n_shards, len(site_dirs))
 
     all_records = []
     site_status_counts = Counter()
@@ -669,10 +685,18 @@ def main(
                 tier_counts.get("rejected", 0))
 
     # Write deliverables
-    write_status_csv(all_records, output_dir / "dataset_v2_status.csv")
-    write_manifest_yaml(all_records, sites_meta, splits, output_dir / "dataset_v2_manifest.yaml")
-    write_splits_yaml(splits, output_dir / "dataset_v2_splits.yaml")
-    write_qa_summary(all_records, sites_meta, output_dir / "dataset_v2_qa_summary.md")
+    if is_sharded:
+        suffix = f"_shard_{shard:03d}_of_{n_shards:03d}"
+        write_status_csv(all_records, output_dir / f"dataset_v2_status{suffix}.csv")
+        # Splits are deterministic (seed=42) — write once with shard 1
+        if shard == 1:
+            write_splits_yaml(splits, output_dir / "dataset_v2_splits.yaml")
+        logger.info("Shard %d done. Run merge_freeze_shards.py once all shards complete.", shard)
+    else:
+        write_status_csv(all_records, output_dir / "dataset_v2_status.csv")
+        write_manifest_yaml(all_records, sites_meta, splits, output_dir / "dataset_v2_manifest.yaml")
+        write_splits_yaml(splits, output_dir / "dataset_v2_splits.yaml")
+        write_qa_summary(all_records, sites_meta, output_dir / "dataset_v2_qa_summary.md")
 
     # Print summary
     print()
