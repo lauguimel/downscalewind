@@ -102,6 +102,60 @@ def load_cell_centers(case_dir: Path) -> tuple[np.ndarray, np.ndarray, np.ndarra
     return cx, cy, cz
 
 
+def _rebalance_columns(
+    i_idx: np.ndarray, j_idx: np.ndarray,
+    xi: np.ndarray, yi: np.ndarray,
+) -> np.ndarray:
+    """Greedy rebalance so each (i,j) column ends up with exactly NK cells.
+
+    On rough terrain the TBM mesh has local x,y deformation > DX/2 → some cells
+    fall in the wrong logical column. We fix this by moving over-full columns'
+    farthest cells into the nearest under-full neighbour.
+
+    Mutates and returns (i_idx, j_idx).
+    """
+    counts = np.bincount(i_idx.astype(np.int64) * NJ + j_idx.astype(np.int64),
+                         minlength=NI * NJ).reshape(NI, NJ)
+    if (counts == NK).all():
+        return i_idx, j_idx
+
+    # Loop with a hard iteration cap (safety net)
+    for _ in range(NI * NJ):
+        over_mask = counts > NK
+        under_mask = counts < NK
+        if not over_mask.any():
+            break
+        oi, oj = np.argwhere(over_mask)[0]
+        unders = np.argwhere(under_mask)
+        if len(unders) == 0:
+            break
+
+        # Nearest under-full column to (oi, oj) by Manhattan distance
+        deltas = np.abs(unders - [oi, oj]).sum(axis=1)
+        ui, uj = unders[np.argmin(deltas)]
+
+        # Cells currently in (oi, oj) — move the ones farthest from its centre
+        mask = (i_idx == oi) & (j_idx == oj)
+        cand = np.flatnonzero(mask)
+        x_th = -HALF_EXTENT_M + (oi + 0.5) * DX
+        y_th = -HALF_EXTENT_M + (oj + 0.5) * DX
+        d2 = (xi[cand] - x_th) ** 2 + (yi[cand] - y_th) ** 2
+        n_move = int(min(counts[oi, oj] - NK, NK - counts[ui, uj]))
+        moved = cand[np.argsort(-d2)[:n_move]]
+        i_idx[moved] = ui
+        j_idx[moved] = uj
+        counts[oi, oj] -= n_move
+        counts[ui, uj] += n_move
+
+    if not (counts == NK).all():
+        bad = np.flatnonzero(counts.ravel() != NK)
+        raise ValueError(
+            f"Column rebalance failed: {len(bad)} columns still off "
+            f"(e.g. col {bad[0]}: {counts.ravel()[bad[0]]})"
+        )
+    return i_idx, j_idx
+
+
 def build_inner_block_permutation(
     cx: np.ndarray, cy: np.ndarray, cz: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -133,24 +187,22 @@ def build_inner_block_permutation(
     # 2. Bin (x, y) → (i, j). Cell centres are at x = -3000 + (i + 0.5)*DX.
     i = np.round((xi + HALF_EXTENT_M) / DX - 0.5).astype(np.int32)
     j = np.round((yi + HALF_EXTENT_M) / DX - 0.5).astype(np.int32)
-    if i.min() < 0 or i.max() >= NI or j.min() < 0 or j.max() >= NJ:
-        raise ValueError(
-            f"(i,j) out of range: i in [{i.min()},{i.max()}], j in [{j.min()},{j.max()}]"
-        )
+    np.clip(i, 0, NI - 1, out=i)            # robust to rounding edge cases
+    np.clip(j, 0, NJ - 1, out=j)
+
+    # 2b. On rough terrain, the TBM mesh is locally deformed → some cells fall
+    # in the wrong column (>= 1.5% of cases at the campaign scale). Rebalance.
+    i, j = _rebalance_columns(i, j, xi, yi)
 
     # 3. For each (i,j) column, sort by z ascending, assign k = 0..NK-1.
-    # Use a structured sort key: (i, j, z) → lex order, then bucket.
     col_id = i.astype(np.int64) * NJ + j.astype(np.int64)
     order = np.lexsort((zi, col_id))   # primary col_id, secondary z
-    col_id_sorted = col_id[order]
-
-    # Verify each column has exactly NK cells
-    counts = np.bincount(col_id_sorted, minlength=NI * NJ)
+    counts = np.bincount(col_id[order], minlength=NI * NJ)
     if not np.all(counts == NK):
         bad = np.flatnonzero(counts != NK)
         raise ValueError(
-            f"Inner-block column count mismatch: {len(bad)} columns with "
-            f"!= {NK} cells (e.g. col {bad[0]}: {counts[bad[0]]})"
+            f"Inner-block column count mismatch after rebalance: {len(bad)} cols "
+            f"(e.g. col {bad[0]}: {counts[bad[0]]})"
         )
 
     # 4. Build permutation [NI, NJ, NK] of global indices

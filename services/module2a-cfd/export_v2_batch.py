@@ -52,6 +52,8 @@ def main() -> int:
     ap.add_argument("--n-shards", type=int, default=None)
     ap.add_argument("--max-cases", type=int, default=None,
                     help="Process at most N cases (smoke test).")
+    ap.add_argument("--cases", nargs="*", default=None,
+                    help="Restrict to these specific 'site_id/case_tsNNN' (smoke).")
     ap.add_argument("--skip-existing", action="store_true", default=True)
     ap.add_argument("--no-skip-existing", dest="skip_existing", action="store_false")
     args = ap.parse_args()
@@ -97,6 +99,11 @@ def main() -> int:
             ap.error(f"--shard {args.shard} invalid for --n-shards {args.n_shards}")
         cases = [c for i, c in enumerate(cases) if i % args.n_shards == (args.shard - 1)]
         logger.info("Shard %d/%d: %d cases", args.shard, args.n_shards, len(cases))
+
+    if args.cases:
+        wanted = set(args.cases)
+        cases = [c for c in cases if f"{c[0]}/{c[1]}" in wanted]
+        logger.info("Restricted to --cases (%d/%d matched).", len(cases), len(wanted))
 
     if args.max_cases is not None:
         cases = cases[: args.max_cases]

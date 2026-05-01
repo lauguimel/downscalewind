@@ -1,0 +1,23 @@
+#!/bin/bash -l
+#PBS -N v2_norm_stats
+#PBS -l select=1:ncpus=1:mem=8GB
+#PBS -l walltime=01:30:00
+#PBS -j oe
+#PBS -m n
+
+# Welford mean/std on TRAIN split of v2 grid.zarr cases.
+# Output: dataset_v2_norm.yaml next to the splits.
+
+cd $PBS_O_WORKDIR
+
+CAMPAIGN=/scratch/maitreje/dsw/complex_terrain_v1
+DATA=/scratch/maitreje/dsw/training_v2
+LOG=$HOME/dsw/data/campaign/complex_terrain_v1/manifests/compute_norm_stats_v2.log
+
+cd $HOME/dsw/services/module2b-surrogate
+
+python3 -u compute_norm_stats_v2.py \
+  --data-dir   $DATA \
+  --splits-yaml $CAMPAIGN/manifests/dataset_v2_splits.yaml \
+  --output     $CAMPAIGN/manifests/dataset_v2_norm.yaml \
+  2>&1 | tee $LOG

@@ -1,0 +1,47 @@
+#!/bin/bash -l
+#PBS -N export_v2_smoke_reb
+#PBS -l select=1:ncpus=1:mem=8GB
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -m n
+
+# Targeted smoke test of the rebalance fix on 3 cases that previously FAILED
+# with "Inner-block column count mismatch".
+
+cd $PBS_O_WORKDIR
+
+CAMPAIGN=/scratch/maitreje/dsw/complex_terrain_v1
+ERA5=/scratch/maitreje/dsw/era5_campaign_v3
+OUT=/scratch/maitreje/dsw/training_v2
+LOG=$HOME/dsw/data/campaign/complex_terrain_v1/manifests/export_v2_smoke_reb.log
+
+mkdir -p "$OUT" "$(dirname $LOG)"
+cd $HOME/dsw/services/module2a-cfd
+
+python3 -u export_v2_batch.py \
+  --status-csv $CAMPAIGN/manifests/dataset_v2_status.csv \
+  --sites-csv  $HOME/dsw/data/campaign/complex_terrain_v1/sites.csv \
+  --run-matrix $HOME/dsw/data/campaign/complex_terrain_v1/run_matrix.csv \
+  --campaign-dir $CAMPAIGN/sites \
+  --era5-dir   $ERA5 \
+  --output-dir $OUT \
+  --tiers gold silver \
+  --no-skip-existing \
+  --cases ct_c_morpho_0010/case_ts006 ct_c_morpho_0011/case_ts011 ct_c_morpho_0017/case_ts011 \
+  2>&1 | tee $LOG
+
+echo "--- inspect outputs ---"
+for c in ct_c_morpho_0010_case_ts006 ct_c_morpho_0011_case_ts011 ct_c_morpho_0017_case_ts011; do
+  z="$OUT/$c/grid.zarr"
+  if [ -d "$z" ]; then
+    python3 -c "
+import zarr, numpy as np
+g = zarr.open_group('$z', mode='r')
+U = np.asarray(g['target/U'])
+T = np.asarray(g['target/T'])
+print(f'$c  U shape={U.shape}, |U| mean={np.linalg.norm(U,axis=-1).mean():.2f} m/s, T={T.min():.1f}-{T.max():.1f}K')
+"
+  else
+    echo "$c FAILED (no grid.zarr)"
+  fi
+done
