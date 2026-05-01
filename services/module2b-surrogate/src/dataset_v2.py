@@ -177,14 +177,15 @@ class WindV2Dataset(Dataset):
             # Broadcast over (NI, NJ) and interpolate from N_p to NK:
             # We linearly interpolate along k by mapping pressure to fractional index.
             # For simplicity, project on NK via uniform indexing — model can learn the mapping.
-            k_idx = np.linspace(0, len(prof_1d) - 1, NK)
-            prof_nk = np.interp(k_idx, np.arange(len(prof_1d)), prof_1d)  # (NK,)
+            k_idx = np.linspace(0, len(prof_1d) - 1, NK, dtype=np.float32)
+            prof_nk = np.interp(k_idx, np.arange(len(prof_1d), dtype=np.float32),
+                                prof_1d).astype(np.float32)
             field = np.broadcast_to(prof_nk[None, None, :], (NI, NJ, NK)).copy()
-            chans.append((field - offset) / scale)
+            chans.append(((field - offset) / scale).astype(np.float32))
 
         # 7. ERA5 pressure level profile itself (NK,) broadcast
-        plev_k = np.interp(np.linspace(0, len(plev) - 1, NK),
-                           np.arange(len(plev)), plev)
+        plev_k = np.interp(np.linspace(0, len(plev) - 1, NK, dtype=np.float32),
+                           np.arange(len(plev), dtype=np.float32), plev).astype(np.float32)
         chans.append(np.broadcast_to(
             ((plev_k - n["pressure_offset"]) / n["pressure_scale"])[None, None, :],
             (NI, NJ, NK)).copy().astype(np.float32))
@@ -200,7 +201,7 @@ class WindV2Dataset(Dataset):
             val = float(arr[1, 1])
             chans.append(np.full((NI, NJ, NK), (val - offset) / scale, dtype=np.float32))
 
-        return np.stack(chans, axis=0)  # (C_in, NI, NJ, NK)
+        return np.stack(chans, axis=0).astype(np.float32)  # (C_in, NI, NJ, NK)
 
     def _build_target_tensor(self, store: Any) -> np.ndarray:
         """Build (5, NI, NJ, NK) target = (u, v, w, T, q) normalised."""

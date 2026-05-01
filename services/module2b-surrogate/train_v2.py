@@ -76,6 +76,10 @@ def main() -> int:
     ap.add_argument("--n-layers", type=int, default=4)
     ap.add_argument("--num-workers", type=int, default=2)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--max-train-cases", type=int, default=None,
+                    help="Subsample N train cases (smoke test).")
+    ap.add_argument("--max-val-cases", type=int, default=None,
+                    help="Subsample N val cases (smoke test).")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -86,6 +90,13 @@ def main() -> int:
 
     train_ds = WindV2Dataset(args.data_dir, args.splits_yaml, "train", norm=norm)
     val_ds = WindV2Dataset(args.data_dir, args.splits_yaml, "val", norm=norm)
+
+    if args.max_train_cases is not None:
+        train_ds.cases = train_ds.cases[: args.max_train_cases]
+        logger.info("Truncated train to %d cases (smoke).", len(train_ds))
+    if args.max_val_cases is not None:
+        val_ds.cases = val_ds.cases[: args.max_val_cases]
+        logger.info("Truncated val to %d cases (smoke).", len(val_ds))
 
     # Detect input channel count from a sample
     sample_inp, _, _ = train_ds[0]
