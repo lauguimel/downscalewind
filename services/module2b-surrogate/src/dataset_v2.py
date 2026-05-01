@@ -115,18 +115,29 @@ class WindV2Dataset(Dataset):
 
         cases: list[Path] = []
         missing_sites = 0
+        n_skipped = 0
         for sid in site_ids:
             site_cases = sorted(self.data_dir.glob(f"{sid}_case_ts*"))
             site_cases = [c for c in site_cases if (c / "grid.zarr").exists()]
             if not site_cases:
                 missing_sites += 1
                 continue
-            cases.extend(site_cases)
+            for case_dir in site_cases:
+                try:
+                    g = zarr.open_group(str(case_dir / "grid.zarr"), mode="r")
+                    tk = set(g["target"])
+                    if {"U", "T", "q"}.issubset(tk):
+                        cases.append(case_dir)
+                    else:
+                        n_skipped += 1
+                except Exception:
+                    n_skipped += 1
         self.cases = cases
 
         logger.info(
-            "WindV2Dataset[%s]: %d cases from %d sites (missing %d sites)",
-            split, len(self.cases), len(site_ids) - missing_sites, missing_sites,
+            "WindV2Dataset[%s]: %d cases from %d sites (missing %d sites, "
+            "%d cases skipped for incomplete targets)",
+            split, len(self.cases), len(site_ids) - missing_sites, missing_sites, n_skipped,
         )
 
     def __len__(self) -> int:
