@@ -1,0 +1,36 @@
+#!/bin/bash -l
+#PBS -N v2vit_s4_smk
+#PBS -l select=1:ncpus=4:mem=32GB:ngpus=1:gpu_id=H100
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -m n
+
+# Smoke test of S4 recipe (Charbonnier + amplitude + divergence + warmup-cosine).
+cd $PBS_O_WORKDIR
+
+CAMPAIGN="/scratch/maitreje/dsw/complex_terrain_v1"
+DATA="/scratch/maitreje/dsw/training_v2"
+OUT="$HOME/dsw/data/models/surrogate_v2_vit_s4_smoke"
+
+mkdir -p "$OUT"
+nvidia-smi >/dev/null || { echo "GPU missing"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+cd $HOME/dsw/services/module2b-surrogate
+python -u train_v2_vit.py \
+  --data-dir   $DATA \
+  --splits-yaml $CAMPAIGN/manifests/dataset_v2_splits.yaml \
+  --norm-yaml   $CAMPAIGN/manifests/dataset_v2_norm.yaml \
+  --out-dir    $OUT \
+  --epochs 3 --warmup-epochs 1 \
+  --batch-size 2 --preset small \
+  --loss-type s4 \
+  --num-workers 0 \
+  --max-train-cases 16 --max-val-cases 4 \
+  --device cuda

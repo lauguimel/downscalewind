@@ -104,6 +104,8 @@ class TerrainViT_V2_S3(nn.Module):
 _PRESETS_V2 = {
     "small": dict(embed_dim=256, depth=8, n_heads=8, drop=0.1, feat_dim=48),
     "base":  dict(embed_dim=384, depth=12, n_heads=8, drop=0.1, feat_dim=64),
+    "large": dict(embed_dim=512, depth=16, n_heads=16, drop=0.1, feat_dim=96,
+                  n_cross_layers=6, n_era5_tokens=24),
 }
 
 
