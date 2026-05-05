@@ -11,6 +11,8 @@ Supports:
   --use-geo         inject native z/AGL channels into the vertical heads
   --use-residual    learn CFD minus a simple ERA5-lifted baseline
   --agl-weight-*    boost near-ground pointwise data terms
+  --loss-central-crop-km
+                    compute loss only on the central crop while keeping full input context
 """
 from __future__ import annotations
 
@@ -92,6 +94,23 @@ def make_warmup_cosine(optim, warmup_epochs: int, total_epochs: int):
     return LambdaLR(optim, lr_fn)
 
 
+def crop_center_xy(
+    x: torch.Tensor | None,
+    crop_km: float | None,
+    dx_m: float = 33.333,
+) -> torch.Tensor | None:
+    """Crop tensor on the y/x axes while preserving batch, channel, and z axes."""
+    if x is None or crop_km is None or crop_km <= 0:
+        return x
+    ny, nx = x.shape[-3], x.shape[-2]
+    cells = max(1, int(round(crop_km * 1000.0 / dx_m)))
+    cells_y = min(cells, ny)
+    cells_x = min(cells, nx)
+    y0 = (ny - cells_y) // 2
+    x0 = (nx - cells_x) // 2
+    return x[..., y0:y0 + cells_y, x0:x0 + cells_x, :]
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -119,6 +138,8 @@ def main():
                     help="Near-ground loss boost: weight=1+alpha*exp(-AGL/H).")
     ap.add_argument("--agl-weight-height", type=float, default=300.0,
                     help="E-folding height H in metres for AGL loss weighting.")
+    ap.add_argument("--loss-central-crop-km", type=float, default=None,
+                    help="Compute loss only on a central square crop, e.g. 2 for 2x2 km.")
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--max-train-cases", type=int, default=None)
@@ -159,9 +180,10 @@ def main():
     geo_channels = geo.shape[0] if geo is not None else 0
     logger.info("terrain %s | era5 %s | geo_ch=%d | target %s",
                 terrain.shape, era5.shape, geo_channels, target.shape)
-    logger.info("options: residual=%s slopes=%s agl_weight_alpha=%.2f H=%.1f",
+    logger.info("options: residual=%s slopes=%s agl_weight_alpha=%.2f H=%.1f crop_km=%s",
                 args.use_residual, args.include_slopes,
-                args.agl_weight_alpha, args.agl_weight_height)
+                args.agl_weight_alpha, args.agl_weight_height,
+                args.loss_central_crop_km)
 
     model = build_vit_v2(preset=args.preset, era5_input_dim=era5_dim, nz=nz,
                          terrain_in_channels=terrain.shape[0],
@@ -222,7 +244,10 @@ def main():
             if weight is not None:
                 weight = weight.to(args.device, non_blocking=True)
             pred = model(terrain, era5, geo)
-            loss, comp = total_loss(pred, tgt, args.loss_type, weight=weight,
+            pred_loss = crop_center_xy(pred, args.loss_central_crop_km)
+            tgt_loss = crop_center_xy(tgt, args.loss_central_crop_km)
+            weight_loss = crop_center_xy(weight, args.loss_central_crop_km)
+            loss, comp = total_loss(pred_loss, tgt_loss, args.loss_type, weight=weight_loss,
                                     w_amp=args.w_amp, w_div=args.w_div)
             optim.zero_grad()
             loss.backward()
@@ -254,11 +279,17 @@ def main():
                 if weight is not None:
                     weight = weight.to(args.device, non_blocking=True)
                 pred = model(terrain, era5, geo)
-                l, _ = total_loss(pred, tgt, args.loss_type, weight=weight,
+                pred_loss = crop_center_xy(pred, args.loss_central_crop_km)
+                tgt_loss = crop_center_xy(tgt, args.loss_central_crop_km)
+                weight_loss = crop_center_xy(weight, args.loss_central_crop_km)
+                l, _ = total_loss(pred_loss, tgt_loss, args.loss_type, weight=weight_loss,
                                   w_amp=args.w_amp, w_div=args.w_div)
                 val_loss += l.item()
-                val_mse += mse_loss(pred, tgt).item()
-                val_mse_agl += mse_loss(pred, tgt, weight).item() if weight is not None else 0.0
+                val_mse += mse_loss(pred_loss, tgt_loss).item()
+                val_mse_agl += (
+                    mse_loss(pred_loss, tgt_loss, weight_loss).item()
+                    if weight_loss is not None else 0.0
+                )
         val_loss /= max(len(val_loader), 1)
         val_mse /= max(len(val_loader), 1)
         if use_weight:
