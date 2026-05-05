@@ -1,0 +1,98 @@
+#!/bin/bash -l
+#PBS -N fno_pino_9k
+#PBS -l select=1:ncpus=8:ngpus=1:mem=64GB:gpu_id=H100
+#PBS -l walltime=24:00:00
+#PBS -j oe
+#PBS -m ae
+
+# Train FNO 3D + physics losses (PINO) on the 9k wind downscaling dataset.
+#
+# Dataset: ~/dsw/training_9k (8998 cases, site-based watertight splits)
+#   432 train sites / 72 val sites / 96 test sites
+# Code:    ~/dsw/services/module2b-surrogate_wind/
+# Models:  ~/dsw/models/surrogate_9k_v2/fno_pino/best_model.pt
+# Metrics: ~/dsw/data/validation/surrogate_9k_v2/fno_pino/metrics_*.json
+#
+# Usage: qsub configs/hpc/train_wind_pino_9k.pbs
+
+cd $PBS_O_WORKDIR
+
+# IMPORTANT: dataset on /scratch (Weka/NVMe) — 50× faster than Lustre home
+# for small-file Zarr access. A previous run on $HOME/dsw/training_9k had
+# GPU utilization of 6% because data loading was Lustre-bound.
+DATA_DIR="/scratch/maitreje/dsw/training_9k"
+DATASET_YAML="$DATA_DIR/dataset.yaml"
+OUTPUT_DIR="$HOME/dsw/models/surrogate_9k_v2"
+VALID_DIR="$HOME/dsw/data/validation/surrogate_9k_v2/fno_pino"
+SCRIPT_DIR="$HOME/dsw/services/module2b-surrogate_wind"
+
+# ── Pre-flight GPU check ────────────────────────────────────────────────────
+nvidia-smi || { echo "ERROR: GPU not available"; exit 1; }
+
+echo "=== FNO + PINO Training on 9k Wind Dataset ==="
+echo "Data:    $DATA_DIR"
+echo "Dataset: $DATASET_YAML"
+echo "Code:    $SCRIPT_DIR"
+echo "Models:  $OUTPUT_DIR"
+echo "Metrics: $VALID_DIR"
+echo
+
+# ── Verify inputs ───────────────────────────────────────────────────────────
+[ -f "$DATASET_YAML" ]        || { echo "ERROR: dataset.yaml not found at $DATASET_YAML"; exit 1; }
+[ -d "$SCRIPT_DIR" ]          || { echo "ERROR: script dir not found at $SCRIPT_DIR"; exit 1; }
+[ -f "$SCRIPT_DIR/train.py" ] || { echo "ERROR: train.py not found in $SCRIPT_DIR"; exit 1; }
+
+# ── Activate conda env ──────────────────────────────────────────────────────
+module load Miniconda3 2>/dev/null || module load Anaconda3 2>/dev/null || true
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+
+python -c "import torch; print(f'PyTorch {torch.__version__} | CUDA: {torch.cuda.is_available()} | Device: {torch.cuda.get_device_name(0)}')"
+
+cd "$SCRIPT_DIR"
+
+# ── Train: FNO 3D + physics losses (PINO) ───────────────────────────────────
+echo
+echo "=== [1/2] Training FNO + PINO (100 epochs) ==="
+mkdir -p "$OUTPUT_DIR"
+python train.py \
+    --model fno \
+    --data-dir "$DATA_DIR" \
+    --dataset "$DATASET_YAML" \
+    --output "$OUTPUT_DIR" \
+    --epochs 100 \
+    --batch-size 8 \
+    --lr 1e-3 \
+    --num-workers 4 \
+    --fno-width 32 \
+    --fno-layers 4 \
+    --physics \
+    --lambda-div 0.1 \
+    --lambda-bc 0.05 \
+    || { echo "ERROR: training failed"; exit 2; }
+
+# train.py saves under $OUTPUT_DIR/fno_pinn/ when --physics is set (PINN suffix)
+# Normalize to fno_pino for clarity
+if [ -d "$OUTPUT_DIR/fno_pinn" ] && [ ! -d "$OUTPUT_DIR/fno_pino" ]; then
+    mv "$OUTPUT_DIR/fno_pinn" "$OUTPUT_DIR/fno_pino"
+fi
+
+BEST_MODEL="$OUTPUT_DIR/fno_pino/best_model.pt"
+[ -f "$BEST_MODEL" ] || { echo "ERROR: best_model.pt not found at $BEST_MODEL"; exit 3; }
+
+# ── Evaluate on test split (96 unseen sites) ────────────────────────────────
+echo
+echo "=== [2/2] Evaluating on test split ==="
+mkdir -p "$VALID_DIR"
+python evaluate.py \
+    --model-type fno \
+    --data-dir "$DATA_DIR" \
+    --dataset "$DATASET_YAML" \
+    --weights "$BEST_MODEL" \
+    --output "$VALID_DIR" \
+    || { echo "ERROR: evaluation failed"; exit 4; }
+
+echo
+echo "=== DONE ==="
+echo "Model:   $BEST_MODEL"
+echo "Metrics: $VALID_DIR/metrics_*.json"

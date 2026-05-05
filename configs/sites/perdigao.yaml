@@ -28,19 +28,21 @@ site:
     dominant_wind_dir_deg: 220 # direction dominante du vent (SSO)
 
 
-# Domaine ERA5 (7×7 mailles à 0.25°)
-# Centré sur la crête principale, couvre ~175×175 km
+# Domaine ERA5 (3×3 mailles à 0.25° ≈ 25 km)
+# Centré sur le site: 3 points encadrent Perdigão (39.716°N, -7.740°E)
+# Suffisant pour interpolation bilinéaire des BCs CFD (domaine < 1 maille ERA5)
 era5_domain:
-  north: 40.5     # °N
-  west:  -8.5     # °E (négatif = Ouest)
-  south: 39.0     # °N
-  east:  -7.0     # °E
+  north: 40.0     # °N
+  west:  -8.0     # °E (négatif = Ouest)
+  south: 39.5     # °N
+  east:  -7.5     # °E
   grid_spacing_deg: 0.25
-  n_lat: 7
-  n_lon: 7
-  # Coordonnées de la grille ERA5 centrée sur le site
-  # lat: [39.00, 39.25, 39.50, 39.75, 40.00, 40.25, 40.50]
-  # lon: [-8.50, -8.25, -8.00, -7.75, -7.50, -7.25, -7.00]
+  n_lat: 3
+  n_lon: 3
+  # Coordonnées de la grille ERA5:
+  # lat: [39.50, 39.75, 40.00]
+  # lon: [-8.00, -7.75, -7.50]
+  # Site (39.716, -7.740) est entre les 4 coins centraux
 
 
 # Domaine CFD OpenFOAM
@@ -187,12 +189,27 @@ data_sources:
     use: "Topographie pour maillage CFD (resample à 1 km)"
 
   land_cover:
-    provider: "Copernicus Global Land Service"
-    product: "CGLS-LC100 v3"
-    resolution_m: 100
-    year: 2018  # plus proche de 2017
-    url: "https://lcviewer.vito.be/download"
-    use: "Carte de rugosité z₀ par classe de surface"
+    provider: "ESA WorldCover + ETH Zurich"
+    products:
+      - id: "ESA_WorldCover_2021_v200"
+        description: "Land cover classification from Sentinel-1+2, 11 classes"
+        resolution_m: 10
+        year: 2021
+        url: "https://esa-worldcover.org/en/data-access"
+        access: "Free, no authentication (AWS Open Data)"
+      - id: "ETH_GlobalCanopyHeight_2020"
+        description: "Canopy height from Sentinel-2 + GEDI LiDAR (Lang et al. 2023)"
+        resolution_m: 10
+        year: 2020
+        url: "https://langnico.github.io/globalcanopyheight/"
+        access: "Free (Google Cloud)"
+    use: >
+      Spatially-varying roughness z₀(x,y), displacement height d(x,y),
+      and leaf area density LAD(x,y) for canopy source terms.
+      z₀ = 0.1 × h_canopy (tree cover), d = 2/3 × h_canopy (GWA4 standard).
+    legacy:
+      product: "CGLS-LC100 v3 (100 m, Copernicus)"
+      note: "Replaced by WorldCover 10m — 10× better resolution"
 
   perdigao_campaign:
     provider: "New European Wind Atlas (NEWA)"

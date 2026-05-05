@@ -1,0 +1,107 @@
+#!/bin/bash -l
+#PBS -N v2_mesh
+#PBS -l select=1:ncpus=1:mem=4GB
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -m n
+#PBS -J 1-820
+
+# Phase 1: STL + TBM mesh + checkMesh for one site per job (single core).
+# Array index maps to site_id via sites_list.txt.
+#
+# Pre-requisite (run once):
+#   python3 -c "import csv; sites=sorted(set(r['site_id'] for r in csv.DictReader(open('run_matrix.csv')))); open('sites_list.txt','w').write('\n'.join(sites)+'\n')"
+#
+# Launch:  qsub -J 1-820 campaign_v2_phase1_mesh.pbs
+# Resume:  same command — skips sites with existing polyMesh
+
+set -euo pipefail
+cd "$HOME/dsw"
+
+OF_SIF="$HOME/dsw/containers/openfoam_v2512.sif"
+TBM_SIF="$HOME/dsw/containers/terrainblockmesher.sif"
+SRTM="/scratch/maitreje/dsw/srtm_tiles_30m"
+CAMPAIGN_DIR="$HOME/dsw/data/campaign/complex_terrain_v1"
+OUTPUT="/scratch/maitreje/dsw/complex_terrain_v1"
+SITES_LIST="${CAMPAIGN_DIR}/sites_list.txt"
+IDX=${PBS_ARRAY_INDEX:-1}
+
+export CONTAINER_RUNTIME=apptainer
+
+# Get site_id and coords from sites_list + run_matrix
+SITE_ID=$(sed -n "${IDX}p" "$SITES_LIST")
+read LAT LON < <(python3 -c "
+import csv
+with open('${CAMPAIGN_DIR}/run_matrix.csv') as f:
+    for row in csv.DictReader(f):
+        if row['site_id'] == '${SITE_ID}':
+            print(row['lat'], row['lon'])
+            break
+")
+
+echo "=== Phase 1: mesh $SITE_ID (idx=$IDX) lat=$LAT lon=$LON ==="
+
+SITE_DIR="${OUTPUT}/sites/${SITE_ID}"
+MESH_DIR="${SITE_DIR}/mesh"
+
+# Skip if already meshed
+if [ -f "${MESH_DIR}/constant/polyMesh/points" ]; then
+    echo "Mesh exists, skipping"
+    exit 0
+fi
+
+cd "$HOME/dsw/services/module2a-cfd"
+python3 -c "
+import sys, time, subprocess
+sys.path.insert(0, '.')
+from pathlib import Path
+import run_multisite_campaign as RMC
+RMC.OF_IMAGE = '${OF_SIF}'
+RMC.TBM_IMAGE = '${TBM_SIF}'
+from run_multisite_campaign import (
+    DEFAULT_MESH, extract_stl, _read_stl_zmin, write_tbm_dict,
+    run_tbm_mesh, run_write_cell_centres, check_mesh_quality,
+    _container_cmd, log)
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
+
+mesh_cfg = dict(DEFAULT_MESH)
+mesh_dir = Path('${MESH_DIR}')
+
+# STL
+stl_path = mesh_dir / 'constant' / 'triSurface' / 'terrain.stl'
+log.info('=== STL ===')
+t0 = time.time()
+if not stl_path.exists():
+    terrain_z_min = extract_stl(
+        Path('${SRTM}'), ${LAT}, ${LON},
+        mesh_cfg['cylinder_radius_m'],
+        mesh_cfg['stl_resolution_m'], stl_path)
+else:
+    terrain_z_min = _read_stl_zmin(stl_path)
+log.info('STL done in %.1f s', time.time() - t0)
+
+# TBM
+log.info('=== TBM ===')
+t0 = time.time()
+write_tbm_dict(mesh_cfg, 'terrain.stl', mesh_dir, terrain_z_min)
+if not run_tbm_mesh(mesh_dir, mesh_cfg):
+    log.error('TBM FAILED')
+    sys.exit(1)
+log.info('TBM done in %.1f s', time.time() - t0)
+
+# checkMesh
+if not check_mesh_quality(mesh_dir):
+    log.error('MESH QUALITY FAILED — site will be skipped in phase 2')
+    # Remove polyMesh so phase 2 skips this site
+    import shutil
+    shutil.rmtree(mesh_dir / 'constant' / 'polyMesh', ignore_errors=True)
+    sys.exit(1)
+
+# writeCellCentres
+if not run_write_cell_centres(mesh_dir):
+    log.error('writeCellCentres FAILED')
+    sys.exit(1)
+
+log.info('=== MESH COMPLETE for ${SITE_ID} ===')
+"

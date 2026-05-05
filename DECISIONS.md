@@ -110,7 +110,7 @@ nécessite bibliothèque spécifique, moins stable).
 **Justification :**
 - Standard de fait pour la CFD atmosphérique en terrain complexe
 - Tous les exemples ABL OpenFOAM utilisent snappyHexMesh
-- Intégration native avec `atmBoundaryLayerInletVelocity`
+- Intégration native avec les BCs ABL OpenFOAM (`inletOutlet`, wall functions)
 - Entièrement scriptable : SRTM → `rasterio` → `numpy-stl` → STL → `snappyHexMeshDict`
 
 **Critères de qualité maillage (checkMesh) :**
@@ -123,39 +123,40 @@ moins d'exemples ABL documentés. Pertinent si migration vers SU2 ou code_saturn
 
 ---
 
-## D7 — Solveur CFD : buoyantSimpleFoam (pas simpleFoam)
+## D7 — Solveur CFD : simpleFoam + k-ε (révisé)
 
-**Statut :** STABLE
+**Statut :** STABLE (révisé 2026-03)
 
-**Décision :** `buoyantSimpleFoam` comme solveur principal pour le batch CFD.
+**Décision :** `simpleFoam` + k-ε modifié (Parente et al.) comme solveur principal.
 
 | Solveur | Énergie | Flottabilité | Usage |
 |---------|---------|--------------|-------|
-| `simpleFoam` | Non | Non | Neutre isotherme seulement |
-| `rhoSimpleFoam` | Oui | Partielle | Haute vitesse (Ma > 0.1) |
-| **`buoyantSimpleFoam`** | **Oui** | **Primaire** | **ABL stratifiée ← choix** |
+| **`simpleFoam`** | **Non** | **Non** | **RANS neutre ← choix principal** |
+| `buoyantBoussinesqSimpleFoam` | Oui | Boussinesq | Stratifié (à activer si besoin) |
+| `buoyantSimpleFoam` | Oui | Primaire | Non recommandé (compressible inutile) |
 
-**Justification :** Les effets thermiques (courants de pente, brise de montagne,
-stratification nocturne) sont des phénomènes clés à Perdigão. `buoyantSimpleFoam`
-résout nativement l'équation d'énergie + terme de flottabilité.
+**Justification (révision) :** Les études de référence à Perdigão (Letzgus et al.
+WES 2023, Neunaber et al. WES 2022) utilisent toutes `simpleFoam` + k-ε pour le
+RANS stationnaire. `buoyantBoussinesqSimpleFoam` sera activé pour les runs stratifiés
+si nécessaire (approximation Boussinesq plus stable que compressible).
 
-**Fallback :** Si le budget CFD dépasse 40h/240 runs, utiliser `simpleFoam`
-pour les runs neutres (Ri_b ≈ 0, ~60%) et `buoyantSimpleFoam` pour les
-runs stables/instables (~40%). À décider après le benchmark du premier run.
+**Fallback stratifié :** `buoyantBoussinesqSimpleFoam` pour les runs avec Ri_b ≠ 0.
 
 ---
 
-## D8 — Conditions aux limites CFD : 3 faces inlet, domaine fixe
+## D8 — Conditions aux limites CFD : Robin BC (inletOutlet), domaine fixe
 
-**Statut :** STABLE
+**Statut :** STABLE (révisé)
 
-**Décision :** Domaine orienté fixe (N-S/E-W). Direction du vent paramétrée via
-`flowDir` dans `atmBoundaryLayerInletVelocity`. 3 faces latérales → inlet ;
-back + top → pressure outlet ; bottom → wall.
+**Décision :** Domaine orienté fixe (N-S/E-W). Toutes les 4 faces latérales
+utilisent `inletOutlet` (Robin BC) : Dirichlet (profil prescrit) quand le flux
+entre, Neumann (`zeroGradient`) quand il sort, basculé par face de cellule selon
+le signe du flux local. Top : `slip`. Bottom : `noSlip` + wall functions.
 
-**Justification :** Évite de générer un maillage par direction (×16 = 16 maillages).
-Le vecteur `flowDir` couvre ±90° efficacement — les 3 faces inlet garantissent
-qu'au moins 2 faces reçoivent le flux entrant pour toute direction.
+**Justification :** Cohérent avec Venkatraman et al. (WES 2023), Neunaber et al.
+(WES 2022), et Palma et al. (WES 2020) à Perdigão. Élimine la logique sin/cos
+d'assignation inlet/outlet et fonctionne naturellement pour toute direction de
+vent sans configuration manuelle.
 
 **Nudging volumique :** non implémenté en V1. Mesure de dérive à faire sur le
 premier batch : si |u_CFD(z > 3 km) − u_ERA5| / |u_ERA5| > 10%, envisager
@@ -239,4 +240,61 @@ inclure les effets baroclines à grande échelle ?
 
 ---
 
-*Dernière mise à jour : initialisation du projet*
+## D14 — Modèle de turbulence : k-ε modifié (pas k-ω SST)
+
+**Statut :** STABLE
+
+**Décision :** Migrer de k-ω SST vers k-ε modifié (Parente et al. 2011) pour le
+RANS stationnaire à Perdigão.
+
+**Justification :**
+- Seul modèle RANS validé quantitativement à Perdigão (Letzgus et al. WES 2023) :
+  88M cellules, 12.5 m résolution, comparaison k-ε / k-ε modifié / k-ω
+- k-ω SST perd son avantage avec wall functions (y+ >> 1), ce qui est le cas à
+  notre résolution cible (≥ 40 m)
+- Cohérence ABL native avec les BC `atmBoundaryLayer` d'OpenFOAM ESI v2006+
+- Termes sources canopée (`atmPlantCanopyTurbSource`) conçus pour k-ε
+
+**Données terrrain :** ESA WorldCover 2021 (10 m) + ETH Canopy Height 2020 (10 m)
+remplacent CGLS-LC100 (100 m). z₀ = 0.1 × h_canopy (GWA4/DTU standard).
+
+**Termes sources ajoutés :**
+- `atmCoriolisUSource` (latitude 39.716°N)
+- `atmPlantCanopyUSource` + `atmPlantCanopyTurbSource` (Cd=0.2, LAD depuis carte)
+
+**Consensus littérature :** Le choix du modèle de turbulence est secondaire par
+rapport à la résolution du maillage (≤ 40 m, Palma 2020) et les termes sources
+canopée/Coriolis (Letzgus 2023).
+
+**Alternative écartée :** k-ω SST — standard industriel mais aucun avantage démontré
+à Perdigão avec wall functions. Convergence terrain raide légèrement meilleure mais
+ne compense pas l'absence de validation.
+
+**Références :**
+- Letzgus et al. (WES 2023) — Source terms and inflow at Perdigão
+- Neunaber et al. (WES 2022) — Wind turbine at Perdigão (E-Wind k-ε précurseur)
+- Palma et al. (WES 2020) — Mesh resolution threshold 40 m
+- Parente et al. (2011) — Modified k-ε for consistent ABL profiles
+
+---
+
+## D15 — Occupation du sol : WorldCover + ETH Canopy Height (pas CGLS-LC100)
+
+**Statut :** STABLE
+
+**Décision :** ESA WorldCover 2021 (10 m) + ETH Global Canopy Height 2020 (10 m)
+comme données de référence pour z₀, displacement height d, et LAD.
+
+**Justification :**
+- Résolution 10× supérieure à CGLS-LC100 (10 m vs 100 m)
+- WorldCover : 11 classes, Sentinel-1+2, validation globale >75% overall accuracy
+- ETH Canopy Height : Sentinel-2 + GEDI LiDAR, résolution spatiale 10 m
+- Conversion z₀ = 0.1 × h via table GWA4/DTU standard (même que Global Wind Atlas)
+- LAD = LAI / h_canopy pour les termes sources canopée OpenFOAM
+
+**Alternative écartée :** CGLS-LC100 — résolution trop grossière (100 m) pour un
+maillage CFD cible de 40 m. Pas de hauteur de canopée.
+
+---
+
+*Dernière mise à jour : 2026-03 (migration k-ε + land cover)*

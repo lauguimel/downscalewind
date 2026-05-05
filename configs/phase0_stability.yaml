@@ -26,7 +26,7 @@ study:
 
 docker:
   image: "microfluidica/openfoam:latest"
-  nprocs: 1                       # serial for local testing
+  nprocs: 6                       # parallel on 6 cores
 
 cases:
   A:

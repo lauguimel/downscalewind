@@ -1,0 +1,43 @@
+#!/bin/bash -l
+#PBS -N setup_python_env
+#PBS -l select=1:ncpus=1:mem=4GB
+#PBS -l walltime=0:20:00
+#PBS -j oe
+#PBS -m n
+#PBS -q cpu_inter_exec
+
+# Set up a Python venv for field reconstruction + Zarr export.
+# Run once on Aqua before submitting CFD jobs:
+#   qsub configs/hpc/setup_python_env.pbs
+#
+# Creates: $HOME/venv/reconstruct (activated in PBS_TEMPLATE via submit_pilot.py)
+
+set -e
+
+VENV="$HOME/venv/reconstruct"
+
+# --- Find a usable Python 3 with pip ---
+# Try EasyBuild modules first, fall back to system python3
+module load GCCcore/12.3.0 Python/3.11.3
+echo "Loaded Python/3.11.3"
+
+python3 --version
+
+# --- Create venv ---
+echo "Creating venv at $VENV..."
+python3 -m venv "$VENV" --clear
+
+source "$VENV/bin/activate"
+pip install --upgrade pip --quiet
+pip install numpy zarr --quiet
+
+# --- Verify ---
+echo ""
+echo "=== Verification ==="
+python3 -c "
+import numpy, zarr
+print('numpy:', numpy.__version__)
+print('zarr:', zarr.__version__)
+print('OK')
+"
+echo "Venv ready: $VENV"

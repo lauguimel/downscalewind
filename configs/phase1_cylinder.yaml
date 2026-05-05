@@ -1,0 +1,66 @@
+# Phase 1 — Cylindrical domain (3 concentric rings)
+# Octagonal domain, R=14 km, 3-ring cfMesh refinement:
+#   outer  : 1000 m cells, R=14 km
+#   meso   : 200 m cells, 16×16 km box
+#   fine   : 100 m cells, 2.4×2.4 km box (GNN output zone)
+#   near-T : 50 m cells,  2.4×2.4×0.5 km box
+#
+# Phase 1.4a  — local smoke test (R=5 km, fast mesh check)
+# Phase 1.5   — HPC smoke test (R=14 km, 1 case, full 3-ring mesh)
+#
+# Workflow:
+#   # 1. Generate smoke case locally (mesh check only, no solve)
+#   cd services/module2a-cfd
+#   python run_local_study.py ../../configs/phase1_cylinder.yaml --generate-only
+#
+#   # 2. Upload + submit to Aqua HPC
+#   python submit_pilot.py --group phase1_cylinder --all
+#
+#   # 3. After results, compare with box domain
+#   python run_local_study.py ../../configs/phase1_cylinder.yaml --only-compare
+
+study:
+  name: phase1_cylinder
+  site: perdigao
+  timestamp: "2017-05-04T22:00"
+  domain_type: cylinder        # ← octagonal domain with 3 rings
+  domain_km: 28                # diameter = 28 km → radius = 14 km
+  context_cells: 1             # single domain (no outer context box)
+  n_iterations: 100
+  write_interval: 50
+  inflow_mode: era5              # auto-consistent U, T, p profiles from ERA5
+
+docker:
+  image: "microfluidica/openfoam:latest"
+  nprocs: 6
+
+cases:
+  smoke_local:
+    label: "cylinder smoke (R=5km local)"
+    solver: buoyantBoussinesqSimpleFoam
+    thermal: true
+    coriolis: false
+    canopy: false
+    stability: neutral
+    domain_type: cylinder
+    domain_km: 10              # R=5 km for fast local mesh check
+
+  prod_hpc:
+    label: "cylinder R=14km BBSF neutral"
+    solver: buoyantBoussinesqSimpleFoam
+    thermal: true
+    coriolis: false
+    canopy: false
+    stability: neutral
+    domain_type: cylinder
+    domain_km: 28              # R=14 km for production/HPC
+    resolution_m: 100          # terrain STL at 100m (matches fine zone cell size)
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  venkatraman_csv: "references/venkatraman2023_digitized.csv"
+  output_dir: "data/validation/phase1_cylinder"
+  towers:
+    - tse04
+    - tse09
+    - tse13

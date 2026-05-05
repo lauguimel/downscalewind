@@ -1,0 +1,88 @@
+# Convergence study configuration — Perdigão CFD validation
+# Reference: Venkatraman et al. (WES 2023), same timestamp/conditions
+
+study:
+  name: convergence_perdigao_2026
+  site: perdigao
+  timestamp: "2017-05-04T22:00"  # Venkatraman reference case (near-neutral, SW)
+  validation_towers: [tse04, tse09, tse13]  # Tower 20 (SW ridge), 25 (valley), 29 (NE ridge)
+  n_iterations: 2000
+  write_interval: 200
+
+# --- Phase 1: Mesh convergence ---
+# Fixed: domain=10km, physics=simpleFoam + k-ε + Coriolis
+mesh_convergence:
+  domain_km: 10
+  context_cells: 1
+  n_refine_levels: 2
+  physics: B  # simpleFoam + Coriolis
+  resolutions_m: [500, 250, 100, 50]
+  directions_deg: [231, 40]
+  speed_ms: null  # from ERA5 at timestamp
+
+# --- Phase 2: Domain size sensitivity ---
+# Fixed: resolution from Phase 1, physics=B
+domain_sensitivity:
+  resolution_m: 100  # update after Phase 1 analysis
+  context_cells: 1
+  n_refine_levels: 2
+  physics: B
+  domain_sizes_km: [5, 7.5, 10, 15]
+  directions_deg: [231, 40]
+
+# --- Phase 3: Physics complexity ---
+# Fixed: resolution + domain from Phases 1-2
+physics_comparison:
+  resolution_m: 100
+  domain_km: 10
+  context_cells: 1
+  n_refine_levels: 2
+  directions_deg: [231, 40]
+  configs:
+    A:
+      solver: simpleFoam
+      coriolis: false
+      canopy: false
+      thermal: false
+      precursor: false
+    B:
+      solver: simpleFoam
+      coriolis: true
+      canopy: false
+      thermal: false
+      precursor: false
+    C:
+      solver: simpleFoam
+      coriolis: true
+      canopy: true
+      thermal: false
+      precursor: false
+    D:
+      solver: buoyantSimpleFoam
+      coriolis: true
+      canopy: true
+      thermal: true
+      precursor: false
+    E:
+      solver: buoyantSimpleFoam
+      coriolis: true
+      canopy: true
+      thermal: true
+      precursor: true
+
+# --- Phase 4: Precursor vs idealized + stability ---
+precursor_stability:
+  resolution_m: 100
+  domain_km: 10
+  context_cells: 1
+  physics: D
+  direction_deg: 231
+  stabilities:
+    neutral:   { Ri_b: 0.0,   T_grad_Km: 0.0  }
+    stable:    { Ri_b: 0.15,  T_grad_Km: 0.5  }
+  inlets: [idealized, precursor]
+
+# --- Case naming ---
+# Convention: rheotool_NNN (no link to conditions)
+# Manifest mapping ID→conditions stored in convergence_study_manifest.json
+case_prefix: rheotool

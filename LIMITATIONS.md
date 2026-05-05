@@ -72,25 +72,26 @@ du développement.
 
 ## Module 2A — CFD OpenFOAM
 
-- **RANS stationnaire** : `buoyantSimpleFoam` résout les équations de Navier-Stokes
-  moyennées (RANS). Il ne capture pas :
+- **RANS stationnaire** : `simpleFoam` + k-ε modifié (Parente et al.) résout les
+  équations RANS incompressibles. Il ne capture pas :
   - La turbulence résolue (fluctuations instantanées)
   - Les processus instationnaires (oscillations de sillage, vortex de Kelvin-Helmholtz)
   - Les effets thermiques transitoires (courants de pente nocturnes en transition)
 
-- **k-ω SST** : meilleur que k-ε pour les gradients de pression adverses et les zones
-  de décollement, mais calibré sur des écoulements de laboratoire. En ABL, les
-  constantes du modèle sont ajustées empiriquement — la littérature montre des
-  divergences en terrain très complexe (pentes > 20°).
+- **k-ε modifié** : seul modèle RANS validé quantitativement à Perdigão (Letzgus
+  et al. WES 2023). Avec wall functions (y+ >> 1), il n'y a pas d'avantage démontré
+  du k-ω SST. Le consensus littérature est que le choix du modèle de turbulence est
+  secondaire par rapport à la résolution du maillage (≤ 40 m) et les termes sources
+  (canopée, Coriolis).
 
 - **Domaine 50 km, maillage 1 km** : à cette résolution, les effets de crête fine
   (largeur < 1 km) ne sont pas résolus. La double crête de Perdigão (~2 km de
   largeur) est partiellement résolue.
 
-- **Conditions aux limites (3 faces inlet)** : la configuration left/front/right → inlet,
-  back + top → outlet est une approximation pour les directions obliques (±90° max
-  par rapport à l'axe principal). Au-delà, des instabilités numériques sont possibles.
-  En pratique, la batch couvre 16 directions avec 22.5° de pas.
+- **Conditions aux limites (Robin BC / inletOutlet)** : toutes les faces latérales
+  utilisent `inletOutlet` qui bascule automatiquement entre Dirichlet et Neumann
+  selon le flux local. Approche validée par Venkatraman et al. (WES 2023) et
+  Neunaber et al. (WES 2022) à Perdigão. Pas de limitation directionnelle.
 
 - **Dérive en atmosphère libre** : sans nudging volumique, le champ CFD au-dessus
   de 3 km peut dériver du profil ERA5 d'entrée. A mesurer sur le premier batch
@@ -142,5 +143,5 @@ du développement.
 
 ---
 
-*Dernière mise à jour : initialisation du projet*
+*Dernière mise à jour : 2026-03 (migration k-ε + land cover)*
 *Prochaine mise à jour : après le premier run CFD de test*

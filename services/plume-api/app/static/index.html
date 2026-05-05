@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Plume — Wind downscaling ERA5 25 km → 30 m</title>
+
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">
+      <span class="logo">🌬</span>
+      <span class="name">Plume</span>
+    </div>
+    <div class="sites">
+      <button class="site-btn active" data-case="synthetic_ridge">Perdigão (demo)</button>
+      <button class="site-btn" data-case="montblanc" disabled>Mont Blanc</button>
+      <button class="site-btn" data-case="volcano" disabled>Volcano</button>
+    </div>
+  </header>
+
+  <div id="compare">
+    <div class="panel">
+      <div id="map-era5" class="map-container"></div>
+      <div class="label">ERA5 — 25 km</div>
+    </div>
+    <div class="divider"></div>
+    <div class="panel">
+      <div id="map-plume" class="map-container"></div>
+      <div class="label">Plume — 30 m</div>
+    </div>
+  </div>
+
+  <div id="controls"></div>
+  <div id="loading" class="hidden">Loading CFD field…</div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script type="module" src="/static/js/viewer.js"></script>
+</body>
+</html>

@@ -5,10 +5,10 @@ site:
     longitude: 11.0246
     elevation_m: 934
 era5_domain:
-  north: 48.05
-  south: 47.55
-  east: 11.27
-  west: 10.77
+  north: 48.0
+  south: 47.5
+  east: 11.25
+  west: 10.75
   grid_spacing_deg: 0.25
   n_lat: 3
   n_lon: 3

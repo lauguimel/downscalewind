@@ -1,0 +1,41 @@
+#!/bin/bash -l
+#PBS -N build_cfmesh
+#PBS -l select=1:ncpus=4:mem=8GB
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -m abe
+
+# Build cfMesh as a user-space add-on to OpenFOAM/v2406 (ESI)
+# cartesianMesh will be installed in $FOAM_USER_APPBIN (auto-loaded with the OF module)
+# Submit with: qsub build_cfmesh.pbs
+
+module load GCC/12.3.0 OpenMPI/4.1.5 OpenFOAM/v2406
+source "$EBROOTOPENFOAM/OpenFOAM-v2406/etc/bashrc"
+
+echo ">> WM_PROJECT_USER_DIR = $WM_PROJECT_USER_DIR"
+mkdir -p "$WM_PROJECT_USER_DIR"
+
+CFMESH_DIR="$HOME/cfMesh"
+
+if [ ! -d "$CFMESH_DIR/.git" ]; then
+    echo ">> Cloning cfMesh (MeshInspector fork, OF-ESI compatible)..."
+    git clone https://github.com/MeshInspector/cfMesh "$CFMESH_DIR"
+else
+    echo ">> cfMesh already present — updating..."
+    cd "$CFMESH_DIR" && git pull
+fi
+
+cd "$CFMESH_DIR"
+echo ">> Compiling with wmake (4 cores)..."
+./Allwmake -j 4 2>&1 | tee log.Allwmake
+
+echo ""
+echo "========================================"
+if command -v cartesianMesh &>/dev/null; then
+    echo "SUCCESS: cartesianMesh ready"
+    which cartesianMesh
+else
+    echo "ERROR: cartesianMesh not found — check log.Allwmake"
+    exit 1
+fi
+echo "========================================"

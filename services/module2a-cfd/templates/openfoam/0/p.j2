@@ -62,6 +62,7 @@ internalField   uniform 0;
 
 boundaryField
 {
+{% set lateral_faces = domain.lateral_patches | default(['lateral']) if (domain is defined and domain.octagonal) else ['west', 'east', 'south', 'north'] %}
 {% for face in lateral_faces %}
     {{ face }}
     {

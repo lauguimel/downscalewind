@@ -23,7 +23,7 @@ ERA5 25km (6h)
     └─► Module 2A — Profil vertical       (Monin-Obukhov + ERA5 pression)
             └── Conditions aux limites OpenFOAM
                     │
-                    └─► Module 2A — CFD batch  (buoyantSimpleFoam, 240 runs)
+                    └─► Module 2A — CFD batch  (simpleFoam k-ε, 240 runs)
                                 └── Base de données CFD
                                         │
                                         └─► Module 2B — Surrogate GNN  (GATv2, bipartite)
@@ -44,7 +44,7 @@ downscalewind/
 ├── services/
 │   ├── data-ingestion/      # ERA5 (CDS), IFS (Open-Meteo), SRTM, land cover
 │   ├── module1-temporal/    # NeuralODE + GNN temporal downscaling
-│   ├── module2a-cfd/        # OpenFOAM buoyantSimpleFoam batch runner
+│   ├── module2a-cfd/        # OpenFOAM simpleFoam k-ε batch runner
 │   ├── module2b-surrogate/  # GNN surrogate spatial
 │   ├── module3-stochastic/  # Turbulence sous-horaire (V2)
 │   └── validation/          # Métriques et comparaison baseline

@@ -35,8 +35,8 @@ def assemble_dataset(
 ) -> dict:
     """Scan exported cases and create dataset index with train/val/test splits.
 
-    Splits are by timestamp (not by cell) to avoid data leakage:
-    same terrain at different times stays within one split.
+    Splits are by SITE (geographic): all timestamps from the same site go
+    into the same split. This prevents data leakage from shared terrain.
     """
     case_dirs = sorted([
         d for d in input_dir.iterdir()
@@ -74,23 +74,41 @@ def assemble_dataset(
 
     df = pd.DataFrame(records)
 
-    # Split by case index (random, reproducible)
+    # Extract site_id from case_id (e.g. "site_00042_case_ts003" → "site_00042")
+    df["site_id"] = df["case_id"].str.extract(r"^(site_\d+)")
+    # Fallback for case_ids without site prefix
+    if df["site_id"].isna().any():
+        df.loc[df["site_id"].isna(), "site_id"] = df.loc[df["site_id"].isna(), "case_id"]
+
+    # Split by SITE — all cases from one site go to the same split
+    unique_sites = sorted(df["site_id"].unique())
+    n_sites = len(unique_sites)
     rng = np.random.default_rng(seed)
-    n = len(df)
-    indices = rng.permutation(n)
+    site_indices = rng.permutation(n_sites)
 
-    n_train = int(n * train_frac)
-    n_val = int(n * val_frac)
+    n_train_sites = int(n_sites * train_frac)
+    n_val_sites = int(n_sites * val_frac)
 
-    splits = np.full(n, "test", dtype="U5")
-    splits[indices[:n_train]] = "train"
-    splits[indices[n_train:n_train + n_val]] = "val"
-    df["split"] = splits
+    site_split = {}
+    for i in site_indices[:n_train_sites]:
+        site_split[unique_sites[i]] = "train"
+    for i in site_indices[n_train_sites:n_train_sites + n_val_sites]:
+        site_split[unique_sites[i]] = "val"
+    for i in site_indices[n_train_sites + n_val_sites:]:
+        site_split[unique_sites[i]] = "test"
+
+    df["split"] = df["site_id"].map(site_split)
+    df.drop(columns=["site_id"], inplace=True)
 
     n_train_actual = (df["split"] == "train").sum()
     n_val_actual = (df["split"] == "val").sum()
     n_test_actual = (df["split"] == "test").sum()
-    logger.info("Splits: %d train, %d val, %d test", n_train_actual, n_val_actual, n_test_actual)
+    logger.info(
+        "Splits (by site): %d sites → %d train, %d val, %d test cases "
+        "(%d/%d/%d sites)",
+        n_sites, n_train_actual, n_val_actual, n_test_actual,
+        n_train_sites, n_val_sites, n_sites - n_train_sites - n_val_sites,
+    )
 
     return df
 

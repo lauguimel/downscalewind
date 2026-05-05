@@ -1,0 +1,118 @@
+#!/bin/bash -l
+#PBS -N mesh_aud
+#PBS -l select=1:ncpus=1:mem=4GB
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -m n
+#PBS -J 1-820
+
+# Mesh audit: STL + TBM + checkMesh, keeps mesh even if quality fails.
+# Writes mesh_audit.json per site with quality metrics.
+
+set -euo pipefail
+cd "$HOME/dsw"
+
+OF_SIF="$HOME/dsw/containers/openfoam_v2512.sif"
+TBM_SIF="$HOME/dsw/containers/terrainblockmesher.sif"
+SRTM="/scratch/maitreje/dsw/srtm_tiles_30m"
+CAMPAIGN_DIR="$HOME/dsw/data/campaign/complex_terrain_v1"
+OUTPUT="/scratch/maitreje/dsw/complex_terrain_v1"
+SITES_LIST="${CAMPAIGN_DIR}/sites_list.txt"
+IDX=${PBS_ARRAY_INDEX:-1}
+
+export CONTAINER_RUNTIME=apptainer
+
+SITE_ID=$(sed -n "${IDX}p" "$SITES_LIST")
+SITE_DIR="${OUTPUT}/sites/${SITE_ID}"
+MESH_DIR="${SITE_DIR}/mesh"
+
+# Skip if mesh already exists (only process failed/missing)
+if [ -f "${MESH_DIR}/constant/polyMesh/points" ]; then
+    exit 0
+fi
+
+read LAT LON < <(python3 -c "
+import csv
+with open('${CAMPAIGN_DIR}/run_matrix.csv') as f:
+    for row in csv.DictReader(f):
+        if row['site_id'] == '${SITE_ID}':
+            print(row['lat'], row['lon'])
+            break
+")
+
+cd "$HOME/dsw/services/module2a-cfd"
+python3 -c "
+import sys, time, subprocess, json, re, os
+sys.path.insert(0, '.')
+from pathlib import Path
+import run_multisite_campaign as RMC
+RMC.OF_IMAGE = '${OF_SIF}'
+RMC.TBM_IMAGE = '${TBM_SIF}'
+from run_multisite_campaign import (
+    DEFAULT_MESH, extract_stl, _read_stl_zmin, write_tbm_dict,
+    run_tbm_mesh, _container_cmd, log)
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)s | %(message)s')
+
+mesh_cfg = dict(DEFAULT_MESH)
+mesh_dir = Path('${MESH_DIR}')
+audit = {'site_id': '${SITE_ID}'}
+
+# STL
+stl_path = mesh_dir / 'constant' / 'triSurface' / 'terrain.stl'
+if not stl_path.exists():
+    try:
+        extract_stl(Path('${SRTM}'), ${LAT}, ${LON},
+            mesh_cfg['cylinder_radius_m'], mesh_cfg['stl_resolution_m'], stl_path)
+        audit['stl'] = 'ok'
+    except Exception as e:
+        audit['stl'] = str(e)
+        json.dump(audit, open(str(mesh_dir.parent / 'mesh_audit.json'), 'w'), indent=2)
+        sys.exit(0)
+else:
+    audit['stl'] = 'cached'
+
+terrain_z_min = _read_stl_zmin(stl_path)
+
+# TBM
+write_tbm_dict(mesh_cfg, 'terrain.stl', mesh_dir, terrain_z_min)
+if not run_tbm_mesh(mesh_dir, mesh_cfg):
+    audit['tbm'] = 'crash'
+    json.dump(audit, open(str(mesh_dir.parent / 'mesh_audit.json'), 'w'), indent=2)
+    sys.exit(0)
+audit['tbm'] = 'ok'
+
+# checkMesh — DO NOT delete polyMesh
+cmd = _container_cmd(RMC.OF_IMAGE, mesh_dir,
+    ['bash', '-c', 'cd /home/ofuser/run && checkMesh -allTopology -allGeometry 2>&1'])
+r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+txt = r.stdout
+(mesh_dir / 'log.checkMesh').write_text(txt)
+
+# Parse metrics
+for pattern, key in [
+    (r'Max skewness\s*=\s*([\d.e+-]+)', 'max_skewness'),
+    (r'Max aspect ratio:\s*([\d.e+-]+)', 'max_aspect_ratio'),
+    (r'Max non-orthogonality\s*=\s*([\d.e+-]+)', 'max_non_ortho'),
+    (r'cells:\s*(\d+)', 'n_cells'),
+    (r'Number of negative volume cells:\s*(\d+)', 'neg_vol_cells'),
+    (r'Minimum negative volume:\s*([-\d.e+-]+)', 'min_neg_vol'),
+    (r'small determinant.*?number of cells:\s*(\d+)', 'small_det_cells'),
+    (r'Concave cells.*?number of cells:\s*(\d+)', 'concave_cells'),
+]:
+    m = re.search(pattern, txt, re.IGNORECASE)
+    if m:
+        try:
+            audit[key] = float(m.group(1))
+        except ValueError:
+            audit[key] = m.group(1)
+
+audit['mesh_ok'] = 'Mesh OK' in txt
+audit['n_failed_checks'] = len(re.findall(r'Failed \d+ mesh checks', txt))
+if 'Failed' in txt:
+    m = re.search(r'Failed (\d+) mesh checks', txt)
+    audit['n_failed_checks'] = int(m.group(1)) if m else -1
+
+json.dump(audit, open(str(mesh_dir.parent / 'mesh_audit.json'), 'w'), indent=2)
+log.info('Audit: %s', json.dumps({k: audit[k] for k in ['site_id','max_skewness','neg_vol_cells','mesh_ok'] if k in audit}))
+" 2>&1 || true

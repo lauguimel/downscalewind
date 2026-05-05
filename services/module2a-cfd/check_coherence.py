@@ -10,7 +10,7 @@ Checks
 2. Log-law conformity  : R² > 0.95 between model and log profile in flat upstream
 3. Jackson-Hunt speed-up (ridge speed-up vs ridge-height/ridge-width ratio)
 4. Turbulence intensity: TI = √(2k/3) / |u| ∈ [0.03, 0.30] near ground
-5. RANS residuals       : parsed from log.buoyantSimpleFoam (continuity < 1e-4,
+5. RANS residuals       : parsed from log.simpleFoam (continuity < 1e-4,
                           momentum < 1e-3 at last iteration)
 6. Altitude drift       : |u_cfd(z>3km) - u_era5(z>3km)| / |u_era5| < 0.10
 
@@ -138,11 +138,11 @@ def check_turbulence_intensity(x, y, z, U, k, z_max: float = 100.0) -> dict:
 
 
 def check_rans_residuals(case_dir: Path) -> dict:
-    """Parse RANS residuals from log.buoyantSimpleFoam.
+    """Parse RANS residuals from log.simpleFoam.
 
     Returns final-iteration continuity and momentum residuals.
     """
-    log_file = case_dir / "log.buoyantSimpleFoam"
+    log_file = case_dir / "log.simpleFoam"
     if not log_file.exists():
         return {"ok": True, "note": "log file not found — skipped"}
 

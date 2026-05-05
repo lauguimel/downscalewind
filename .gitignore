@@ -52,6 +52,7 @@ ENV/
 .ipynb_checkpoints/
 *.ipynb_checkpoints
 *.ipynb
+notebooks/__marimo__/
 
 # Éditeurs
 .vscode/
@@ -78,6 +79,7 @@ constant/polyMesh/
 # Logs
 logs/
 *.log
+*.sarif
 
 # Fichiers de checkpoints
 .checkpoints/

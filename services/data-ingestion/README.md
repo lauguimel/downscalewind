@@ -8,7 +8,7 @@ Ce service télécharge et prépare toutes les données d'entrée du pipeline :
 - **ERA5** : réanalyse ECMWF 25 km / 6h (training + validation historique)
 - **IFS ECMWF** : prévisions Open-Meteo (inférence opérationnelle)
 - **SRTM GL1** : topographie 30m (stub — V2)
-- **CGLS-LC100** : couverture du sol 100m pour la rugosité z₀ (stub — V2)
+- **ESA WorldCover 2021** : occupation du sol 10m + **ETH Canopy Height 2020** (10m) → z₀, d, LAD
 
 ## Schéma Zarr de sortie
 

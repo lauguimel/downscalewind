@@ -1,0 +1,38 @@
+#!/bin/bash -l
+#PBS -N v2_wcc
+#PBS -l select=1:ncpus=1:mem=4GB
+#PBS -l walltime=00:10:00
+#PBS -j oe
+#PBS -m n
+#PBS -J 1-820
+
+set -euo pipefail
+
+OF_SIF="$HOME/dsw/containers/openfoam_v2512.sif"
+SITES_LIST="$HOME/dsw/data/campaign/complex_terrain_v1/sites_list.txt"
+OUTPUT="/scratch/maitreje/dsw/complex_terrain_v1"
+IDX=${PBS_ARRAY_INDEX:-1}
+
+export CONTAINER_RUNTIME=apptainer
+
+SITE_ID=$(sed -n "${IDX}p" "$SITES_LIST")
+MESH_DIR="${OUTPUT}/sites/${SITE_ID}/mesh"
+
+# Skip if no mesh or already has Cx
+[ -f "${MESH_DIR}/constant/polyMesh/points" ] || exit 0
+[ -f "${MESH_DIR}/0/Cx" ] && exit 0
+
+# Minimal 0/p for writeCellCentres
+mkdir -p "${MESH_DIR}/0"
+cat > "${MESH_DIR}/0/p" << 'FOAM'
+FoamFile { version 2.0; format ascii; class volScalarField; object p; }
+dimensions [0 2 -2 0 0 0 0];
+internalField uniform 0;
+boundaryField { ".*" { type zeroGradient; } }
+FOAM
+
+apptainer exec --bind "${MESH_DIR}:/home/ofuser/run" "$OF_SIF" \
+    bash -c "source /usr/lib/openfoam/openfoam2512/etc/bashrc && cd /home/ofuser/run && postProcess -func writeCellCentres -time 0" \
+    > "${MESH_DIR}/log.writeCellCentres" 2>&1
+
+[ -f "${MESH_DIR}/0/Cx" ] && echo "OK: ${SITE_ID}" || echo "FAIL: ${SITE_ID}"

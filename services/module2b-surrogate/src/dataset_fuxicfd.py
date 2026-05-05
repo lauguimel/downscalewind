@@ -84,12 +84,24 @@ class FuXiCFDTransportDataset(Dataset):
         self.split = split
         self.augment = augment and split == "train"
 
-        # Discover and sort case directories
+        # Discover and sort case directories, filtering diverged cases
         all_cases = sorted([
             p for p in self.data_dir.iterdir()
             if p.is_dir() and p.name.startswith("case_")
             and (p / "outputs_Tq.npz").exists()
+            and self._is_valid_case(p)
         ])
+
+    @staticmethod
+    def _is_valid_case(case_dir: Path) -> bool:
+        """Quick check: reject cases where T field is mostly out of range."""
+        try:
+            tq = np.load(case_dir / "outputs_Tq.npz")
+            T = tq["T"]
+            bad_frac = ((T < 220) | (T > 320)).sum() / T.size
+            return bad_frac < 0.5  # reject if >50% cells out of range
+        except Exception:
+            return False
 
         if manifest and Path(manifest).exists():
             with open(manifest) as f:
@@ -139,6 +151,10 @@ class FuXiCFDTransportDataset(Dataset):
         tq = np.load(case_dir / "outputs_Tq.npz")
         T = tq["T"].astype(np.float32)   # (27, 300, 300)
         q = tq["q"].astype(np.float32)
+
+        # Clip to physically plausible range (transport solver may not converge)
+        T = np.clip(T, 220.0, 320.0)  # valid atmospheric T range
+        q = np.clip(q, 0.0, 0.025)    # valid q range (0 to 25 g/kg)
 
         nz, ny, nx = u.shape
 

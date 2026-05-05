@@ -1,0 +1,60 @@
+# terrainBlockMesher — structured mesh test
+#
+# All mesh parameters in one place. Change and re-run.
+#
+# Usage:
+#   cd services/module2a-cfd
+#   python run_tbm_case.py ../../configs/tbm_test.yaml
+#
+# Mesh only (no solve):
+#   python run_tbm_case.py ../../configs/tbm_test.yaml --mesh-only
+
+study:
+  name: tbm_test
+  site: perdigao
+  timestamp: "2017-05-04T22:00"       # SW wind, near-neutral
+  n_iterations: 300
+  write_interval: 100
+
+mesh:
+  mesher: terrainBlockMesher           # "terrainBlockMesher" or "cfMesh"
+  docker_image: "terrainblockmesher:of24"
+
+  # --- Inner zone (structured square) ---
+  inner_size_m: 2000                   # side length of inner square [m]
+  inner_blocks: 4                      # blocks per direction → block size = inner_size_m / inner_blocks
+  cells_per_block_xy: 3                # cells per block horizontally (min 3 for spline interp)
+  # Effective horizontal resolution = inner_size_m / (inner_blocks * cells_per_block_xy)
+  # Example: 2000 / (4*3) = 167m
+
+  # --- Vertical ---
+  height_m: 5000                       # domain height above terrain [m]
+  cells_z: 20                          # vertical cells
+  grading_z: 10                        # vertical grading (>1 = finer near ground)
+
+  # --- Cylindrical outer zone ---
+  cylinder_radius_m: 7000              # octagonal domain radius [m]
+  cylinder_sections: 8                 # number of lateral faces (8 = octagon)
+  radial_cells: 20                     # cells in radial direction (inner→outer)
+  radial_grading: 10                   # radial grading (>1 = finer near inner zone)
+
+  # --- Blending (terrain→flat transition at inner box edge) ---
+  blend_distance_m: 2000              # distance over which terrain blends to flat
+
+  # --- STL ---
+  stl_resolution_m: 50                 # terrain STL resolution (independent of mesh)
+
+  # --- Projection ---
+  max_dist_proj: 15000
+  p_above_z: 8000                      # z coordinate of point well above STL
+
+solver:
+  image: "microfluidica/openfoam:latest"
+  name: simpleFoam
+  thermal: false
+  coriolis: false
+  canopy: false
+
+validation:
+  obs_zarr: "data/raw/perdigao_obs.zarr"
+  output_dir: "data/validation/tbm_test"

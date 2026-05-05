@@ -110,7 +110,7 @@ def run_ingestion(
         return True
 
     log.info("  %s: downloading ERA5...", site_id)
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
 
     # Check if data was actually written (checkpoint sentinel may fail
     # but the Zarr store is still valid)
@@ -240,6 +240,8 @@ def main():
                         help="Training dataset dir (for --verify)")
     parser.add_argument("--max-sites", type=int, default=None,
                         help="Limit number of sites (for testing)")
+    parser.add_argument("--n-workers", type=int, default=16,
+                        help="Parallel CDS requests (default: 16)")
     args = parser.parse_args()
 
     # Read sites
