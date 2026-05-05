@@ -8,6 +8,9 @@ Supports:
       s4:          charbonnier + amplitude(spectral) + divergence(physics)
   --resume <path>   reload model from checkpoint (continue training)
   --warmup-epochs   linear warmup before cosine decay (S4 recipe)
+  --use-geo         inject native z/AGL channels into the vertical heads
+  --use-residual    learn CFD minus a simple ERA5-lifted baseline
+  --agl-weight-*    boost near-ground pointwise data terms
 """
 from __future__ import annotations
 
@@ -17,66 +20,17 @@ import math
 import time
 from pathlib import Path
 
-import numpy as np
 import torch
-import torch.nn.functional as F
 import yaml
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 
 from src.dataset_v2 import DEFAULT_NORM
 from src.dataset_v2_vit import WindV2DatasetViT
+from src.losses_v2 import mse_loss, total_loss
 from src.model_vit_v2 import build_vit_v2
 
 logger = logging.getLogger(__name__)
-
-
-# ── Loss components ──────────────────────────────────────────────────────────
-
-def charbonnier_loss(pred: torch.Tensor, target: torch.Tensor,
-                     eps: float = 1e-6) -> torch.Tensor:
-    return torch.sqrt((pred - target) ** 2 + eps ** 2).mean()
-
-
-def amplitude_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Spectral amplitude loss on z-mean 2D fields."""
-    pred_2d = pred.mean(dim=-1)
-    target_2d = target.mean(dim=-1)
-    pred_amp = torch.fft.rfft2(pred_2d, dim=(-2, -1)).abs()
-    target_amp = torch.fft.rfft2(target_2d, dim=(-2, -1)).abs()
-    return (pred_amp - target_amp).abs().mean()
-
-
-def divergence_loss(pred: torch.Tensor, dx: float = 33.333) -> torch.Tensor:
-    """Soft div-free penalty assuming uniform vertical spacing (cheap approx)."""
-    u, v, w = pred[:, 0], pred[:, 1], pred[:, 2]
-    du_dx = (u[:, :, 2:, :] - u[:, :, :-2, :]) / (2.0 * dx)
-    dv_dy = (v[:, 2:, :, :] - v[:, :-2, :, :]) / (2.0 * dx)
-    dw_dz = (w[:, :, :, 2:] - w[:, :, :, :-2]) / 2.0   # spacing absorbed in scale
-    ny = min(du_dx.shape[1], dv_dy.shape[1])
-    nx = min(du_dx.shape[2], dv_dy.shape[2])
-    nz = min(du_dx.shape[3], dw_dz.shape[3])
-    div = (du_dx[:, 1:ny+1, :nx, 1:nz+1]
-           + dv_dy[:, :ny, 1:nx+1, 1:nz+1]
-           + dw_dz[:, 1:ny+1, 1:nx+1, :nz])
-    return div.pow(2).mean()
-
-
-def total_loss(pred: torch.Tensor, target: torch.Tensor, kind: str,
-               w_amp: float = 0.1, w_div: float = 0.05) -> tuple[torch.Tensor, dict]:
-    if kind == "mse":
-        l = F.mse_loss(pred, target)
-        return l, {"mse": l.item()}
-    if kind == "charbonnier":
-        l = charbonnier_loss(pred, target)
-        return l, {"char": l.item()}
-    if kind == "s4":
-        l_c = charbonnier_loss(pred, target)
-        l_a = amplitude_loss(pred, target)
-        l_d = divergence_loss(pred)
-        l = l_c + w_amp * l_a + w_div * l_d
-        return l, {"char": l_c.item(), "amp": l_a.item(), "div": l_d.item()}
-    raise ValueError(f"unknown loss-type {kind}")
 
 
 # ── Norm overrides (Welford → DEFAULT_NORM keys) ─────────────────────────────
@@ -87,20 +41,39 @@ def _load_norm_overrides(path):
     raw = yaml.safe_load(Path(path).read_text())
     s = raw["stats"]
     n = {}
-    if "U_x" in s: n["U_uv_scale"] = max(s["U_x"]["std"], 1e-3)
-    if "U_z" in s: n["U_w_scale"] = max(s["U_z"]["std"], 1e-3)
+    if "U_x" in s:
+        n["U_x_offset"] = s["U_x"]["mean"]
+        n["U_uv_scale"] = max(s["U_x"]["std"], 1e-3)
+    if "U_y" in s:
+        n["U_y_offset"] = s["U_y"]["mean"]
+        n["U_uv_scale"] = max(n.get("U_uv_scale", 0.0), s["U_y"]["std"], 1e-3)
+    if "U_z" in s:
+        n["U_z_offset"] = s["U_z"]["mean"]
+        n["U_w_scale"] = max(s["U_z"]["std"], 1e-3)
     if "T" in s:   n["T_offset"], n["T_scale"] = s["T"]["mean"], max(s["T"]["std"], 1e-3)
-    if "q" in s:   n["q_scale"] = max(s["q"]["std"], 1e-6)
+    if "q" in s:   n["q_offset"], n["q_scale"] = s["q"]["mean"], max(s["q"]["std"], 1e-6)
     if "terrain" in s: n["terrain_scale"] = max(s["terrain"]["std"], 1.0)
-    if "era5_u" in s:  n["era5_u_scale"]  = max(s["era5_u"]["std"], 1.0)
-    if "era5_v" in s:  n["era5_v_scale"]  = max(s["era5_v"]["std"], 1.0)
+    if "z" in s:       n["z_scale"]       = max(s["z"]["std"], 1.0)
+    if "agl" in s:     n["agl_scale"]     = max(s["agl"]["std"], 1.0)
+    if "era5_u" in s:
+        n["era5_u_offset"] = s["era5_u"]["mean"]
+        n["era5_u_scale"] = max(s["era5_u"]["std"], 1.0)
+    if "era5_v" in s:
+        n["era5_v_offset"] = s["era5_v"]["mean"]
+        n["era5_v_scale"] = max(s["era5_v"]["std"], 1.0)
     if "era5_T" in s:  n["era5_T_offset"], n["era5_T_scale"] = (
         s["era5_T"]["mean"], max(s["era5_T"]["std"], 1.0))
-    if "era5_q" in s:  n["era5_q_scale"]  = max(s["era5_q"]["std"], 1e-6)
+    if "era5_q" in s:
+        n["era5_q_offset"] = s["era5_q"]["mean"]
+        n["era5_q_scale"] = max(s["era5_q"]["std"], 1e-6)
     if "t2m" in s:     n["t2m_offset"], n["t2m_scale"] = s["t2m"]["mean"], max(s["t2m"]["std"], 1.0)
     if "d2m" in s:     n["d2m_offset"], n["d2m_scale"] = s["d2m"]["mean"], max(s["d2m"]["std"], 1.0)
-    if "u10" in s:     n["u10_scale"]     = max(s["u10"]["std"], 1.0)
-    if "v10" in s:     n["v10_scale"]     = max(s["v10"]["std"], 1.0)
+    if "u10" in s:
+        n["u10_offset"] = s["u10"]["mean"]
+        n["u10_scale"] = max(s["u10"]["std"], 1.0)
+    if "v10" in s:
+        n["v10_offset"] = s["v10"]["mean"]
+        n["v10_scale"] = max(s["v10"]["std"], 1.0)
     if "pressure" in s:
         n["pressure_offset"], n["pressure_scale"] = (
             s["pressure"]["mean"], max(s["pressure"]["std"], 1.0))
@@ -136,6 +109,16 @@ def main():
     ap.add_argument("--loss-type", default="mse", choices=["mse", "charbonnier", "s4"])
     ap.add_argument("--w-amp", type=float, default=0.1)
     ap.add_argument("--w-div", type=float, default=0.05)
+    ap.add_argument("--use-geo", action="store_true",
+                    help="Inject native z/AGL channels in the ViT vertical head.")
+    ap.add_argument("--include-slopes", action="store_true",
+                    help="Add terrain slope_x/slope_y channels to the 2D terrain encoder.")
+    ap.add_argument("--use-residual", action="store_true",
+                    help="Train on CFD minus ERA5-lifted baseline instead of absolute fields.")
+    ap.add_argument("--agl-weight-alpha", type=float, default=0.0,
+                    help="Near-ground loss boost: weight=1+alpha*exp(-AGL/H).")
+    ap.add_argument("--agl-weight-height", type=float, default=300.0,
+                    help="E-folding height H in metres for AGL loss weighting.")
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--max-train-cases", type=int, default=None)
@@ -149,19 +132,40 @@ def main():
 
     norm = {**DEFAULT_NORM, **_load_norm_overrides(args.norm_yaml)}
 
-    train_ds = WindV2DatasetViT(args.data_dir, args.splits_yaml, "train", norm=norm)
-    val_ds = WindV2DatasetViT(args.data_dir, args.splits_yaml, "val", norm=norm)
+    use_weight = args.agl_weight_alpha > 0.0
+    ds_kwargs = dict(
+        norm=norm,
+        include_slopes=args.include_slopes,
+        return_geo=args.use_geo,
+        use_residual=args.use_residual,
+        return_weight=use_weight,
+        agl_weight_alpha=args.agl_weight_alpha,
+        agl_weight_height=args.agl_weight_height,
+    )
+    train_ds = WindV2DatasetViT(args.data_dir, args.splits_yaml, "train", **ds_kwargs)
+    val_ds = WindV2DatasetViT(args.data_dir, args.splits_yaml, "val", **ds_kwargs)
     if args.max_train_cases is not None:
         train_ds.cases = train_ds.cases[: args.max_train_cases]
     if args.max_val_cases is not None:
         val_ds.cases = val_ds.cases[: args.max_val_cases]
 
-    terrain, era5, target, _ = train_ds[0]
+    sample = train_ds[0]
+    terrain, era5 = sample[0], sample[1]
+    geo = sample[2] if args.use_geo else None
+    target_idx = 3 if args.use_geo else 2
+    target = sample[target_idx]
     era5_dim = era5.shape[0]
     nz = target.shape[-1]
-    logger.info("terrain %s | era5 %s | target %s", terrain.shape, era5.shape, target.shape)
+    geo_channels = geo.shape[0] if geo is not None else 0
+    logger.info("terrain %s | era5 %s | geo_ch=%d | target %s",
+                terrain.shape, era5.shape, geo_channels, target.shape)
+    logger.info("options: residual=%s slopes=%s agl_weight_alpha=%.2f H=%.1f",
+                args.use_residual, args.include_slopes,
+                args.agl_weight_alpha, args.agl_weight_height)
 
-    model = build_vit_v2(preset=args.preset, era5_input_dim=era5_dim, nz=nz).to(args.device)
+    model = build_vit_v2(preset=args.preset, era5_input_dim=era5_dim, nz=nz,
+                         terrain_in_channels=terrain.shape[0],
+                         geo_channels=geo_channels).to(args.device)
     n_params = sum(p.numel() for p in model.parameters())
     logger.info("ViT params: %.2f M (preset=%s)", n_params / 1e6, args.preset)
 
@@ -188,6 +192,19 @@ def main():
                             num_workers=args.num_workers, pin_memory=True,
                             persistent_workers=args.num_workers > 0)
 
+    def unpack_batch(batch):
+        i = 0
+        terrain_b = batch[i]; i += 1
+        era5_b = batch[i]; i += 1
+        geo_b = None
+        if args.use_geo:
+            geo_b = batch[i]; i += 1
+        tgt_b = batch[i]; i += 1
+        weight_b = None
+        if use_weight:
+            weight_b = batch[i]; i += 1
+        return terrain_b, era5_b, geo_b, tgt_b, weight_b
+
     args.out_dir.mkdir(parents=True, exist_ok=True)
     best_val, history = float("inf"), []
     for ep in range(args.epochs):
@@ -196,12 +213,16 @@ def main():
         train_loss = 0.0
         loss_components_acc: dict[str, float] = {}
         for step, batch in enumerate(train_loader):
-            terrain, era5, tgt, _ = batch
+            terrain, era5, geo, tgt, weight = unpack_batch(batch)
             terrain = terrain.to(args.device, non_blocking=True)
             era5 = era5.to(args.device, non_blocking=True)
+            if geo is not None:
+                geo = geo.to(args.device, non_blocking=True)
             tgt = tgt.to(args.device, non_blocking=True)
-            pred = model(terrain, era5)
-            loss, comp = total_loss(pred, tgt, args.loss_type,
+            if weight is not None:
+                weight = weight.to(args.device, non_blocking=True)
+            pred = model(terrain, era5, geo)
+            loss, comp = total_loss(pred, tgt, args.loss_type, weight=weight,
                                     w_amp=args.w_amp, w_div=args.w_div)
             optim.zero_grad()
             loss.backward()
@@ -221,25 +242,34 @@ def main():
         model.eval()
         val_loss = 0.0
         val_mse = 0.0
+        val_mse_agl = 0.0
         with torch.no_grad():
             for batch in val_loader:
-                terrain, era5, tgt, _ = batch
+                terrain, era5, geo, tgt, weight = unpack_batch(batch)
                 terrain = terrain.to(args.device, non_blocking=True)
                 era5 = era5.to(args.device, non_blocking=True)
+                if geo is not None:
+                    geo = geo.to(args.device, non_blocking=True)
                 tgt = tgt.to(args.device, non_blocking=True)
-                pred = model(terrain, era5)
-                l, _ = total_loss(pred, tgt, args.loss_type,
+                if weight is not None:
+                    weight = weight.to(args.device, non_blocking=True)
+                pred = model(terrain, era5, geo)
+                l, _ = total_loss(pred, tgt, args.loss_type, weight=weight,
                                   w_amp=args.w_amp, w_div=args.w_div)
                 val_loss += l.item()
-                val_mse += F.mse_loss(pred, tgt).item()
+                val_mse += mse_loss(pred, tgt).item()
+                val_mse_agl += mse_loss(pred, tgt, weight).item() if weight is not None else 0.0
         val_loss /= max(len(val_loader), 1)
         val_mse /= max(len(val_loader), 1)
+        if use_weight:
+            val_mse_agl /= max(len(val_loader), 1)
         wall = time.time() - t0
-        logger.info("EP %d  train=%.5f val=%.5f val_mse=%.5f comp=%s lr=%.2e (%.0fs)",
-                    ep, train_loss, val_loss, val_mse, loss_components_acc,
+        logger.info("EP %d  train=%.5f val=%.5f val_mse=%.5f val_mse_agl=%.5f comp=%s lr=%.2e (%.0fs)",
+                    ep, train_loss, val_loss, val_mse, val_mse_agl, loss_components_acc,
                     optim.param_groups[0]["lr"], wall)
         history.append({"epoch": ep, "train_loss": train_loss, "val_loss": val_loss,
                         "val_mse": val_mse, "lr": optim.param_groups[0]["lr"],
+                        "val_mse_agl": val_mse_agl if use_weight else None,
                         "wall_s": wall, **{f"train_{k}": v for k, v in loss_components_acc.items()}})
         if val_loss < best_val:
             best_val = val_loss

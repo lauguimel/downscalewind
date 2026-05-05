@@ -43,25 +43,35 @@ NI, NJ, NK = 180, 180, 40
 # Default normalisation. Replace with data-driven stats once
 # compute_norm_stats_v2.py has run on the train split.
 DEFAULT_NORM = {
+    "U_x_offset": 0.0,
+    "U_y_offset": 0.0,
+    "U_z_offset": 0.0,
     "U_uv_scale": 15.0,    # m/s
     "U_w_scale":  3.0,     # m/s
     "T_offset":   290.0,   # K (centring)
     "T_scale":    10.0,    # K
+    "q_offset":   0.0,
     "q_scale":    0.01,    # kg/kg
     "terrain_scale": 1500.0,  # m
     "z_scale":      2500.0,   # m (top of inner block)
+    "agl_scale":    2500.0,   # m
     "z0_scale":     0.5,      # m (typical effective z0)
     "lat_scale":    90.0,     # deg (range [-90,90])
+    "era5_u_offset": 0.0,
     "era5_u_scale": 15.0,
+    "era5_v_offset": 0.0,
     "era5_v_scale": 15.0,
     "era5_T_offset": 270.0,
     "era5_T_scale":  20.0,
+    "era5_q_offset": 0.0,
     "era5_q_scale":  0.01,
     "t2m_offset":    290.0,
     "t2m_scale":     10.0,
     "d2m_offset":    285.0,
     "d2m_scale":     10.0,
+    "u10_offset":     0.0,
     "u10_scale":     10.0,
+    "v10_offset":     0.0,
     "v10_scale":     10.0,
     "pressure_offset": 700.0,  # hPa centring
     "pressure_scale":  300.0,
@@ -101,11 +111,21 @@ class WindV2Dataset(Dataset):
         *,
         norm: dict | None = None,
         include_z: bool = True,
+        include_slopes: bool = False,
+        use_residual: bool = False,
+        return_weight: bool = False,
+        agl_weight_alpha: float = 0.0,
+        agl_weight_height: float = 300.0,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.split = split
         self.norm = {**DEFAULT_NORM, **(norm or {})}
         self.include_z = include_z
+        self.include_slopes = include_slopes
+        self.use_residual = use_residual
+        self.return_weight = return_weight
+        self.agl_weight_alpha = agl_weight_alpha
+        self.agl_weight_height = agl_weight_height
 
         with open(splits_yaml) as f:
             splits = yaml.safe_load(f)
@@ -154,6 +174,13 @@ class WindV2Dataset(Dataset):
         chans.append(np.broadcast_to(terrain[:, :, None], (NI, NJ, NK)).copy()
                      / n["terrain_scale"])
 
+        if self.include_slopes:
+            slope_y, slope_x = np.gradient(terrain, 33.333, 33.333)
+            chans.append(np.broadcast_to(slope_x[:, :, None], (NI, NJ, NK)).copy()
+                         .astype(np.float32))
+            chans.append(np.broadcast_to(slope_y[:, :, None], (NI, NJ, NK)).copy()
+                         .astype(np.float32))
+
         # 2. z (real altitude) (NI, NJ, NK) — explicit grid deformation
         if self.include_z:
             z = np.asarray(store["coords/z"][:], dtype=np.float32)
@@ -162,7 +189,7 @@ class WindV2Dataset(Dataset):
         # 3. AGL (z - terrain), more useful than absolute z for log-law
         z = np.asarray(store["coords/z"][:], dtype=np.float32)
         agl = z - terrain[:, :, None]
-        chans.append(agl / n["z_scale"])
+        chans.append(agl / n["agl_scale"])
 
         # 4. z0 (scalar) broadcast
         z0 = float(store["input"].attrs.get("z0_eff", 0.0))
@@ -177,10 +204,10 @@ class WindV2Dataset(Dataset):
         # Map ERA5 pressure profile to the NK levels using the column mean z.
         # We use the column-mean AGL as a proxy for k → height mapping.
         for var, scale, offset in [
-            ("u", n["era5_u_scale"], 0.0),
-            ("v", n["era5_v_scale"], 0.0),
+            ("u", n["era5_u_scale"], n["era5_u_offset"]),
+            ("v", n["era5_v_scale"], n["era5_v_offset"]),
             ("T", n["era5_T_scale"], n["era5_T_offset"]),
-            ("q", n["era5_q_scale"], 0.0),
+            ("q", n["era5_q_scale"], n["era5_q_offset"]),
         ]:
             era5_var = np.asarray(store[f"input/era5_3d/{var}"][:], dtype=np.float32)
             # Take centre of 3×3 grid: shape (N_p,)
@@ -205,8 +232,8 @@ class WindV2Dataset(Dataset):
         for var, scale, offset in [
             ("t2m", n["t2m_scale"], n["t2m_offset"]),
             ("d2m", n["d2m_scale"], n["d2m_offset"]),
-            ("u10", n["u10_scale"], 0.0),
-            ("v10", n["v10_scale"], 0.0),
+            ("u10", n["u10_scale"], n["u10_offset"]),
+            ("v10", n["v10_scale"], n["v10_offset"]),
         ]:
             arr = np.asarray(store[f"input/era5_surface/{var}"][:], dtype=np.float32)
             val = float(arr[1, 1])
@@ -221,18 +248,58 @@ class WindV2Dataset(Dataset):
         T = np.asarray(store["target/T"][:], dtype=np.float32)
         q = np.asarray(store["target/q"][:], dtype=np.float32)
         return np.stack([
-            U[..., 0] / n["U_uv_scale"],
-            U[..., 1] / n["U_uv_scale"],
-            U[..., 2] / n["U_w_scale"],
+            (U[..., 0] - n["U_x_offset"]) / n["U_uv_scale"],
+            (U[..., 1] - n["U_y_offset"]) / n["U_uv_scale"],
+            (U[..., 2] - n["U_z_offset"]) / n["U_w_scale"],
             (T - n["T_offset"]) / n["T_scale"],
-            q / n["q_scale"],
+            (q - n["q_offset"]) / n["q_scale"],
         ], axis=0)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, str]:
+    def _build_era5_baseline_tensor(self, store: Any) -> np.ndarray:
+        """Build a simple ERA5-lifted baseline on the CFD grid, normalised like target."""
+        n = self.norm
+
+        def profile(var: str) -> np.ndarray:
+            arr = np.asarray(store[f"input/era5_3d/{var}"][:], dtype=np.float32)
+            prof_1d = arr[1, 1, :]
+            k_idx = np.linspace(0, len(prof_1d) - 1, NK, dtype=np.float32)
+            return np.interp(k_idx, np.arange(len(prof_1d), dtype=np.float32),
+                             prof_1d).astype(np.float32)
+
+        u = np.broadcast_to(profile("u")[None, None, :], (NI, NJ, NK)).copy()
+        v = np.broadcast_to(profile("v")[None, None, :], (NI, NJ, NK)).copy()
+        T = np.broadcast_to(profile("T")[None, None, :], (NI, NJ, NK)).copy()
+        q = np.broadcast_to(profile("q")[None, None, :], (NI, NJ, NK)).copy()
+        w = np.zeros((NI, NJ, NK), dtype=np.float32)
+
+        return np.stack([
+            (u - n["U_x_offset"]) / n["U_uv_scale"],
+            (v - n["U_y_offset"]) / n["U_uv_scale"],
+            (w - n["U_z_offset"]) / n["U_w_scale"],
+            (T - n["T_offset"]) / n["T_scale"],
+            (q - n["q_offset"]) / n["q_scale"],
+        ], axis=0).astype(np.float32)
+
+    def _build_loss_weight(self, store: Any) -> np.ndarray:
+        terrain = np.asarray(store["input/terrain"][:], dtype=np.float32)
+        z = np.asarray(store["coords/z"][:], dtype=np.float32)
+        agl = np.maximum(z - terrain[:, :, None], 0.0)
+        alpha = float(self.agl_weight_alpha)
+        height = max(float(self.agl_weight_height), 1.0)
+        weight = 1.0 + alpha * np.exp(-agl / height)
+        return weight[None, ...].astype(np.float32)
+
+    def __getitem__(self, idx: int):
         case_dir = self.cases[idx]
         store = zarr.open_group(str(case_dir / "grid.zarr"), mode="r")
         inp = self._build_input_tensor(store)
         tgt = self._build_target_tensor(store)
+        if self.use_residual:
+            tgt = tgt - self._build_era5_baseline_tensor(store)
+        if self.return_weight:
+            weight = self._build_loss_weight(store)
+            return (torch.from_numpy(inp), torch.from_numpy(tgt),
+                    torch.from_numpy(weight), case_dir.name)
         return torch.from_numpy(inp), torch.from_numpy(tgt), case_dir.name
 
 

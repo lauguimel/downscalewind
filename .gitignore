@@ -3,9 +3,28 @@ data/raw/
 data/processed/
 data/cfd-database/
 data/mlruns/
+data/campaign/
+data/cases/
+data/fuxicfd_test/
+data/inflow_profiles/
+data/models/
+data/simulations.db
+data/validation/
+data/website/
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 !data/cfd-database/.gitkeep
+
+# Local reference PDFs/exports used during paper review
+references/
+
+# Local scratch cases and tool caches
+.cache/
+case_topA_inletOutlet/
+case_topB_piov_noc/
+case_topC_piov_limited/
+valo/
+services/module2a-cfd/tools/terrainBlockMesher/iwesol/
 
 # Cache Python
 __pycache__/

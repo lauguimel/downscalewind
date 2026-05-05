@@ -20,7 +20,6 @@ from .model_vit import (
     PatchEmbed2D,
     TransformerBlock,
     CrossAttentionBlock,
-    FiLMVerticalHead,
     ERA5TokenEncoder,
     _init_weights,
 )
@@ -51,6 +50,47 @@ class UpsampleDecoder2D_V2(nn.Module):
         return x                       # (..., 180, 180)
 
 
+class GeoFiLMVerticalHead(nn.Module):
+    """FiLM vertical head with optional native-grid geometry channels.
+
+    geo is expected as (B, C_geo, H, W, nz), typically [z_norm, agl_norm].
+    """
+
+    def __init__(self, feat_dim: int = 64, nz: int = 40,
+                 era5_input_dim: int = 400, hidden: int = 32,
+                 geo_channels: int = 0):
+        super().__init__()
+        self.nz = nz
+        self.geo_channels = geo_channels
+        self.vert_basis = nn.Parameter(torch.randn(1, feat_dim, 1, 1, nz) * 0.02)
+        self.film_net = nn.Sequential(
+            nn.Linear(era5_input_dim, 128), nn.GELU(),
+            nn.Linear(128, feat_dim * nz * 2),
+        )
+        self.refine = nn.Sequential(
+            nn.Conv3d(feat_dim + geo_channels, hidden, 3, padding=1), nn.GELU(),
+            nn.Conv3d(hidden, hidden, 3, padding=1), nn.GELU(),
+            nn.Conv3d(hidden, 1, 1),
+        )
+
+    def forward(self, feat2d: torch.Tensor, era5: torch.Tensor,
+                geo: torch.Tensor | None = None) -> torch.Tensor:
+        B, C, H, W = feat2d.shape
+        vol = feat2d.unsqueeze(-1) * self.vert_basis
+
+        film = self.film_net(era5.flatten(1)).view(B, C, self.nz, 2)
+        gamma = film[:, :, :, 0]
+        beta = film[:, :, :, 1]
+        vol = vol * (1 + gamma[:, :, None, None, :]) + beta[:, :, None, None, :]
+
+        if self.geo_channels > 0:
+            if geo is None:
+                raise ValueError("geo tensor is required when geo_channels > 0")
+            vol = torch.cat([vol, geo], dim=1)
+
+        return self.refine(vol)
+
+
 class TerrainViT_V2_S3(nn.Module):
     """Cross-attention ViT for 180×180×40 grid.
 
@@ -60,7 +100,8 @@ class TerrainViT_V2_S3(nn.Module):
                  embed_dim=384, depth=12, n_heads=8,
                  mlp_ratio=4.0, drop=0.1, feat_dim=64,
                  era5_input_dim=400, n_output_vars=5,
-                 n_cross_layers=4, n_era5_tokens=16):
+                 n_cross_layers=4, n_era5_tokens=16,
+                 terrain_in_channels=2, geo_channels=0):
         super().__init__()
         if img_size % patch_size != 0:
             raise ValueError(f"img_size {img_size} must be divisible by patch_size {patch_size}")
@@ -69,7 +110,8 @@ class TerrainViT_V2_S3(nn.Module):
         self.img_size = img_size
         n_self = depth - n_cross_layers
 
-        self.patch_embed = PatchEmbed2D(2, embed_dim, img_size, patch_size)
+        self.patch_embed = PatchEmbed2D(terrain_in_channels, embed_dim,
+                                        img_size, patch_size)
         self.era5_tokens = ERA5TokenEncoder(era5_input_dim, embed_dim, n_era5_tokens)
 
         self.cross_blocks = nn.ModuleList([
@@ -82,11 +124,13 @@ class TerrainViT_V2_S3(nn.Module):
 
         self.upsample = UpsampleDecoder2D_V2(embed_dim, feat_dim, pg, out_size=img_size)
         self.heads = nn.ModuleList([
-            FiLMVerticalHead(feat_dim, nz, era5_input_dim)
+            GeoFiLMVerticalHead(feat_dim, nz, era5_input_dim,
+                                geo_channels=geo_channels)
             for _ in range(n_output_vars)])
         self.apply(_init_weights)
 
-    def forward(self, terrain: torch.Tensor, era5: torch.Tensor) -> torch.Tensor:
+    def forward(self, terrain: torch.Tensor, era5: torch.Tensor,
+                geo: torch.Tensor | None = None) -> torch.Tensor:
         t_tokens = self.patch_embed(terrain)
         e_tokens = self.era5_tokens(era5)
         for blk in self.cross_blocks:
@@ -98,7 +142,7 @@ class TerrainViT_V2_S3(nn.Module):
         pg = self.patch_grid
         feat2d = t_tokens.transpose(1, 2).view(t_tokens.shape[0], -1, pg, pg)
         feat2d = self.upsample(feat2d)                # (B, feat_dim, 180, 180)
-        return torch.cat([h(feat2d, era5) for h in self.heads], dim=1)
+        return torch.cat([h(feat2d, era5, geo) for h in self.heads], dim=1)
 
 
 _PRESETS_V2 = {
