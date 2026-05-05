@@ -12,6 +12,7 @@ cd $PBS_O_WORKDIR
 : "${OUT:?OUT is required}"
 : "${SPLIT:=test}"
 : "${PRESET:=base}"
+: "${CROP_KM:=}"
 
 CAMPAIGN="/scratch/maitreje/dsw/complex_terrain_v1"
 DATA="/scratch/maitreje/dsw/training_v2"
@@ -29,6 +30,11 @@ for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
 done
 
 cd $HOME/dsw/services/module2b-surrogate
+CROP_ARGS=()
+if [ -n "$CROP_KM" ]; then
+  CROP_ARGS=(--central-crop-km "$CROP_KM")
+fi
+
 python -u evaluate_v2_physical.py \
   --model-type "$MODEL_TYPE" \
   --weights "$WEIGHTS" \
@@ -41,4 +47,5 @@ python -u evaluate_v2_physical.py \
   --amp \
   --per-case \
   --log-every 25 \
-  --vit-preset "$PRESET"
+  --vit-preset "$PRESET" \
+  "${CROP_ARGS[@]}"

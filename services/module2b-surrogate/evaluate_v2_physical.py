@@ -285,24 +285,71 @@ def predict_one(model, sample, model_type: str, use_geo: bool, device: torch.dev
     return pred.squeeze(0).detach().float().cpu()
 
 
-def update_metrics(acc: EvalAccumulators, pred, true, baseline, agl):
+def build_central_crop_mask(
+    ny: int,
+    nx: int,
+    crop_km: float | None,
+    dx_m: float = 33.333,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    if crop_km is None or crop_km <= 0:
+        return None, {
+            "central_crop_km": None,
+            "central_crop_cells_y": None,
+            "central_crop_cells_x": None,
+            "crop_y": None,
+            "crop_x": None,
+        }
+    cells = max(1, int(round(crop_km * 1000.0 / dx_m)))
+    cells_y = min(cells, ny)
+    cells_x = min(cells, nx)
+    y0 = (ny - cells_y) // 2
+    x0 = (nx - cells_x) // 2
+    mask = np.zeros((ny, nx), dtype=bool)
+    mask[y0:y0 + cells_y, x0:x0 + cells_x] = True
+    return mask, {
+        "central_crop_km": crop_km,
+        "central_crop_cells_y": cells_y,
+        "central_crop_cells_x": cells_x,
+        "crop_y": [y0, y0 + cells_y],
+        "crop_x": [x0, x0 + cells_x],
+    }
+
+
+def update_metrics(acc: EvalAccumulators, pred, true, baseline, agl,
+                   spatial_mask: np.ndarray | None = None):
+    volume_mask = None
+    if spatial_mask is not None:
+        volume_mask = np.broadcast_to(spatial_mask[:, :, None], agl.shape)
     for ci, vn in enumerate(VAR_NAMES):
         p = pred[vn]
         t = true[vn]
         b = baseline[vn]
-        acc.global_metrics[vn].update(p, t, b)
+        acc.global_metrics[vn].update(p, t, b, volume_mask)
         for band_name, lo, hi in AGL_BANDS:
             mask = (agl >= lo) & (agl < hi)
+            if volume_mask is not None:
+                mask = mask & volume_mask
             acc.agl_metrics[band_name][vn].update(p, t, b, mask)
         for k in range(p.shape[-1]):
-            acc.k_metrics[vn][k].update(p[..., k], t[..., k], b[..., k])
+            acc.k_metrics[vn][k].update(
+                p[..., k], t[..., k], b[..., k], spatial_mask
+            )
 
 
-def case_metrics(case_id: str, pred, true, baseline) -> dict[str, Any]:
+def case_metrics(case_id: str, pred, true, baseline,
+                 spatial_mask: np.ndarray | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {"case_id": case_id}
     for vn in VAR_NAMES:
-        err = pred[vn] - true[vn]
-        base_err = baseline[vn] - true[vn]
+        p = pred[vn]
+        t = true[vn]
+        b = baseline[vn]
+        if spatial_mask is not None:
+            volume_mask = np.broadcast_to(spatial_mask[:, :, None], p.shape)
+            p = p[volume_mask]
+            t = t[volume_mask]
+            b = b[volume_mask]
+        err = p - t
+        base_err = b - t
         rmse = float(np.sqrt(np.mean(err * err)))
         base_rmse = float(np.sqrt(np.mean(base_err * base_err)))
         out[f"rmse_{vn}"] = rmse
@@ -314,13 +361,14 @@ def case_metrics(case_id: str, pred, true, baseline) -> dict[str, Any]:
 
 
 def summarise(acc: EvalAccumulators, *, args, ck: dict[str, Any], n_cases: int,
-              elapsed_s: float) -> dict[str, Any]:
+              elapsed_s: float, crop_info: dict[str, Any]) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "model_type": args.model_type,
         "weights": str(args.weights),
         "split": args.split,
         "n_cases": n_cases,
         "elapsed_s": elapsed_s,
+        "crop": crop_info,
         "checkpoint_epoch": ck.get("epoch"),
         "checkpoint_val_loss": ck.get("val_loss"),
         "checkpoint_val_mse": ck.get("val_mse"),
@@ -367,8 +415,14 @@ def evaluate(args) -> dict[str, Any]:
     model = build_model(args, ck, sample0, device)
     use_geo = bool(ck_cfg.get("use_geo", False))
     use_residual = bool(ck_cfg.get("use_residual", False))
-    logger.info("Evaluating %s on %s: %d cases, residual=%s, geo=%s",
-                args.model_type, device, len(dataset), use_residual, use_geo)
+    target0 = get_target(sample0, args.model_type, use_geo)
+    spatial_mask, crop_info = build_central_crop_mask(
+        target0.shape[-3], target0.shape[-2], args.central_crop_km
+    )
+    logger.info(
+        "Evaluating %s on %s: %d cases, residual=%s, geo=%s, crop=%s",
+        args.model_type, device, len(dataset), use_residual, use_geo, crop_info,
+    )
 
     acc = EvalAccumulators()
     per_case: list[dict[str, Any]] = []
@@ -397,15 +451,17 @@ def evaluate(args) -> dict[str, Any]:
             z = np.asarray(store["coords/z"][:], dtype=np.float32)
             agl = z - terrain[:, :, None]
 
-            update_metrics(acc, pred, true, baseline, agl)
+            update_metrics(acc, pred, true, baseline, agl, spatial_mask)
             if args.per_case:
-                per_case.append(case_metrics(get_case_id(sample), pred, true, baseline))
+                per_case.append(case_metrics(
+                    get_case_id(sample), pred, true, baseline, spatial_mask
+                ))
             if (i + 1) % args.log_every == 0 or (i + 1) == len(dataset):
                 logger.info("  %d/%d cases", i + 1, len(dataset))
 
     elapsed = time.time() - t0
     summary = summarise(acc, args=args, ck=ck, n_cases=len(dataset),
-                        elapsed_s=elapsed)
+                        elapsed_s=elapsed, crop_info=crop_info)
     write_outputs(args.output, summary, per_case)
     logger.info("Saved metrics to %s", args.output)
     for vn in VAR_NAMES:
@@ -434,6 +490,8 @@ def main() -> int:
     ap.add_argument("--max-cases", type=int, default=None)
     ap.add_argument("--per-case", action="store_true")
     ap.add_argument("--log-every", type=int, default=25)
+    ap.add_argument("--central-crop-km", type=float, default=None,
+                    help="Evaluate only the central square crop, e.g. 2 for 2x2 km.")
     ap.add_argument("--vit-preset", default="base", choices=["small", "base", "large"])
     ap.add_argument("--width", type=int, default=32)
     ap.add_argument("--modes", type=int, nargs=3, default=(16, 16, 8))
