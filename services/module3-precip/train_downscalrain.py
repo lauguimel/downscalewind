@@ -306,30 +306,45 @@ def main(
                 best_metrics = dict(val_metrics)
                 _save_checkpoint(out_dir / "best.pt", model, optimizer, epoch, cfg, val_metrics, base_ds)
 
-    test_metrics = _evaluate(
+    test_last_metrics = _evaluate(
         model,
         test_loader,
         device,
         wet_threshold_mm=float(loss_cfg.wet_threshold_mm),
         heavy_threshold_mm=float(loss_cfg.heavy_rain_threshold_mm),
     )
+    _save_checkpoint(out_dir / "last.pt", model, optimizer, int(train_cfg.get("epochs", 50)), cfg, test_last_metrics, base_ds)
+
+    test_best_metrics = dict(test_last_metrics)
+    best_path = out_dir / "best.pt"
+    if best_path.exists():
+        best_ckpt = torch.load(best_path, map_location=device, weights_only=False)
+        model.load_state_dict(best_ckpt["model_state"])
+        test_best_metrics = _evaluate(
+            model,
+            test_loader,
+            device,
+            wet_threshold_mm=float(loss_cfg.wet_threshold_mm),
+            heavy_threshold_mm=float(loss_cfg.heavy_rain_threshold_mm),
+        )
+
     metrics = {
         "best_val": best_metrics,
-        "test_last": test_metrics,
+        "test_best": test_best_metrics,
+        "test_last": test_last_metrics,
         "n_train": len(train_ds),
         "n_val": len(val_ds),
         "n_test": len(test_ds),
         "elapsed_s": time.perf_counter() - t0,
     }
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
-    _save_checkpoint(out_dir / "last.pt", model, optimizer, int(train_cfg.get("epochs", 50)), cfg, test_metrics, base_ds)
 
     click.echo("\n" + "=" * 64)
     click.echo("DownscalRain CNN training complete")
     click.echo(f"  output:        {out_dir}")
     click.echo(f"  best val RMSE: {best_metric:.3f} mm/day")
-    click.echo(f"  test RMSE:     {test_metrics['rmse']:.3f} mm/day")
-    click.echo(f"  test MAE:      {test_metrics['mae']:.3f} mm/day")
+    click.echo(f"  test RMSE:     {test_best_metrics['rmse']:.3f} mm/day")
+    click.echo(f"  test MAE:      {test_best_metrics['mae']:.3f} mm/day")
     click.echo("=" * 64)
 
 
