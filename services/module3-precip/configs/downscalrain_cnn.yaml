@@ -1,0 +1,82 @@
+# DownscalRain CNN patch-to-point configuration.
+#
+# Workflow:
+#   1. Build station labels with the existing module3 precipitation pipeline.
+#   2. Build spatial patches:
+#        python build_patch_dataset.py --config configs/downscalrain_cnn.yaml
+#   3. Train CNN:
+#        python train_downscalrain.py --config configs/downscalrain_cnn.yaml
+
+patch_dataset:
+  station_table: "../../data/raw/precip_correction_cache/stations_precip_2022.parquet"
+  output_dir: "../../data/processed/downscalrain/patches_v1"
+  patch_size: 64
+  max_samples: null
+  metadata_columns:
+    - lat
+    - lon
+
+grid_defaults:
+  lat_name: null
+  lon_name: null
+  time_name: null
+  fill_value: 0.0
+  time_tolerance_hours: 36
+
+# Fill these paths with gridded daily products before building the patch dataset.
+# Each dynamic source is sampled at station date + offset_days.
+dynamic_sources:
+  # Example:
+  # - name: imerg_d0
+  #   path: "../../data/raw/gridded/imerg_daily_2022.zarr"
+  #   variable: "rain"
+  #   offset_days: 0
+  #   multiplier: 1.0
+  # - name: imerg_d1
+  #   path: "../../data/raw/gridded/imerg_daily_2022.zarr"
+  #   variable: "rain"
+  #   offset_days: -1
+  #   multiplier: 1.0
+  # - name: era5land_d0
+  #   path: "../../data/raw/gridded/era5land_daily_2022.zarr"
+  #   variable: "rain"
+  #   offset_days: 0
+  #   multiplier: 1.0
+
+static_sources:
+  # Example:
+  # - name: elevation
+  #   path: "../../data/raw/gridded/dem_europe.zarr"
+  #   variable: "elevation"
+  # - name: slope
+  #   path: "../../data/raw/gridded/dem_europe.zarr"
+  #   variable: "slope"
+
+model:
+  width: 32
+  depths: [2, 2, 2]
+  dropout: 0.05
+
+loss:
+  wet_threshold_mm: 0.2
+  occurrence_weight: 1.0
+  amount_weight: 1.0
+  dry_amount_weight: 0.05
+  heavy_rain_threshold_mm: 10.0
+  heavy_rain_weight: 1.5
+
+training:
+  device: "auto"
+  seed: 42
+  epochs: 50
+  batch_size: 128
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  val_fraction: 0.15
+  test_fraction: 0.15
+  num_workers: 0
+  pin_memory: false
+
+output:
+  dir: "../../data/models/downscalrain_cnn_v1"
+  split_manifest: "../../data/models/downscalrain_cnn_v1/split_manifest.json"

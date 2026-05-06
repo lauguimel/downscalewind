@@ -1,0 +1,31 @@
+#!/bin/bash -l
+#PBS -N downscalrain
+#PBS -l select=1:ncpus=8:mem=96GB:ngpus=1:gpu_id=H100
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -m n
+
+cd $PBS_O_WORKDIR
+
+DATASET="${DATASET:-/scratch/maitreje/dsw/downscalrain/patches_v1}"
+OUT="${OUT:-$HOME/dsw/data/models/downscalrain_cnn_v1}"
+CONFIG="${CONFIG:-$HOME/dsw/services/module3-precip/configs/downscalrain_cnn.yaml}"
+
+mkdir -p "$OUT"
+[ -d "$DATASET" ] || { echo "MISSING DATASET: $DATASET"; exit 1; }
+[ -f "$CONFIG" ] || { echo "MISSING CONFIG: $CONFIG"; exit 1; }
+nvidia-smi >/dev/null || { echo "GPU missing"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+cd $HOME/dsw/services/module3-precip
+python -u train_downscalrain.py \
+  --config "$CONFIG" \
+  --dataset "$DATASET" \
+  --output "$OUT" \
+  --device cuda
