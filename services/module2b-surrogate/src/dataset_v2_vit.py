@@ -19,7 +19,14 @@ import yaml
 import zarr
 from torch.utils.data import Dataset
 
-from .dataset_v2 import DEFAULT_NORM, NI, NJ, NK
+from .dataset_v2 import (
+    DEFAULT_NORM,
+    NI,
+    NJ,
+    NK,
+    parse_agl_levels,
+    resample_volume_to_agl_levels,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +40,8 @@ class WindV2DatasetViT(Dataset):
     def __init__(self, data_dir, splits_yaml, split="train", *, norm=None,
                  n_pressure=10, include_slopes=False, return_geo=False,
                  use_residual=False, return_weight=False,
-                 agl_weight_alpha=0.0, agl_weight_height=300.0):
+                 agl_weight_alpha=0.0, agl_weight_height=300.0,
+                 target_agl_levels=None):
         self.data_dir = Path(data_dir)
         self.split = split
         self.norm = {**DEFAULT_NORM, **(norm or {})}
@@ -44,6 +52,7 @@ class WindV2DatasetViT(Dataset):
         self.return_weight = return_weight
         self.agl_weight_alpha = agl_weight_alpha
         self.agl_weight_height = agl_weight_height
+        self.target_agl_levels = parse_agl_levels(target_agl_levels)
 
         with open(splits_yaml) as f:
             splits = yaml.safe_load(f)
@@ -88,8 +97,17 @@ class WindV2DatasetViT(Dataset):
         terrain_parts.append(z0_map)
         terrain_2d = np.stack(terrain_parts, axis=0)
 
-        z = np.asarray(g["coords/z"][:], dtype=np.float32)
-        agl = z - terrain_raw[:, :, None]
+        native_z = np.asarray(g["coords/z"][:], dtype=np.float32)
+        native_agl = native_z - terrain_raw[:, :, None]
+        if self.target_agl_levels is None:
+            z = native_z
+            agl = native_agl
+        else:
+            agl = np.broadcast_to(
+                self.target_agl_levels[None, None, :],
+                (NI, NJ, self.target_agl_levels.size),
+            ).copy()
+            z = terrain_raw[:, :, None] + agl
         geo = np.stack([
             z / n["z_scale"],
             agl / n["agl_scale"],
@@ -131,6 +149,10 @@ class WindV2DatasetViT(Dataset):
             (T - n["T_offset"]) / n["T_scale"],
             (q - n["q_offset"]) / n["q_scale"],
         ], axis=0).astype(np.float32)
+        if self.target_agl_levels is not None:
+            target = resample_volume_to_agl_levels(
+                target, native_agl, self.target_agl_levels
+            )
         if self.use_residual:
             target = target - self._build_era5_baseline_tensor(g)
 
@@ -146,19 +168,20 @@ class WindV2DatasetViT(Dataset):
     def _build_era5_baseline_tensor(self, store) -> np.ndarray:
         """Build a simple ERA5-lifted baseline on the CFD grid, normalised like target."""
         n = self.norm
+        nz = NK if self.target_agl_levels is None else int(self.target_agl_levels.size)
 
         def profile(var: str) -> np.ndarray:
             arr = np.asarray(store[f"input/era5_3d/{var}"][:], dtype=np.float32)
             prof_1d = arr[1, 1, :]
-            k_idx = np.linspace(0, len(prof_1d) - 1, NK, dtype=np.float32)
+            k_idx = np.linspace(0, len(prof_1d) - 1, nz, dtype=np.float32)
             return np.interp(k_idx, np.arange(len(prof_1d), dtype=np.float32),
                              prof_1d).astype(np.float32)
 
-        u = np.broadcast_to(profile("u")[None, None, :], (NI, NJ, NK)).copy()
-        v = np.broadcast_to(profile("v")[None, None, :], (NI, NJ, NK)).copy()
-        T = np.broadcast_to(profile("T")[None, None, :], (NI, NJ, NK)).copy()
-        q = np.broadcast_to(profile("q")[None, None, :], (NI, NJ, NK)).copy()
-        w = np.zeros((NI, NJ, NK), dtype=np.float32)
+        u = np.broadcast_to(profile("u")[None, None, :], (NI, NJ, nz)).copy()
+        v = np.broadcast_to(profile("v")[None, None, :], (NI, NJ, nz)).copy()
+        T = np.broadcast_to(profile("T")[None, None, :], (NI, NJ, nz)).copy()
+        q = np.broadcast_to(profile("q")[None, None, :], (NI, NJ, nz)).copy()
+        w = np.zeros((NI, NJ, nz), dtype=np.float32)
 
         return np.stack([
             (u - n["U_x_offset"]) / n["U_uv_scale"],

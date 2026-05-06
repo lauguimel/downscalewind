@@ -27,7 +27,7 @@ import yaml
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 
-from src.dataset_v2 import DEFAULT_NORM
+from src.dataset_v2 import DEFAULT_NORM, parse_agl_levels
 from src.dataset_v2_vit import WindV2DatasetViT
 from src.losses_v2 import mse_loss, total_loss
 from src.model_vit_v2 import build_vit_v2
@@ -111,6 +111,24 @@ def crop_center_xy(
     return x[..., y0:y0 + cells_y, x0:x0 + cells_x, :]
 
 
+def load_resume_weights(model: torch.nn.Module, checkpoint: dict, *, partial: bool) -> dict[str, int]:
+    """Load full checkpoint or only tensors compatible with a changed output grid."""
+    state = checkpoint["model"]
+    if not partial:
+        model.load_state_dict(state)
+        return {"loaded": len(state), "skipped": 0}
+
+    model_state = model.state_dict()
+    compatible = {
+        k: v for k, v in state.items()
+        if k in model_state and tuple(model_state[k].shape) == tuple(v.shape)
+    }
+    skipped = len(state) - len(compatible)
+    model_state.update(compatible)
+    model.load_state_dict(model_state)
+    return {"loaded": len(compatible), "skipped": skipped}
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main():
@@ -140,18 +158,29 @@ def main():
                     help="E-folding height H in metres for AGL loss weighting.")
     ap.add_argument("--loss-central-crop-km", type=float, default=None,
                     help="Compute loss only on a central square crop, e.g. 2 for 2x2 km.")
+    ap.add_argument("--target-agl-levels", default=None,
+                    help="Use fixed AGL output levels instead of native 40 levels. "
+                         "Use 'agl_0_100_24' or a comma-separated list.")
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--max-train-cases", type=int, default=None)
     ap.add_argument("--max-val-cases", type=int, default=None)
     ap.add_argument("--resume", type=Path, default=None,
                     help="Path to a best.pt to resume from (loads model weights only).")
+    ap.add_argument("--resume-partial", action="store_true",
+                    help="Load only checkpoint tensors with matching shapes. Useful when "
+                         "changing the number of output AGL levels.")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s | %(levelname)s | %(message)s")
 
     norm = {**DEFAULT_NORM, **_load_norm_overrides(args.norm_yaml)}
+    target_agl_levels = parse_agl_levels(args.target_agl_levels)
+    args.target_agl_levels = (
+        None if target_agl_levels is None
+        else [float(x) for x in target_agl_levels.tolist()]
+    )
 
     use_weight = args.agl_weight_alpha > 0.0
     ds_kwargs = dict(
@@ -162,6 +191,7 @@ def main():
         return_weight=use_weight,
         agl_weight_alpha=args.agl_weight_alpha,
         agl_weight_height=args.agl_weight_height,
+        target_agl_levels=target_agl_levels,
     )
     train_ds = WindV2DatasetViT(args.data_dir, args.splits_yaml, "train", **ds_kwargs)
     val_ds = WindV2DatasetViT(args.data_dir, args.splits_yaml, "val", **ds_kwargs)
@@ -180,10 +210,10 @@ def main():
     geo_channels = geo.shape[0] if geo is not None else 0
     logger.info("terrain %s | era5 %s | geo_ch=%d | target %s",
                 terrain.shape, era5.shape, geo_channels, target.shape)
-    logger.info("options: residual=%s slopes=%s agl_weight_alpha=%.2f H=%.1f crop_km=%s",
+    logger.info("options: residual=%s slopes=%s agl_weight_alpha=%.2f H=%.1f crop_km=%s target_agl_levels=%s",
                 args.use_residual, args.include_slopes,
                 args.agl_weight_alpha, args.agl_weight_height,
-                args.loss_central_crop_km)
+                args.loss_central_crop_km, args.target_agl_levels)
 
     model = build_vit_v2(preset=args.preset, era5_input_dim=era5_dim, nz=nz,
                          terrain_in_channels=terrain.shape[0],
@@ -194,9 +224,10 @@ def main():
     if args.resume is not None and args.resume.exists():
         ck = torch.load(args.resume, map_location=args.device, weights_only=False)
         try:
-            model.load_state_dict(ck["model"])
-            logger.info("Resumed from %s (epoch=%d, val_loss=%.5f)",
-                        args.resume, ck.get("epoch", -1), ck.get("val_loss", float("nan")))
+            stats = load_resume_weights(model, ck, partial=args.resume_partial)
+            logger.info("Resumed from %s (epoch=%d, val_loss=%.5f, loaded=%d skipped=%d partial=%s)",
+                        args.resume, ck.get("epoch", -1), ck.get("val_loss", float("nan")),
+                        stats["loaded"], stats["skipped"], args.resume_partial)
         except Exception as e:
             logger.warning("Resume FAILED (%s) — starting fresh.", e)
 

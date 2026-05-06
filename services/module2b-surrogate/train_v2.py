@@ -31,7 +31,7 @@ import yaml
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
 
-from src.dataset_v2 import WindV2Dataset, DEFAULT_NORM
+from src.dataset_v2 import WindV2Dataset, DEFAULT_NORM, parse_agl_levels
 from src.losses_v2 import mse_loss, total_loss
 from src.model_fno3d import FNO3D
 
@@ -118,6 +118,9 @@ def main() -> int:
                     help="Near-ground loss boost: weight=1+alpha*exp(-AGL/H).")
     ap.add_argument("--agl-weight-height", type=float, default=300.0,
                     help="E-folding height H in metres for AGL loss weighting.")
+    ap.add_argument("--target-agl-levels", default=None,
+                    help="Use fixed AGL output levels instead of native 40 levels. "
+                         "Use 'agl_0_100_24' or a comma-separated list.")
     ap.add_argument("--num-workers", type=int, default=2)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--max-train-cases", type=int, default=None,
@@ -130,6 +133,11 @@ def main() -> int:
                         format="%(asctime)s | %(levelname)s | %(message)s")
 
     norm = {**DEFAULT_NORM, **_load_norm_overrides(args.norm_yaml)}
+    target_agl_levels = parse_agl_levels(args.target_agl_levels)
+    args.target_agl_levels = (
+        None if target_agl_levels is None
+        else [float(x) for x in target_agl_levels.tolist()]
+    )
     logger.info("Norm: %s", {k: round(v, 4) for k, v in norm.items()})
     use_weight = args.agl_weight_alpha > 0.0
 
@@ -140,6 +148,7 @@ def main() -> int:
         return_weight=use_weight,
         agl_weight_alpha=args.agl_weight_alpha,
         agl_weight_height=args.agl_weight_height,
+        target_agl_levels=target_agl_levels,
     )
     train_ds = WindV2Dataset(args.data_dir, args.splits_yaml, "train", **ds_kwargs)
     val_ds = WindV2Dataset(args.data_dir, args.splits_yaml, "val", **ds_kwargs)
@@ -156,9 +165,9 @@ def main() -> int:
     sample_inp = sample[0]
     c_in = sample_inp.shape[0]
     logger.info("Input channels: %d  | grid (Ny, Nx, Nz) = %s", c_in, tuple(sample_inp.shape[1:]))
-    logger.info("options: loss=%s residual=%s slopes=%s agl_weight_alpha=%.2f H=%.1f",
+    logger.info("options: loss=%s residual=%s slopes=%s agl_weight_alpha=%.2f H=%.1f target_agl_levels=%s",
                 args.loss_type, args.use_residual, args.include_slopes,
-                args.agl_weight_alpha, args.agl_weight_height)
+                args.agl_weight_alpha, args.agl_weight_height, args.target_agl_levels)
 
     model = FNO3D(
         in_channels=c_in, out_channels=5,

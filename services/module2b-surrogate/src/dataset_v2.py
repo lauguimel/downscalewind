@@ -40,6 +40,13 @@ logger = logging.getLogger(__name__)
 # Native grid (must match export_to_grid_zarr_v2.NI/NJ/NK)
 NI, NJ, NK = 180, 180, 40
 
+# FWI-oriented AGL target grid: denser below 5 m, then 5 m spacing to 100 m.
+DEFAULT_AGL_0_100_24 = (
+    0.0, 2.0, 3.0, 4.0, 5.0,
+    10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0,
+    55.0, 60.0, 65.0, 70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0,
+)
+
 # Default normalisation. Replace with data-driven stats once
 # compute_norm_stats_v2.py has run on the train split.
 DEFAULT_NORM = {
@@ -76,6 +83,65 @@ DEFAULT_NORM = {
     "pressure_offset": 700.0,  # hPa centring
     "pressure_scale":  300.0,
 }
+
+
+def parse_agl_levels(levels: str | list[float] | tuple[float, ...] | np.ndarray | None) -> np.ndarray | None:
+    """Parse an optional fixed-AGL target grid.
+
+    Accepted strings:
+      - "agl_0_100_24" / "fwi_0_100_24"
+      - comma-separated levels, e.g. "0,2,5,10,20,50,100"
+    """
+    if levels is None:
+        return None
+    if isinstance(levels, str):
+        key = levels.strip().lower()
+        if key in {"", "native", "none"}:
+            return None
+        if key in {"agl_0_100_24", "fwi_0_100_24"}:
+            arr = np.asarray(DEFAULT_AGL_0_100_24, dtype=np.float32)
+        else:
+            arr = np.asarray([float(x) for x in key.split(",") if x.strip()], dtype=np.float32)
+    else:
+        arr = np.asarray(levels, dtype=np.float32)
+    if arr.ndim != 1 or arr.size == 0:
+        raise ValueError(f"Invalid AGL levels: {levels!r}")
+    if np.any(~np.isfinite(arr)):
+        raise ValueError(f"AGL levels contain non-finite values: {levels!r}")
+    arr = np.asarray(sorted(float(x) for x in arr), dtype=np.float32)
+    if np.any(np.diff(arr) <= 0):
+        raise ValueError(f"AGL levels must be strictly increasing: {arr}")
+    return arr
+
+
+def resample_volume_to_agl_levels(
+    volume: np.ndarray,
+    native_agl: np.ndarray,
+    target_agl_levels: np.ndarray,
+) -> np.ndarray:
+    """Linearly resample (C, NI, NJ, NK) fields onto fixed AGL levels."""
+    if volume.shape[-3:] != native_agl.shape:
+        raise ValueError(
+            f"volume/native_agl shape mismatch: {volume.shape[-3:]} vs {native_agl.shape}"
+        )
+    levels = np.asarray(target_agl_levels, dtype=np.float32)
+    out = np.empty((*volume.shape[:-1], levels.size), dtype=np.float32)
+    native_agl = np.asarray(native_agl, dtype=np.float32)
+    volume = np.asarray(volume, dtype=np.float32)
+
+    for out_k, h in enumerate(levels):
+        k1 = np.sum(native_agl < h, axis=-1)
+        k1 = np.clip(k1, 1, native_agl.shape[-1] - 1).astype(np.int64)
+        k0 = k1 - 1
+        idx0 = k0[None, :, :, None]
+        idx1 = k1[None, :, :, None]
+        z0 = np.take_along_axis(native_agl, k0[:, :, None], axis=-1)[:, :, 0]
+        z1 = np.take_along_axis(native_agl, k1[:, :, None], axis=-1)[:, :, 0]
+        v0 = np.take_along_axis(volume, idx0, axis=-1)[..., 0]
+        v1 = np.take_along_axis(volume, idx1, axis=-1)[..., 0]
+        frac = np.clip((h - z0) / np.maximum(z1 - z0, 1e-6), 0.0, 1.0)
+        out[..., out_k] = v0 + (v1 - v0) * frac[None, :, :]
+    return out
 
 
 def _broadcast(value: np.ndarray | float, shape: tuple[int, ...]) -> np.ndarray:
@@ -116,6 +182,7 @@ class WindV2Dataset(Dataset):
         return_weight: bool = False,
         agl_weight_alpha: float = 0.0,
         agl_weight_height: float = 300.0,
+        target_agl_levels: str | list[float] | tuple[float, ...] | np.ndarray | None = None,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.split = split
@@ -126,6 +193,7 @@ class WindV2Dataset(Dataset):
         self.return_weight = return_weight
         self.agl_weight_alpha = agl_weight_alpha
         self.agl_weight_height = agl_weight_height
+        self.target_agl_levels = parse_agl_levels(target_agl_levels)
 
         with open(splits_yaml) as f:
             splits = yaml.safe_load(f)
@@ -168,36 +236,42 @@ class WindV2Dataset(Dataset):
         """Concat all inputs into (C_in, NI, NJ, NK) float32 tensor."""
         n = self.norm
         chans: list[np.ndarray] = []
+        levels = self.target_agl_levels
+        nz = NK if levels is None else int(levels.size)
 
         # 1. terrain (NI, NJ) → broadcast over k
         terrain = np.asarray(store["input/terrain"][:], dtype=np.float32)
-        chans.append(np.broadcast_to(terrain[:, :, None], (NI, NJ, NK)).copy()
+        chans.append(np.broadcast_to(terrain[:, :, None], (NI, NJ, nz)).copy()
                      / n["terrain_scale"])
 
         if self.include_slopes:
             slope_y, slope_x = np.gradient(terrain, 33.333, 33.333)
-            chans.append(np.broadcast_to(slope_x[:, :, None], (NI, NJ, NK)).copy()
+            chans.append(np.broadcast_to(slope_x[:, :, None], (NI, NJ, nz)).copy()
                          .astype(np.float32))
-            chans.append(np.broadcast_to(slope_y[:, :, None], (NI, NJ, NK)).copy()
+            chans.append(np.broadcast_to(slope_y[:, :, None], (NI, NJ, nz)).copy()
                          .astype(np.float32))
 
         # 2. z (real altitude) (NI, NJ, NK) — explicit grid deformation
+        native_z = np.asarray(store["coords/z"][:], dtype=np.float32)
+        if levels is None:
+            z = native_z
+            agl = z - terrain[:, :, None]
+        else:
+            agl = np.broadcast_to(levels[None, None, :], (NI, NJ, nz)).copy()
+            z = terrain[:, :, None] + agl
         if self.include_z:
-            z = np.asarray(store["coords/z"][:], dtype=np.float32)
             chans.append(z / n["z_scale"])
 
         # 3. AGL (z - terrain), more useful than absolute z for log-law
-        z = np.asarray(store["coords/z"][:], dtype=np.float32)
-        agl = z - terrain[:, :, None]
         chans.append(agl / n["agl_scale"])
 
         # 4. z0 (scalar) broadcast
         z0 = float(store["input"].attrs.get("z0_eff", 0.0))
-        chans.append(np.full((NI, NJ, NK), z0 / n["z0_scale"], dtype=np.float32))
+        chans.append(np.full((NI, NJ, nz), z0 / n["z0_scale"], dtype=np.float32))
 
         # 5. lat (Coriolis) scalar broadcast
         lat = float(store["input"].attrs.get("lat", 0.0))
-        chans.append(np.full((NI, NJ, NK), lat / n["lat_scale"], dtype=np.float32))
+        chans.append(np.full((NI, NJ, nz), lat / n["lat_scale"], dtype=np.float32))
 
         # 6. ERA5 1D profile from centre of 3×3 (interpolate from N_p hPa to NK z-bins)
         plev = np.asarray(store["input/era5_pressure_levels"][:], dtype=np.float32)
@@ -212,21 +286,21 @@ class WindV2Dataset(Dataset):
             era5_var = np.asarray(store[f"input/era5_3d/{var}"][:], dtype=np.float32)
             # Take centre of 3×3 grid: shape (N_p,)
             prof_1d = era5_var[1, 1, :]
-            # Broadcast over (NI, NJ) and interpolate from N_p to NK:
+            # Broadcast over (NI, NJ) and interpolate from N_p to the output z grid:
             # We linearly interpolate along k by mapping pressure to fractional index.
             # For simplicity, project on NK via uniform indexing — model can learn the mapping.
-            k_idx = np.linspace(0, len(prof_1d) - 1, NK, dtype=np.float32)
+            k_idx = np.linspace(0, len(prof_1d) - 1, nz, dtype=np.float32)
             prof_nk = np.interp(k_idx, np.arange(len(prof_1d), dtype=np.float32),
                                 prof_1d).astype(np.float32)
-            field = np.broadcast_to(prof_nk[None, None, :], (NI, NJ, NK)).copy()
+            field = np.broadcast_to(prof_nk[None, None, :], (NI, NJ, nz)).copy()
             chans.append(((field - offset) / scale).astype(np.float32))
 
-        # 7. ERA5 pressure level profile itself (NK,) broadcast
-        plev_k = np.interp(np.linspace(0, len(plev) - 1, NK, dtype=np.float32),
+        # 7. ERA5 pressure level profile itself broadcast on the output z grid
+        plev_k = np.interp(np.linspace(0, len(plev) - 1, nz, dtype=np.float32),
                            np.arange(len(plev), dtype=np.float32), plev).astype(np.float32)
         chans.append(np.broadcast_to(
             ((plev_k - n["pressure_offset"]) / n["pressure_scale"])[None, None, :],
-            (NI, NJ, NK)).copy().astype(np.float32))
+            (NI, NJ, nz)).copy().astype(np.float32))
 
         # 8. Surface ERA5 (3×3 → centre scalar) broadcast
         for var, scale, offset in [
@@ -237,7 +311,7 @@ class WindV2Dataset(Dataset):
         ]:
             arr = np.asarray(store[f"input/era5_surface/{var}"][:], dtype=np.float32)
             val = float(arr[1, 1])
-            chans.append(np.full((NI, NJ, NK), (val - offset) / scale, dtype=np.float32))
+            chans.append(np.full((NI, NJ, nz), (val - offset) / scale, dtype=np.float32))
 
         return np.stack(chans, axis=0).astype(np.float32)  # (C_in, NI, NJ, NK)
 
@@ -247,30 +321,37 @@ class WindV2Dataset(Dataset):
         U = np.asarray(store["target/U"][:], dtype=np.float32)  # (NI, NJ, NK, 3)
         T = np.asarray(store["target/T"][:], dtype=np.float32)
         q = np.asarray(store["target/q"][:], dtype=np.float32)
-        return np.stack([
+        target = np.stack([
             (U[..., 0] - n["U_x_offset"]) / n["U_uv_scale"],
             (U[..., 1] - n["U_y_offset"]) / n["U_uv_scale"],
             (U[..., 2] - n["U_z_offset"]) / n["U_w_scale"],
             (T - n["T_offset"]) / n["T_scale"],
             (q - n["q_offset"]) / n["q_scale"],
         ], axis=0)
+        if self.target_agl_levels is None:
+            return target
+        terrain = np.asarray(store["input/terrain"][:], dtype=np.float32)
+        z = np.asarray(store["coords/z"][:], dtype=np.float32)
+        agl = z - terrain[:, :, None]
+        return resample_volume_to_agl_levels(target, agl, self.target_agl_levels)
 
     def _build_era5_baseline_tensor(self, store: Any) -> np.ndarray:
         """Build a simple ERA5-lifted baseline on the CFD grid, normalised like target."""
         n = self.norm
+        nz = NK if self.target_agl_levels is None else int(self.target_agl_levels.size)
 
         def profile(var: str) -> np.ndarray:
             arr = np.asarray(store[f"input/era5_3d/{var}"][:], dtype=np.float32)
             prof_1d = arr[1, 1, :]
-            k_idx = np.linspace(0, len(prof_1d) - 1, NK, dtype=np.float32)
+            k_idx = np.linspace(0, len(prof_1d) - 1, nz, dtype=np.float32)
             return np.interp(k_idx, np.arange(len(prof_1d), dtype=np.float32),
                              prof_1d).astype(np.float32)
 
-        u = np.broadcast_to(profile("u")[None, None, :], (NI, NJ, NK)).copy()
-        v = np.broadcast_to(profile("v")[None, None, :], (NI, NJ, NK)).copy()
-        T = np.broadcast_to(profile("T")[None, None, :], (NI, NJ, NK)).copy()
-        q = np.broadcast_to(profile("q")[None, None, :], (NI, NJ, NK)).copy()
-        w = np.zeros((NI, NJ, NK), dtype=np.float32)
+        u = np.broadcast_to(profile("u")[None, None, :], (NI, NJ, nz)).copy()
+        v = np.broadcast_to(profile("v")[None, None, :], (NI, NJ, nz)).copy()
+        T = np.broadcast_to(profile("T")[None, None, :], (NI, NJ, nz)).copy()
+        q = np.broadcast_to(profile("q")[None, None, :], (NI, NJ, nz)).copy()
+        w = np.zeros((NI, NJ, nz), dtype=np.float32)
 
         return np.stack([
             (u - n["U_x_offset"]) / n["U_uv_scale"],
@@ -281,9 +362,15 @@ class WindV2Dataset(Dataset):
         ], axis=0).astype(np.float32)
 
     def _build_loss_weight(self, store: Any) -> np.ndarray:
-        terrain = np.asarray(store["input/terrain"][:], dtype=np.float32)
-        z = np.asarray(store["coords/z"][:], dtype=np.float32)
-        agl = np.maximum(z - terrain[:, :, None], 0.0)
+        if self.target_agl_levels is None:
+            terrain = np.asarray(store["input/terrain"][:], dtype=np.float32)
+            z = np.asarray(store["coords/z"][:], dtype=np.float32)
+            agl = np.maximum(z - terrain[:, :, None], 0.0)
+        else:
+            agl = np.broadcast_to(
+                self.target_agl_levels[None, None, :],
+                (NI, NJ, self.target_agl_levels.size),
+            ).copy()
         alpha = float(self.agl_weight_alpha)
         height = max(float(self.agl_weight_height), 1.0)
         weight = 1.0 + alpha * np.exp(-agl / height)

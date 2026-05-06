@@ -25,7 +25,7 @@ import torch
 import yaml
 import zarr
 
-from src.dataset_v2 import DEFAULT_NORM, WindV2Dataset
+from src.dataset_v2 import DEFAULT_NORM, WindV2Dataset, parse_agl_levels
 from src.dataset_v2_vit import WindV2DatasetViT
 from src.model_fno3d import FNO3D
 from src.model_vit_v2 import build_vit_v2
@@ -205,6 +205,7 @@ def load_checkpoint(path: Path, device: torch.device) -> dict[str, Any]:
 def build_dataset(args, norm: dict[str, float], ck_cfg: dict[str, Any]):
     include_slopes = bool(ck_cfg.get("include_slopes", False))
     use_geo = bool(ck_cfg.get("use_geo", False))
+    target_agl_levels = parse_agl_levels(ck_cfg.get("target_agl_levels"))
     if args.model_type == "vit":
         return WindV2DatasetViT(
             args.data_dir,
@@ -214,6 +215,7 @@ def build_dataset(args, norm: dict[str, float], ck_cfg: dict[str, Any]):
             include_slopes=include_slopes,
             return_geo=use_geo,
             use_residual=False,
+            target_agl_levels=target_agl_levels,
         )
     return WindV2Dataset(
         args.data_dir,
@@ -222,6 +224,7 @@ def build_dataset(args, norm: dict[str, float], ck_cfg: dict[str, Any]):
         norm=norm,
         include_slopes=include_slopes,
         use_residual=False,
+        target_agl_levels=target_agl_levels,
     )
 
 
@@ -336,6 +339,24 @@ def update_metrics(acc: EvalAccumulators, pred, true, baseline, agl,
             )
 
 
+def make_accumulators(nz: int) -> EvalAccumulators:
+    acc = EvalAccumulators()
+    acc.k_metrics = {
+        v: [MetricAccumulator() for _ in range(nz)]
+        for v in VAR_NAMES
+    }
+    return acc
+
+
+def get_eval_agl(dataset, store, field_shape: tuple[int, int, int]) -> np.ndarray:
+    levels = getattr(dataset, "target_agl_levels", None)
+    if levels is not None:
+        return np.broadcast_to(levels[None, None, :], field_shape).copy()
+    terrain = np.asarray(store["input/terrain"][:], dtype=np.float32)
+    z = np.asarray(store["coords/z"][:], dtype=np.float32)
+    return z - terrain[:, :, None]
+
+
 def case_metrics(case_id: str, pred, true, baseline,
                  spatial_mask: np.ndarray | None = None) -> dict[str, Any]:
     out: dict[str, Any] = {"case_id": case_id}
@@ -447,9 +468,7 @@ def evaluate(args) -> dict[str, Any]:
             true = denormalize_fields(true_norm, norm)
             baseline = denormalize_fields(baseline_norm, norm)
 
-            terrain = np.asarray(store["input/terrain"][:], dtype=np.float32)
-            z = np.asarray(store["coords/z"][:], dtype=np.float32)
-            agl = z - terrain[:, :, None]
+            agl = get_eval_agl(dataset, store, true_norm.shape[1:])
 
             update_metrics(acc, pred, true, baseline, agl, spatial_mask)
             if args.per_case:
