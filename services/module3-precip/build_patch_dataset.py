@@ -205,10 +205,12 @@ def _normalize_station_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 @click.command()
 @click.option("--config", "config_path", required=True, type=click.Path(exists=True))
-def main(config_path: str) -> None:
+@click.option("--station-table", default=None, type=click.Path(exists=True))
+@click.option("--output-dir", default=None, type=click.Path())
+def main(config_path: str, station_table: str | None, output_dir: str | None) -> None:
     cfg = _load_config(config_path)
-    station_path = Path(cfg["patch_dataset"]["station_table"])
-    output_dir = Path(cfg["patch_dataset"]["output_dir"])
+    station_path = Path(station_table or cfg["patch_dataset"]["station_table"])
+    output_dir = Path(output_dir or cfg["patch_dataset"]["output_dir"])
     patch_size = int(cfg["patch_dataset"].get("patch_size", 64))
     max_samples = cfg["patch_dataset"].get("max_samples")
 
