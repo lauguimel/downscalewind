@@ -22,7 +22,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.patch_dataset import write_patch_dataset
+from src.patch_dataset import write_patch_dataset_metadata
 
 log = logging.getLogger(__name__)
 
@@ -130,18 +130,18 @@ class SourceReader:
         self.lat_values = np.asarray(da[self.lat_name].values)
         self.lon_values = np.asarray(da[self.lon_name].values)
         self.time_values = np.asarray(da[self.time_name].values) if self.time_name else None
+        self._array_cache: dict[int, np.ndarray] = {}
         log.info("Opened source %s: %s[%s]", self.name, spec["path"], self.variable)
 
-    def patch(self, lat: float, lon: float, date: pd.Timestamp, size: int) -> np.ndarray:
+    def _array_for_key(self, key: int) -> np.ndarray:
+        cached = self._array_cache.get(key)
+        if cached is not None:
+            return cached
+
         da = self.da
         if self.temporal:
-            assert self.time_name is not None and self.time_values is not None
-            target_time = pd.Timestamp(date) + pd.Timedelta(days=self.offset_days)
-            tidx = _time_index(self.time_values, target_time, self.time_tolerance_hours)
-            da = da.isel({self.time_name: tidx})
-
-        row = _nearest_index(self.lat_values, lat)
-        col = _nearest_index(self.lon_values, lon)
+            assert self.time_name is not None
+            da = da.isel({self.time_name: key})
         da = da.transpose(self.lat_name, self.lon_name, ...)
         values = np.asarray(da.values, dtype=np.float32)
         if values.ndim != 2:
@@ -149,7 +149,22 @@ class SourceReader:
             values = np.squeeze(values)
         if values.ndim != 2:
             raise ValueError(f"source {self.name} must reduce to 2D, got shape {values.shape}")
-        return _slice_with_padding(values * self.multiplier, row, col, size, self.fill_value)
+        values = values * self.multiplier
+        self._array_cache[key] = values
+        return values
+
+    def patch(self, lat: float, lon: float, date: pd.Timestamp, size: int) -> np.ndarray:
+        if self.temporal:
+            assert self.time_name is not None and self.time_values is not None
+            target_time = pd.Timestamp(date) + pd.Timedelta(days=self.offset_days)
+            key = _time_index(self.time_values, target_time, self.time_tolerance_hours)
+        else:
+            key = -1
+
+        row = _nearest_index(self.lat_values, lat)
+        col = _nearest_index(self.lon_values, lon)
+        values = self._array_for_key(key)
+        return _slice_with_padding(values, row, col, size, self.fill_value)
 
 
 def _normalize_station_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -197,7 +212,14 @@ def main(config_path: str) -> None:
             stations[col] = np.nan
     meta_values = stations[meta_columns].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy(np.float32)
 
-    patches = np.empty((len(stations), len(readers), patch_size, patch_size), dtype=np.float32)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    patch_path = output_dir / "patches.npy"
+    patches = np.lib.format.open_memmap(
+        patch_path,
+        mode="w+",
+        dtype=np.float32,
+        shape=(len(stations), len(readers), patch_size, patch_size),
+    )
     valid_rows: list[int] = []
     for i, row in enumerate(stations.itertuples(index=False)):
         if (i + 1) % 1000 == 0:
@@ -215,10 +237,32 @@ def main(config_path: str) -> None:
             log.warning("Skipping %s %s: %s", row.station_id, row.date, exc)
 
     valid = np.asarray(valid_rows, dtype=np.int64)
+    if valid.size == 0:
+        raise RuntimeError("no valid patch samples were written")
     stations_valid = stations.iloc[valid].reset_index(drop=True)
-    write_patch_dataset(
+
+    patches.flush()
+    if valid.size != len(stations):
+        compact_path = output_dir / "patches_compact.npy"
+        compact = np.lib.format.open_memmap(
+            compact_path,
+            mode="w+",
+            dtype=np.float32,
+            shape=(len(valid), len(readers), patch_size, patch_size),
+        )
+        chunk = 4096
+        for start in range(0, len(valid), chunk):
+            rows = valid[start : start + chunk]
+            compact[start : start + len(rows)] = patches[rows]
+        compact.flush()
+        del compact
+        del patches
+        compact_path.replace(patch_path)
+    else:
+        del patches
+
+    write_patch_dataset_metadata(
         output_dir=output_dir,
-        patches=patches[valid],
         rain=stations_valid["rain_station"].to_numpy(np.float32),
         meta=meta_values[valid],
         station_ids=stations_valid["station_id"].astype(str).to_numpy(),

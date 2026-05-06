@@ -270,12 +270,35 @@ def write_patch_dataset(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     patches = np.asarray(patches, dtype=np.float32)
+    np.save(output_dir / "patches.npy", patches)
+    write_patch_dataset_metadata(
+        output_dir=output_dir,
+        rain=rain,
+        meta=meta,
+        station_ids=station_ids,
+        dates=dates,
+        channels=channels,
+        meta_columns=meta_columns,
+    )
+
+
+def write_patch_dataset_metadata(
+    output_dir: str | Path,
+    rain: np.ndarray,
+    meta: np.ndarray | None = None,
+    station_ids: Sequence[Any] | None = None,
+    dates: Sequence[Any] | None = None,
+    channels: Sequence[str] | None = None,
+    meta_columns: Sequence[str] | None = None,
+) -> None:
+    """Write directory-format labels and metadata next to an existing patches.npy."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     rain = np.asarray(rain, dtype=np.float32)
     if meta is None:
         meta = np.zeros((len(rain), 0), dtype=np.float32)
     meta = np.asarray(meta, dtype=np.float32)
 
-    np.save(output_dir / "patches.npy", patches)
     np.save(output_dir / "rain.npy", rain)
     np.save(output_dir / "meta.npy", meta)
     np.save(output_dir / "station_id.npy", _as_str_array(station_ids, len(rain)))
