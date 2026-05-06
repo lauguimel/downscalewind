@@ -1,0 +1,98 @@
+# DownscalRain CNN GEE 2022, fire-period false-rain calibration recipe.
+
+patch_dataset:
+  station_table: "../../data/raw/precip_correction_cache/dataset_2022.parquet"
+  output_dir: "../../data/processed/downscalrain/patches_gee_2022"
+  patch_size: 32
+  max_samples: null
+  metadata_columns:
+    - lat
+    - lon
+    - elevation
+    - slope
+    - tpi
+    - month_sin
+    - month_cos
+
+grid_defaults:
+  lat_name: "lat"
+  lon_name: "lon"
+  time_name: "time"
+  fill_value: 0.0
+  time_tolerance_hours: 6
+
+dynamic_sources:
+  - name: imerg_d0
+    path: "../../data/raw/downscalrain_grids/gee_2022/imerg_daily.nc"
+    variable: "rain"
+    offset_days: 0
+  - name: imerg_d1
+    path: "../../data/raw/downscalrain_grids/gee_2022/imerg_daily.nc"
+    variable: "rain"
+    offset_days: -1
+  - name: imerg_d2
+    path: "../../data/raw/downscalrain_grids/gee_2022/imerg_daily.nc"
+    variable: "rain"
+    offset_days: -2
+  - name: era5land_d0
+    path: "../../data/raw/downscalrain_grids/gee_2022/era5land_daily.nc"
+    variable: "rain"
+    offset_days: 0
+  - name: era5land_d1
+    path: "../../data/raw/downscalrain_grids/gee_2022/era5land_daily.nc"
+    variable: "rain"
+    offset_days: -1
+
+static_sources:
+  - name: elevation
+    path: "../../data/raw/downscalrain_grids/gee_2022/terrain_static.nc"
+    variable: "elevation"
+  - name: slope
+    path: "../../data/raw/downscalrain_grids/gee_2022/terrain_static.nc"
+    variable: "slope"
+  - name: aspect_sin
+    path: "../../data/raw/downscalrain_grids/gee_2022/terrain_static.nc"
+    variable: "aspect_sin"
+  - name: aspect_cos
+    path: "../../data/raw/downscalrain_grids/gee_2022/terrain_static.nc"
+    variable: "aspect_cos"
+
+model:
+  width: 32
+  depths: [2, 2, 2]
+  dropout: 0.08
+
+loss:
+  wet_threshold_mm: 1.0
+  dry_threshold_mm: 1.0
+  false_rain_threshold_mm: 1.0
+  fire_months: [6, 7, 8, 9]
+  occurrence_weight: 1.0
+  wet_occurrence_weight: 1.2
+  heavy_occurrence_weight: 2.0
+  dry_occurrence_weight: 1.5
+  fire_dry_occurrence_weight: 3.0
+  halo_dry_occurrence_weight: 5.0
+  fire_halo_dry_occurrence_weight: 9.0
+  amount_weight: 1.0
+  dry_amount_weight: 0.18
+  dry_rain_weight: 0.12
+  heavy_rain_threshold_mm: 10.0
+  heavy_rain_weight: 4.0
+
+training:
+  device: "auto"
+  seed: 43
+  epochs: 30
+  batch_size: 1024
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  val_fraction: 0.15
+  test_fraction: 0.15
+  num_workers: 0
+  pin_memory: false
+
+output:
+  dir: "../../data/models/downscalrain_cnn_gee_2022_firecal"
+  # Reuse the baseline station-grouped split for direct comparison.
+  split_manifest: "../../data/models/downscalrain_cnn_gee_2022/split_manifest.json"

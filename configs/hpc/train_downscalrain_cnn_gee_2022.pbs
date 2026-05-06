@@ -52,3 +52,14 @@ python -u evaluate_downscalrain_cnn.py \
   --predictions "$VAL/predictions.parquet" \
   --split-manifest "$OUT/split_manifest.json" \
   --output-dir "$VAL"
+
+python -u calibrate_downscalrain_fire_threshold.py \
+  --predictions "$VAL/downscalrain_cnn_predictions_enriched.parquet" \
+  --output "$VAL/downscalrain_cnn_predictions_enriched_firecal.parquet" \
+  --calibration-json "$VAL/downscalrain_firecalibration.json" \
+  --threshold-table "$VAL/fire_threshold_sweep.csv"
+
+python -u evaluate_downscalrain_fire_periods.py \
+  --predictions "$VAL/downscalrain_cnn_predictions_enriched_firecal.parquet" \
+  --station-table "$HOME/dsw/data/raw/precip_correction_cache/dataset_2022.parquet" \
+  --output-dir "$VAL"

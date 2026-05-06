@@ -58,6 +58,8 @@ def _dataset_frame(dataset_path: str | Path, split_manifest: str | Path | None) 
         "row_index": np.arange(len(ds.rain), dtype=np.int64),
         "station_id": ds.station_ids.astype(str),
         "date": pd.to_datetime(ds.dates.astype(str)),
+        "lat": _meta_column(ds, "lat"),
+        "lon": _meta_column(ds, "lon"),
         "rain_station": np.asarray(ds.rain, dtype=np.float32),
         "rain_imerg_center": _center_channel(ds, "imerg_d0"),
         "rain_era5land_center": _center_channel(ds, "era5land_d0"),
@@ -82,7 +84,11 @@ def _load_predictions(path: str | Path) -> pd.DataFrame:
     missing = required - set(pred.columns)
     if missing:
         raise ValueError(f"prediction table missing columns: {sorted(missing)}")
-    out = pred[["station_id", "date", "rain_pred_mm"]].copy()
+    columns = ["station_id", "date", "rain_pred_mm"]
+    for optional in ("wet_probability", "conditional_amount_mm"):
+        if optional in pred.columns:
+            columns.append(optional)
+    out = pred[columns].copy()
     out["station_id"] = out["station_id"].astype(str)
     out["date"] = pd.to_datetime(out["date"])
     return out

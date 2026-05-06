@@ -19,11 +19,21 @@ import torch.nn.functional as F
 @dataclass(frozen=True)
 class DownscalRainLossConfig:
     wet_threshold_mm: float = 0.2
+    dry_threshold_mm: float = 1.0
     occurrence_weight: float = 1.0
+    wet_occurrence_weight: float = 1.0
+    heavy_occurrence_weight: float = 1.0
+    dry_occurrence_weight: float = 1.0
+    fire_dry_occurrence_weight: float = 1.0
+    halo_dry_occurrence_weight: float = 1.0
+    fire_halo_dry_occurrence_weight: float = 1.0
     amount_weight: float = 1.0
     dry_amount_weight: float = 0.05
+    dry_rain_weight: float = 0.0
     heavy_rain_threshold_mm: float = 10.0
     heavy_rain_weight: float = 1.5
+    false_rain_threshold_mm: float = 1.0
+    fire_months: tuple[int, ...] = (6, 7, 8, 9)
 
 
 class ResidualBlock(nn.Module):
@@ -179,6 +189,7 @@ def downscalrain_loss(
     outputs: dict[str, torch.Tensor],
     rain_mm: torch.Tensor,
     config: DownscalRainLossConfig | None = None,
+    context: dict[str, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Occurrence + amount loss for station daily precipitation."""
     cfg = config or DownscalRainLossConfig()
@@ -186,9 +197,19 @@ def downscalrain_loss(
     wet = rain_mm > cfg.wet_threshold_mm
     wet_float = wet.float()
 
-    occurrence_loss = F.binary_cross_entropy_with_logits(outputs["wet_logit"], wet_float)
+    occurrence_raw = F.binary_cross_entropy_with_logits(outputs["wet_logit"], wet_float, reduction="none")
+    occurrence_weights = None if context is None else context.get("occurrence_weight")
+    if occurrence_weights is not None:
+        occurrence_weights = occurrence_weights.to(device=rain_mm.device, dtype=rain_mm.dtype)
+        occurrence_loss = (occurrence_raw * occurrence_weights).sum() / occurrence_weights.sum().clamp_min(1e-6)
+    else:
+        occurrence_loss = occurrence_raw.mean()
+
     pred_log_amount = F.softplus(outputs["log_amount"])
     target_log_amount = torch.log1p(rain_mm)
+    dry_weights = None if context is None else context.get("dry_weight")
+    if dry_weights is not None:
+        dry_weights = dry_weights.to(device=rain_mm.device, dtype=rain_mm.dtype)
 
     if wet.any():
         weights = torch.ones_like(rain_mm[wet])
@@ -204,20 +225,40 @@ def downscalrain_loss(
         amount_loss = pred_log_amount.mean() * 0.0
 
     if (~wet).any():
-        dry_amount_loss = pred_log_amount[~wet].mean()
+        if dry_weights is not None:
+            dry_subset_weights = dry_weights[~wet]
+            dry_amount_loss = (
+                pred_log_amount[~wet] * dry_subset_weights
+            ).sum() / dry_subset_weights.sum().clamp_min(1e-6)
+        else:
+            dry_amount_loss = pred_log_amount[~wet].mean()
     else:
         dry_amount_loss = pred_log_amount.mean() * 0.0
+
+    if cfg.dry_rain_weight > 0 and (~wet).any():
+        pred_rain = predict_rain_mm(outputs)
+        if dry_weights is not None:
+            dry_subset_weights = dry_weights[~wet]
+            dry_rain_loss = (
+                pred_rain[~wet] * dry_subset_weights
+            ).sum() / dry_subset_weights.sum().clamp_min(1e-6)
+        else:
+            dry_rain_loss = pred_rain[~wet].mean()
+    else:
+        dry_rain_loss = pred_log_amount.mean() * 0.0
 
     total = (
         cfg.occurrence_weight * occurrence_loss
         + cfg.amount_weight * amount_loss
         + cfg.dry_amount_weight * dry_amount_loss
+        + cfg.dry_rain_weight * dry_rain_loss
     )
     parts = {
         "loss": float(total.detach().cpu()),
         "occurrence_loss": float(occurrence_loss.detach().cpu()),
         "amount_loss": float(amount_loss.detach().cpu()),
         "dry_amount_loss": float(dry_amount_loss.detach().cpu()),
+        "dry_rain_loss": float(dry_rain_loss.detach().cpu()),
     }
     return total, parts
 

@@ -70,9 +70,73 @@ def _worker_count(cfg: dict[str, Any]) -> int:
     return 0
 
 
+def _raw_center_channel(
+    patch: torch.Tensor,
+    dataset: RainPatchDataset,
+    channel_name: str,
+    device: torch.device,
+) -> torch.Tensor | None:
+    if channel_name not in dataset.channels or dataset.stats is None:
+        return None
+    channel_idx = dataset.channels.index(channel_name)
+    mean = torch.tensor(dataset.stats.patch_mean[channel_idx], dtype=patch.dtype, device=device)
+    std = torch.tensor(dataset.stats.patch_std[channel_idx], dtype=patch.dtype, device=device)
+    h = patch.shape[-2] // 2
+    w = patch.shape[-1] // 2
+    return patch[:, channel_idx, h, w] * std + mean
+
+
+def _month_tensor(batch: dict[str, Any], device: torch.device) -> torch.Tensor:
+    return torch.tensor([int(str(date)[5:7]) for date in batch["date"]], dtype=torch.long, device=device)
+
+
+def _loss_context(
+    batch: dict[str, Any],
+    dataset: RainPatchDataset,
+    patch: torch.Tensor,
+    rain: torch.Tensor,
+    device: torch.device,
+    cfg: DownscalRainLossConfig,
+) -> dict[str, torch.Tensor]:
+    wet = rain > float(cfg.wet_threshold_mm)
+    dry = rain <= float(cfg.dry_threshold_mm)
+    heavy = rain >= float(cfg.heavy_rain_threshold_mm)
+
+    months = _month_tensor(batch, device)
+    fire_months = torch.tensor(list(cfg.fire_months), dtype=torch.long, device=device)
+    fire = (months[:, None] == fire_months[None, :]).any(dim=1)
+
+    halo = torch.zeros_like(dry)
+    for channel in ("imerg_d0", "era5land_d0"):
+        raw = _raw_center_channel(patch, dataset, channel, device)
+        if raw is not None:
+            halo = halo | (raw > float(cfg.false_rain_threshold_mm))
+
+    occurrence_weight = torch.ones_like(rain)
+    occurrence_weight = torch.where(wet, occurrence_weight * float(cfg.wet_occurrence_weight), occurrence_weight)
+    occurrence_weight = torch.where(heavy, torch.maximum(occurrence_weight, occurrence_weight.new_full((), float(cfg.heavy_occurrence_weight))), occurrence_weight)
+    occurrence_weight = torch.where(dry, torch.maximum(occurrence_weight, occurrence_weight.new_full((), float(cfg.dry_occurrence_weight))), occurrence_weight)
+    occurrence_weight = torch.where(dry & fire, torch.maximum(occurrence_weight, occurrence_weight.new_full((), float(cfg.fire_dry_occurrence_weight))), occurrence_weight)
+    occurrence_weight = torch.where(dry & halo, torch.maximum(occurrence_weight, occurrence_weight.new_full((), float(cfg.halo_dry_occurrence_weight))), occurrence_weight)
+    occurrence_weight = torch.where(dry & fire & halo, torch.maximum(occurrence_weight, occurrence_weight.new_full((), float(cfg.fire_halo_dry_occurrence_weight))), occurrence_weight)
+
+    dry_weight = torch.ones_like(rain)
+    dry_weight = torch.where(dry & fire, torch.maximum(dry_weight, dry_weight.new_full((), float(cfg.fire_dry_occurrence_weight))), dry_weight)
+    dry_weight = torch.where(dry & halo, torch.maximum(dry_weight, dry_weight.new_full((), float(cfg.halo_dry_occurrence_weight))), dry_weight)
+    dry_weight = torch.where(dry & fire & halo, torch.maximum(dry_weight, dry_weight.new_full((), float(cfg.fire_halo_dry_occurrence_weight))), dry_weight)
+
+    return {
+        "occurrence_weight": occurrence_weight,
+        "dry_weight": dry_weight,
+        "fire": fire,
+        "halo": halo,
+    }
+
+
 def _train_one_epoch(
     model: DownscalRainCNN,
     loader: DataLoader,
+    dataset: RainPatchDataset,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     loss_cfg: DownscalRainLossConfig,
@@ -87,7 +151,8 @@ def _train_one_epoch(
 
         optimizer.zero_grad(set_to_none=True)
         outputs = model(patch, meta if model.meta_dim else None)
-        loss, parts = downscalrain_loss(outputs, rain, loss_cfg)
+        context = _loss_context(batch, dataset, patch, rain, device, loss_cfg)
+        loss, parts = downscalrain_loss(outputs, rain, loss_cfg, context=context)
         loss.backward()
         optimizer.step()
 
@@ -262,6 +327,7 @@ def main(
                 "train_occurrence_loss",
                 "train_amount_loss",
                 "train_dry_amount_loss",
+                "train_dry_rain_loss",
                 "val_rmse",
                 "val_mae",
                 "val_bias",
@@ -276,7 +342,7 @@ def main(
         writer.writeheader()
 
         for epoch in range(1, int(train_cfg.get("epochs", 50)) + 1):
-            train_parts = _train_one_epoch(model, train_loader, optimizer, device, loss_cfg)
+            train_parts = _train_one_epoch(model, train_loader, train_ds, optimizer, device, loss_cfg)
             val_metrics = _evaluate(
                 model,
                 val_loader,
@@ -292,6 +358,7 @@ def main(
                 "train_occurrence_loss": train_parts.get("occurrence_loss", 0.0),
                 "train_amount_loss": train_parts.get("amount_loss", 0.0),
                 "train_dry_amount_loss": train_parts.get("dry_amount_loss", 0.0),
+                "train_dry_rain_loss": train_parts.get("dry_rain_loss", 0.0),
                 **{f"val_{k}": v for k, v in val_metrics.items()},
                 "lr": optimizer.param_groups[0]["lr"],
             }

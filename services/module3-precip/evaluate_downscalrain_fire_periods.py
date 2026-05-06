@@ -30,17 +30,30 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-MODELS = [
+BASE_MODELS = [
     ("raw_imerg_center", "rain_imerg_center"),
     ("raw_era5land_center", "rain_era5land_center"),
     ("downscalrain_cnn", "rain_pred_mm"),
 ]
 
 
+def _models(df: pd.DataFrame) -> list[tuple[str, str]]:
+    models = [item for item in BASE_MODELS if item[1] in df.columns]
+    optional = [
+        ("downscalrain_cnn_firecalibrated", "rain_pred_firecalibrated_mm"),
+        ("downscalrain_cnn_fireguard", "rain_pred_fireguard_mm"),
+    ]
+    models.extend(item for item in optional if item[1] in df.columns)
+    return models
+
+
 def _load_frame(predictions_path: str | Path, station_table: str | Path) -> pd.DataFrame:
     pred = pd.read_parquet(predictions_path).copy()
-    stations = pd.read_parquet(station_table)[["station_id", "lat", "lon"]].drop_duplicates()
-    df = pred.merge(stations, on="station_id", how="left")
+    if {"lat", "lon"} <= set(pred.columns):
+        df = pred
+    else:
+        stations = pd.read_parquet(station_table)[["station_id", "lat", "lon"]].drop_duplicates()
+        df = pred.merge(stations, on="station_id", how="left")
     df["date"] = pd.to_datetime(df["date"])
     df["month"] = df["date"].dt.month
     df["rain_station"] = df["rain_station"].clip(lower=0.0)
@@ -72,7 +85,7 @@ def _model_metrics(
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     dry = df["rain_station"] <= dry_threshold_mm
-    for model, column in MODELS:
+    for model, column in _models(df):
         valid = df[["rain_station", column]].replace([np.inf, -np.inf], np.nan).dropna()
         if valid.empty:
             continue
