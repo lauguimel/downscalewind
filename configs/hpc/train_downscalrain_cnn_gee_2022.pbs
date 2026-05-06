@@ -13,6 +13,7 @@ DATASET="${DATASET:-/scratch/maitreje/dsw/downscalrain/patches_gee_2022}"
 OUT="${OUT:-$HOME/dsw/data/models/downscalrain_cnn_gee_2022}"
 VAL="${VAL:-$HOME/dsw/data/validation/downscalrain_cnn_gee_2022}"
 CONFIG="${CONFIG:-$HOME/dsw/services/module3-precip/configs/downscalrain_cnn_gee_2022.yaml}"
+SPLIT_MANIFEST="${SPLIT_MANIFEST:-$OUT/split_manifest.json}"
 EPOCHS="${EPOCHS:-20}"
 BATCH_SIZE="${BATCH_SIZE:-1024}"
 PRED_BATCH_SIZE="${PRED_BATCH_SIZE:-2048}"
@@ -50,7 +51,7 @@ python -u predict_downscalrain.py \
 python -u evaluate_downscalrain_cnn.py \
   --dataset "$DATASET" \
   --predictions "$VAL/predictions.parquet" \
-  --split-manifest "$OUT/split_manifest.json" \
+  --split-manifest "$SPLIT_MANIFEST" \
   --output-dir "$VAL"
 
 python -u calibrate_downscalrain_fire_threshold.py \
