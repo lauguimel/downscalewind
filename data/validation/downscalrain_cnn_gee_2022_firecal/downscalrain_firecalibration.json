@@ -1,0 +1,83 @@
+{
+  "threshold": 0.10999999999999999,
+  "dryguard_threshold": 0.61,
+  "dry_threshold_mm": 1.0,
+  "wet_threshold_mm": 1.0,
+  "min_wet_recall": 0.6,
+  "constraint_satisfied": false,
+  "fire_months": [
+    6,
+    7,
+    8,
+    9
+  ],
+  "calibration_subset": {
+    "split": "val",
+    "region": "Mediterranean 35-45.5N, -10-25E",
+    "n": 472
+  },
+  "best_validation_row": {
+    "threshold": 0.10999999999999999,
+    "objective": 3.825870716416348,
+    "dryguard_objective": 2.955695277819857,
+    "n": 472.0,
+    "n_dry": 415.0,
+    "n_halo": 77.0,
+    "n_wet": 57.0,
+    "all_rmse": 5.353820953675245,
+    "all_mae": 1.230529457488555,
+    "all_bias": -0.7501163421104015,
+    "wet_recall": 0.49122807017543857,
+    "wet_mae": 8.442906027300316,
+    "focus_rmse": 2.526456856201664,
+    "false_wet_rate_on_dry": 0.04578313253012048,
+    "mean_pred_on_dry_mm": 0.197986168602863
+  },
+  "dryguard_validation_row": {
+    "threshold": 0.61,
+    "objective": 5.176491985956503,
+    "dryguard_objective": 0.5168428631494848,
+    "n": 472.0,
+    "n_dry": 415.0,
+    "n_halo": 77.0,
+    "n_wet": 57.0,
+    "all_rmse": 5.586127754916683,
+    "all_mae": 1.1780590020057002,
+    "all_bias": -1.1780590020057002,
+    "wet_recall": 0.017543859649122806,
+    "wet_mae": 9.281471024479782,
+    "focus_rmse": 0.28123106274834475,
+    "false_wet_rate_on_dry": 0.0,
+    "mean_pred_on_dry_mm": 0.0
+  },
+  "test_fire_uncalibrated": {
+    "rmse": 4.470239020687671,
+    "mae": 1.2842665446668124,
+    "bias": -0.6298265895897552,
+    "correlation": 0.3137522432362832,
+    "wet_precision": 0.5609756097560976,
+    "wet_recall": 0.43125,
+    "dry_false_alarm": 0.05837837837837838,
+    "heavy_recall": 0.10526315789473684
+  },
+  "test_fire_calibrated": {
+    "rmse": 4.49457092677489,
+    "mae": 1.2636124801800548,
+    "bias": -0.7053617365349273,
+    "correlation": 0.3083336905240138,
+    "wet_precision": 0.5798319327731093,
+    "wet_recall": 0.43125,
+    "dry_false_alarm": 0.05405405405405406,
+    "heavy_recall": 0.10526315789473684
+  },
+  "test_fire_fireguard": {
+    "rmse": 4.693605843647343,
+    "mae": 1.249218320956428,
+    "bias": -1.0416927878757776,
+    "correlation": 0.2021671431594784,
+    "wet_precision": 0.7058823529411765,
+    "wet_recall": 0.075,
+    "dry_false_alarm": 0.005405405405405406,
+    "heavy_recall": 0.10526315789473684
+  }
+}
