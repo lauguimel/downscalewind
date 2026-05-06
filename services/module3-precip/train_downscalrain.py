@@ -157,12 +157,14 @@ def _save_checkpoint(
 @click.option("--output", "output_dir", default=None, type=click.Path())
 @click.option("--device", "device_name", default=None, help="auto, cpu, cuda, mps")
 @click.option("--epochs", default=None, type=int)
+@click.option("--batch-size", default=None, type=int)
 def main(
     config_path: str,
     dataset_path: str | None,
     output_dir: str | None,
     device_name: str | None,
     epochs: int | None,
+    batch_size: int | None,
 ) -> None:
     t0 = time.perf_counter()
     cfg = _load_config(config_path)
@@ -178,6 +180,8 @@ def main(
         train_cfg["device"] = device_name
     if epochs is not None:
         train_cfg["epochs"] = epochs
+    if batch_size is not None:
+        train_cfg["batch_size"] = batch_size
 
     out_dir = Path(cfg["output"]["dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -227,6 +231,7 @@ def main(
     test_loader = DataLoader(test_ds, shuffle=False, **loader_kwargs)
 
     device = _device(str(train_cfg.get("device", "auto")))
+    log.info("Training device: %s", device)
     model = DownscalRainCNN(
         in_channels=base_ds.n_channels,
         meta_dim=base_ds.meta_dim,
