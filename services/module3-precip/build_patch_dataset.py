@@ -129,8 +129,10 @@ class SourceReader:
 
         self.lat_values = np.asarray(da[self.lat_name].values)
         self.lon_values = np.asarray(da[self.lon_name].values)
-        self.time_values = np.asarray(da[self.time_name].values) if self.time_name else None
+        self.time_values = pd.to_datetime(da[self.time_name].values) if self.time_name else None
         self._array_cache: dict[int, np.ndarray] = {}
+        self._time_index_cache: dict[pd.Timestamp, int] = {}
+        self._point_index_cache: dict[tuple[float, float], tuple[int, int]] = {}
         log.info("Opened source %s: %s[%s]", self.name, spec["path"], self.variable)
 
     def _array_for_key(self, key: int) -> np.ndarray:
@@ -153,16 +155,34 @@ class SourceReader:
         self._array_cache[key] = values
         return values
 
+    def _time_key(self, date: pd.Timestamp) -> int:
+        assert self.time_values is not None
+        target_time = pd.Timestamp(date) + pd.Timedelta(days=self.offset_days)
+        cached = self._time_index_cache.get(target_time)
+        if cached is not None:
+            return cached
+        idx = _time_index(self.time_values, target_time, self.time_tolerance_hours)
+        self._time_index_cache[target_time] = idx
+        return idx
+
+    def _point_indices(self, lat: float, lon: float) -> tuple[int, int]:
+        point = (round(float(lat), 6), round(float(lon), 6))
+        cached = self._point_index_cache.get(point)
+        if cached is not None:
+            return cached
+        row = _nearest_index(self.lat_values, lat)
+        col = _nearest_index(self.lon_values, lon)
+        self._point_index_cache[point] = (row, col)
+        return row, col
+
     def patch(self, lat: float, lon: float, date: pd.Timestamp, size: int) -> np.ndarray:
         if self.temporal:
             assert self.time_name is not None and self.time_values is not None
-            target_time = pd.Timestamp(date) + pd.Timedelta(days=self.offset_days)
-            key = _time_index(self.time_values, target_time, self.time_tolerance_hours)
+            key = self._time_key(pd.Timestamp(date))
         else:
             key = -1
 
-        row = _nearest_index(self.lat_values, lat)
-        col = _nearest_index(self.lon_values, lon)
+        row, col = self._point_indices(lat, lon)
         values = self._array_for_key(key)
         return _slice_with_padding(values, row, col, size, self.fill_value)
 
