@@ -40,6 +40,9 @@ BASE_MODELS = [
 def _models(df: pd.DataFrame) -> list[tuple[str, str]]:
     models = [item for item in BASE_MODELS if item[1] in df.columns]
     optional = [
+        ("imerg_firebalanced", "rain_imerg_firebalanced_mm"),
+        ("imerg_firecorrected", "rain_imerg_firecorrected_mm"),
+        ("imerg_fireguard", "rain_imerg_fireguard_mm"),
         ("downscalrain_cnn_firecalibrated", "rain_pred_firecalibrated_mm"),
         ("downscalrain_cnn_fireguard", "rain_pred_fireguard_mm"),
     ]

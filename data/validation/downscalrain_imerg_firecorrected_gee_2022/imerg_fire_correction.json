@@ -1,0 +1,86 @@
+{
+  "base_product": "rain_imerg_center",
+  "gate": "wet_probability",
+  "fire_months": [
+    6,
+    7,
+    8,
+    9
+  ],
+  "dry_threshold_mm": 1.0,
+  "wet_threshold_mm": 1.0,
+  "wet_recall_retention": 0.9,
+  "calibration_subset": {
+    "split": "val",
+    "region": "Mediterranean 35-45.5N, -10-25E",
+    "n": 472
+  },
+  "balanced_reference": {
+    "threshold": 0.69,
+    "retention": 0.7,
+    "objective": 6.1212777533695935,
+    "dry_objective": 6.1212777533695935,
+    "target_wet_recall": 0.4263157894736842,
+    "n": 472.0,
+    "n_dry": 415.0,
+    "n_halo": 51.0,
+    "n_corrected": 78.0,
+    "all_rmse": 5.357875670226406,
+    "all_mae": 1.4617923571427758,
+    "all_bias": -0.44641314996648146,
+    "wet_precision": 0.3968253968253968,
+    "wet_recall": 0.43859649122807015,
+    "focus_rmse": 5.462654221700075,
+    "false_wet_rate_on_dry": 0.09156626506024096,
+    "mean_pred_on_dry_mm": 0.4904999890182369
+  },
+  "dry_period_correction": {
+    "threshold": 0.61,
+    "retention": 0.0,
+    "objective": 5.436790594235689,
+    "dry_objective": 0.5315274363409522,
+    "target_wet_recall": 0.4263157894736842,
+    "n": 472.0,
+    "n_dry": 415.0,
+    "n_halo": 51.0,
+    "n_corrected": 77.0,
+    "all_rmse": 5.613331337420713,
+    "all_mae": 1.2210699064404036,
+    "all_bias": -1.0789258485036937,
+    "wet_precision": 1.0,
+    "wet_recall": 0.017543859649122806,
+    "focus_rmse": 0.28731345505287154,
+    "false_wet_rate_on_dry": 0.0,
+    "mean_pred_on_dry_mm": 0.05440843226808875
+  },
+  "test_fire_raw_imerg": {
+    "rmse": 5.411464524314256,
+    "mae": 1.9054580441361706,
+    "bias": 0.1686939659441525,
+    "correlation": 0.25072052545467227,
+    "wet_precision": 0.3681592039800995,
+    "wet_recall": 0.4625,
+    "dry_false_alarm": 0.1372972972972973,
+    "heavy_recall": 0.2631578947368421
+  },
+  "test_fire_imerg_firebalanced": {
+    "rmse": 4.8544640379115345,
+    "mae": 1.6261376838953223,
+    "bias": -0.21661772947554583,
+    "correlation": 0.24967846310847033,
+    "wet_precision": 0.375,
+    "wet_recall": 0.43125,
+    "dry_false_alarm": 0.12432432432432433,
+    "heavy_recall": 0.15789473684210525
+  },
+  "test_fire_imerg_firecorrected": {
+    "rmse": 4.701750082657999,
+    "mae": 1.2801566859088143,
+    "bias": -0.9683788143309726,
+    "correlation": 0.21521577875504216,
+    "wet_precision": 0.7058823529411765,
+    "wet_recall": 0.075,
+    "dry_false_alarm": 0.005405405405405406,
+    "heavy_recall": 0.10526315789473684
+  }
+}
