@@ -24,6 +24,7 @@ from .dataset_v2 import (
     NI,
     NJ,
     NK,
+    build_era5_baseline_tensor,
     parse_agl_levels,
     resample_volume_to_agl_levels,
 )
@@ -40,6 +41,7 @@ class WindV2DatasetViT(Dataset):
     def __init__(self, data_dir, splits_yaml, split="train", *, norm=None,
                  n_pressure=10, include_slopes=False, return_geo=False,
                  use_residual=False, return_weight=False,
+                 residual_baseline_mode="pressure_index",
                  agl_weight_alpha=0.0, agl_weight_height=300.0,
                  target_agl_levels=None):
         self.data_dir = Path(data_dir)
@@ -49,6 +51,7 @@ class WindV2DatasetViT(Dataset):
         self.include_slopes = include_slopes
         self.return_geo = return_geo
         self.use_residual = use_residual
+        self.residual_baseline_mode = residual_baseline_mode
         self.return_weight = return_weight
         self.agl_weight_alpha = agl_weight_alpha
         self.agl_weight_height = agl_weight_height
@@ -166,30 +169,13 @@ class WindV2DatasetViT(Dataset):
         return tuple(out)
 
     def _build_era5_baseline_tensor(self, store) -> np.ndarray:
-        """Build a simple ERA5-lifted baseline on the CFD grid, normalised like target."""
-        n = self.norm
         nz = NK if self.target_agl_levels is None else int(self.target_agl_levels.size)
-
-        def profile(var: str) -> np.ndarray:
-            arr = np.asarray(store[f"input/era5_3d/{var}"][:], dtype=np.float32)
-            prof_1d = arr[1, 1, :]
-            k_idx = np.linspace(0, len(prof_1d) - 1, nz, dtype=np.float32)
-            return np.interp(k_idx, np.arange(len(prof_1d), dtype=np.float32),
-                             prof_1d).astype(np.float32)
-
-        u = np.broadcast_to(profile("u")[None, None, :], (NI, NJ, nz)).copy()
-        v = np.broadcast_to(profile("v")[None, None, :], (NI, NJ, nz)).copy()
-        T = np.broadcast_to(profile("T")[None, None, :], (NI, NJ, nz)).copy()
-        q = np.broadcast_to(profile("q")[None, None, :], (NI, NJ, nz)).copy()
-        w = np.zeros((NI, NJ, nz), dtype=np.float32)
-
-        return np.stack([
-            (u - n["U_x_offset"]) / n["U_uv_scale"],
-            (v - n["U_y_offset"]) / n["U_uv_scale"],
-            (w - n["U_z_offset"]) / n["U_w_scale"],
-            (T - n["T_offset"]) / n["T_scale"],
-            (q - n["q_offset"]) / n["q_scale"],
-        ], axis=0).astype(np.float32)
+        return build_era5_baseline_tensor(
+            store,
+            self.norm,
+            nz,
+            mode=self.residual_baseline_mode,
+        )
 
     def _build_loss_weight(self, agl: np.ndarray) -> np.ndarray:
         agl = np.maximum(agl, 0.0)

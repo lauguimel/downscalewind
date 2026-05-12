@@ -152,6 +152,10 @@ def main():
                     help="Add terrain slope_x/slope_y channels to the 2D terrain encoder.")
     ap.add_argument("--use-residual", action="store_true",
                     help="Train on CFD minus ERA5-lifted baseline instead of absolute fields.")
+    ap.add_argument("--residual-baseline-mode", default="pressure_index",
+                    choices=["pressure_index", "surface"],
+                    help="Baseline used when --use-residual is active. Existing checkpoints "
+                         "used pressure_index; near-ground/FWI models should use surface.")
     ap.add_argument("--agl-weight-alpha", type=float, default=0.0,
                     help="Near-ground loss boost: weight=1+alpha*exp(-AGL/H).")
     ap.add_argument("--agl-weight-height", type=float, default=300.0,
@@ -188,6 +192,7 @@ def main():
         include_slopes=args.include_slopes,
         return_geo=args.use_geo,
         use_residual=args.use_residual,
+        residual_baseline_mode=args.residual_baseline_mode,
         return_weight=use_weight,
         agl_weight_alpha=args.agl_weight_alpha,
         agl_weight_height=args.agl_weight_height,

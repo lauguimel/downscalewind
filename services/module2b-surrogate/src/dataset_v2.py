@@ -85,6 +85,70 @@ DEFAULT_NORM = {
 }
 
 
+def dewpoint_k_to_specific_humidity(dewpoint_k: np.ndarray, p_hpa: float = 1013.25) -> np.ndarray:
+    """Specific humidity from dewpoint temperature and pressure.
+
+    ERA5 surface input stores d2m but the surrogate target uses q. For a
+    near-ground residual baseline, d2m gives vapour pressure directly.
+    """
+    td_c = np.asarray(dewpoint_k, dtype=np.float32) - 273.15
+    e_hpa = 6.112 * np.exp(17.67 * td_c / (td_c + 243.5))
+    return (0.622 * e_hpa / np.maximum(p_hpa - 0.378 * e_hpa, 1e-6)).astype(np.float32)
+
+
+def build_era5_baseline_tensor(
+    store: Any,
+    norm: dict[str, float],
+    nz: int,
+    *,
+    mode: str = "pressure_index",
+) -> np.ndarray:
+    """Build the normalised ERA5 residual baseline on the target grid.
+
+    `pressure_index` is the legacy mode used by existing residual checkpoints:
+    it interpolates pressure-level arrays by array index. This is retained for
+    reproducibility only.
+
+    `surface` is the near-ground mode for AGL/FWI models: it uses ERA5 surface
+    u10/v10/t2m/d2m and broadcasts them over the near-surface target levels.
+    """
+    n = norm
+    if mode == "pressure_index":
+        def profile(var: str) -> np.ndarray:
+            arr = np.asarray(store[f"input/era5_3d/{var}"][:], dtype=np.float32)
+            prof_1d = arr[1, 1, :]
+            k_idx = np.linspace(0, len(prof_1d) - 1, nz, dtype=np.float32)
+            return np.interp(k_idx, np.arange(len(prof_1d), dtype=np.float32),
+                             prof_1d).astype(np.float32)
+
+        u = np.broadcast_to(profile("u")[None, None, :], (NI, NJ, nz)).copy()
+        v = np.broadcast_to(profile("v")[None, None, :], (NI, NJ, nz)).copy()
+        T = np.broadcast_to(profile("T")[None, None, :], (NI, NJ, nz)).copy()
+        q = np.broadcast_to(profile("q")[None, None, :], (NI, NJ, nz)).copy()
+    elif mode == "surface":
+        surf = store["input/era5_surface"]
+        u0 = float(np.asarray(surf["u10"][:], dtype=np.float32)[1, 1])
+        v0 = float(np.asarray(surf["v10"][:], dtype=np.float32)[1, 1])
+        T0 = float(np.asarray(surf["t2m"][:], dtype=np.float32)[1, 1])
+        d2m0 = float(np.asarray(surf["d2m"][:], dtype=np.float32)[1, 1])
+        q0 = float(dewpoint_k_to_specific_humidity(np.array([d2m0], dtype=np.float32))[0])
+        u = np.full((NI, NJ, nz), u0, dtype=np.float32)
+        v = np.full((NI, NJ, nz), v0, dtype=np.float32)
+        T = np.full((NI, NJ, nz), T0, dtype=np.float32)
+        q = np.full((NI, NJ, nz), q0, dtype=np.float32)
+    else:
+        raise ValueError(f"Unknown residual baseline mode: {mode}")
+
+    w = np.zeros((NI, NJ, nz), dtype=np.float32)
+    return np.stack([
+        (u - n["U_x_offset"]) / n["U_uv_scale"],
+        (v - n["U_y_offset"]) / n["U_uv_scale"],
+        (w - n["U_z_offset"]) / n["U_w_scale"],
+        (T - n["T_offset"]) / n["T_scale"],
+        (q - n["q_offset"]) / n["q_scale"],
+    ], axis=0).astype(np.float32)
+
+
 def parse_agl_levels(levels: str | list[float] | tuple[float, ...] | np.ndarray | None) -> np.ndarray | None:
     """Parse an optional fixed-AGL target grid.
 
@@ -179,6 +243,7 @@ class WindV2Dataset(Dataset):
         include_z: bool = True,
         include_slopes: bool = False,
         use_residual: bool = False,
+        residual_baseline_mode: str = "pressure_index",
         return_weight: bool = False,
         agl_weight_alpha: float = 0.0,
         agl_weight_height: float = 300.0,
@@ -190,6 +255,7 @@ class WindV2Dataset(Dataset):
         self.include_z = include_z
         self.include_slopes = include_slopes
         self.use_residual = use_residual
+        self.residual_baseline_mode = residual_baseline_mode
         self.return_weight = return_weight
         self.agl_weight_alpha = agl_weight_alpha
         self.agl_weight_height = agl_weight_height
@@ -336,30 +402,13 @@ class WindV2Dataset(Dataset):
         return resample_volume_to_agl_levels(target, agl, self.target_agl_levels)
 
     def _build_era5_baseline_tensor(self, store: Any) -> np.ndarray:
-        """Build a simple ERA5-lifted baseline on the CFD grid, normalised like target."""
-        n = self.norm
         nz = NK if self.target_agl_levels is None else int(self.target_agl_levels.size)
-
-        def profile(var: str) -> np.ndarray:
-            arr = np.asarray(store[f"input/era5_3d/{var}"][:], dtype=np.float32)
-            prof_1d = arr[1, 1, :]
-            k_idx = np.linspace(0, len(prof_1d) - 1, nz, dtype=np.float32)
-            return np.interp(k_idx, np.arange(len(prof_1d), dtype=np.float32),
-                             prof_1d).astype(np.float32)
-
-        u = np.broadcast_to(profile("u")[None, None, :], (NI, NJ, nz)).copy()
-        v = np.broadcast_to(profile("v")[None, None, :], (NI, NJ, nz)).copy()
-        T = np.broadcast_to(profile("T")[None, None, :], (NI, NJ, nz)).copy()
-        q = np.broadcast_to(profile("q")[None, None, :], (NI, NJ, nz)).copy()
-        w = np.zeros((NI, NJ, nz), dtype=np.float32)
-
-        return np.stack([
-            (u - n["U_x_offset"]) / n["U_uv_scale"],
-            (v - n["U_y_offset"]) / n["U_uv_scale"],
-            (w - n["U_z_offset"]) / n["U_w_scale"],
-            (T - n["T_offset"]) / n["T_scale"],
-            (q - n["q_offset"]) / n["q_scale"],
-        ], axis=0).astype(np.float32)
+        return build_era5_baseline_tensor(
+            store,
+            self.norm,
+            nz,
+            mode=self.residual_baseline_mode,
+        )
 
     def _build_loss_weight(self, store: Any) -> np.ndarray:
         if self.target_agl_levels is None:

@@ -206,6 +206,7 @@ def build_dataset(args, norm: dict[str, float], ck_cfg: dict[str, Any]):
     include_slopes = bool(ck_cfg.get("include_slopes", False))
     use_geo = bool(ck_cfg.get("use_geo", False))
     target_agl_levels = parse_agl_levels(ck_cfg.get("target_agl_levels"))
+    residual_baseline_mode = str(ck_cfg.get("residual_baseline_mode", "pressure_index"))
     if args.model_type == "vit":
         return WindV2DatasetViT(
             args.data_dir,
@@ -215,6 +216,7 @@ def build_dataset(args, norm: dict[str, float], ck_cfg: dict[str, Any]):
             include_slopes=include_slopes,
             return_geo=use_geo,
             use_residual=False,
+            residual_baseline_mode=residual_baseline_mode,
             target_agl_levels=target_agl_levels,
         )
     return WindV2Dataset(
@@ -224,6 +226,7 @@ def build_dataset(args, norm: dict[str, float], ck_cfg: dict[str, Any]):
         norm=norm,
         include_slopes=include_slopes,
         use_residual=False,
+        residual_baseline_mode=residual_baseline_mode,
         target_agl_levels=target_agl_levels,
     )
 

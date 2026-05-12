@@ -42,7 +42,7 @@ sys.path.insert(0, str(SURROGATE_DIR))
 
 from evaluate_v2_physical import denormalize_fields, load_norm_overrides  # noqa: E402
 from shared.fwi import specific_humidity_to_rh  # noqa: E402
-from src.dataset_v2 import DEFAULT_NORM, NI, NJ, parse_agl_levels  # noqa: E402
+from src.dataset_v2 import DEFAULT_NORM, NI, NJ, build_era5_baseline_tensor, parse_agl_levels  # noqa: E402
 from src.model_vit_v2 import build_vit_v2  # noqa: E402
 
 
@@ -137,30 +137,6 @@ def normalise_era5(store, norm: dict[str, float]) -> np.ndarray:
     return np.concatenate(flat_parts).astype(np.float32)
 
 
-def era5_baseline_tensor(store, norm: dict[str, float], nz: int) -> np.ndarray:
-    def profile(var: str) -> np.ndarray:
-        arr = np.asarray(store[f"input/era5_3d/{var}"][:], dtype=np.float32)
-        prof_1d = arr[1, 1, :]
-        k_idx = np.linspace(0, len(prof_1d) - 1, nz, dtype=np.float32)
-        return np.interp(k_idx, np.arange(len(prof_1d), dtype=np.float32), prof_1d).astype(np.float32)
-
-    u = np.broadcast_to(profile("u")[None, None, :], (NI, NJ, nz)).copy()
-    v = np.broadcast_to(profile("v")[None, None, :], (NI, NJ, nz)).copy()
-    t = np.broadcast_to(profile("T")[None, None, :], (NI, NJ, nz)).copy()
-    q = np.broadcast_to(profile("q")[None, None, :], (NI, NJ, nz)).copy()
-    w = np.zeros((NI, NJ, nz), dtype=np.float32)
-    return np.stack(
-        [
-            (u - norm["U_x_offset"]) / norm["U_uv_scale"],
-            (v - norm["U_y_offset"]) / norm["U_uv_scale"],
-            (w - norm["U_z_offset"]) / norm["U_w_scale"],
-            (t - norm["T_offset"]) / norm["T_scale"],
-            (q - norm["q_offset"]) / norm["q_scale"],
-        ],
-        axis=0,
-    ).astype(np.float32)
-
-
 def interp_profile(levels: np.ndarray, values: np.ndarray, target_agl: float) -> float:
     order = np.argsort(levels)
     return float(np.interp(float(target_agl), levels[order], values[order]))
@@ -214,7 +190,12 @@ def infer_one(model, store, norm: dict[str, float], cfg: dict, device: torch.dev
         pred = model(terrain_t, era5_t, geo_t).squeeze(0).detach().float().cpu().numpy()
 
     if bool(cfg.get("use_residual", False)):
-        pred = pred + era5_baseline_tensor(store, norm, pred.shape[-1])
+        pred = pred + build_era5_baseline_tensor(
+            store,
+            norm,
+            pred.shape[-1],
+            mode=str(cfg.get("residual_baseline_mode", "pressure_index")),
+        )
     return denormalize_fields(pred, norm), levels
 
 
