@@ -308,6 +308,11 @@ def build_metrics(long_df: pd.DataFrame) -> pd.DataFrame:
         "mediterranean": long_df["lat"].between(41.0, 45.5).to_numpy()
         & long_df["lon"].between(2.0, 10.5).to_numpy(),
     }
+    dsw_cases = long_df[long_df["product"].eq("DownscaleWind_DownscalRain_FWI")]
+    if not dsw_cases.empty:
+        dsw_key = pd.MultiIndex.from_frame(dsw_cases[["station_id", "date"]].drop_duplicates())
+        all_key = pd.MultiIndex.from_frame(long_df[["station_id", "date"]])
+        subsets["downscaled_uvt_cases"] = all_key.isin(dsw_key)
     rows = []
     for subset, mask in subsets.items():
         for product in sorted(long_df["product"].unique()):
@@ -364,6 +369,18 @@ def write_report(output_dir: Path, metrics: pd.DataFrame, run_meta: dict) -> Non
         lines.append("```csv")
         lines.append(all_metrics[cols].to_csv(index=False))
         lines.append("```")
+    if run_meta["has_downscaled_uvt"]:
+        dsw_metrics = metrics[metrics["subset"].eq("downscaled_uvt_cases")].copy()
+        if not dsw_metrics.empty:
+            dsw_metrics["order"] = dsw_metrics["product"].map({p: i for i, p in enumerate(preferred)}).fillna(99)
+            dsw_metrics = dsw_metrics.sort_values("order").drop(columns=["order"])
+            lines.extend(["", "## Downscaled UVT Cases", ""])
+            try:
+                lines.append(dsw_metrics[cols].to_markdown(index=False, floatfmt=".3f"))
+            except Exception:
+                lines.append("```csv")
+                lines.append(dsw_metrics[cols].to_csv(index=False))
+                lines.append("```")
     if not run_meta["has_downscaled_uvt"]:
         lines.extend(
             [
