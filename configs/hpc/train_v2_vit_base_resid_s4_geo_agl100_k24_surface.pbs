@@ -1,6 +1,6 @@
 #!/bin/bash -l
 #PBS -N v2_vitb_agl100_sfc
-#PBS -l select=1:ncpus=8:mem=96GB:ngpus=1:gpu_id=H100
+#PBS -l select=1:ncpus=8:mem=48GB:ngpus=1:gpu_id=A100
 #PBS -l walltime=08:00:00
 #PBS -j oe
 #PBS -m n
