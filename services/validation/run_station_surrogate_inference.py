@@ -23,14 +23,15 @@ via --downscaled-uvt.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
-import pandas as pd
 import torch
 import zarr
 
@@ -45,16 +46,28 @@ from src.dataset_v2 import DEFAULT_NORM, NI, NJ, parse_agl_levels  # noqa: E402
 from src.model_vit_v2 import build_vit_v2  # noqa: E402
 
 
-def load_frame(path: Path) -> pd.DataFrame:
+def load_rows(path: Path) -> list[dict[str, str]]:
     if path.suffix == ".parquet":
-        return pd.read_parquet(path)
-    return pd.read_csv(path)
+        raise ValueError("Parquet manifests require pandas; pass a CSV manifest for GPU inference")
+    with path.open(newline="") as f:
+        return list(csv.DictReader(f))
 
 
-def as_date(row: pd.Series) -> pd.Timestamp:
-    if "date" in row and pd.notna(row["date"]):
-        return pd.Timestamp(row["date"]).normalize()
-    return pd.Timestamp(row["timestamp_utc"]).normalize()
+def is_present(value: object) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    return text != "" and text.lower() not in {"nan", "nat", "none"}
+
+
+def parse_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+def as_date(row: dict[str, str]) -> str:
+    if is_present(row.get("date")):
+        return parse_datetime(str(row["date"])).date().isoformat()
+    return parse_datetime(str(row["timestamp_utc"])).date().isoformat()
 
 
 def load_checkpoint(path: Path, device: torch.device) -> dict:
@@ -64,10 +77,10 @@ def load_checkpoint(path: Path, device: torch.device) -> dict:
     return checkpoint
 
 
-def pressure_hpa(row: pd.Series) -> float:
-    if "pres" not in row or pd.isna(row["pres"]):
+def pressure_hpa(row: dict[str, str]) -> float:
+    if not is_present(row.get("pres")):
         return 1013.25
-    value = float(row["pres"])
+    value = float(str(row["pres"]))
     return value / 100.0 if value > 2000.0 else value
 
 
@@ -205,12 +218,27 @@ def infer_one(model, store, norm: dict[str, float], cfg: dict, device: torch.dev
     return denormalize_fields(pred, norm), levels
 
 
-def resolve_grid_zarr(row: pd.Series, grid_dir: Path | None) -> Path:
-    if "grid_zarr" in row and pd.notna(row["grid_zarr"]):
+def resolve_grid_zarr(row: dict[str, str], grid_dir: Path | None) -> Path:
+    if is_present(row.get("grid_zarr")):
         return Path(str(row["grid_zarr"]))
     if grid_dir is None:
         raise ValueError("Manifest has no grid_zarr column; pass --grid-dir")
     return grid_dir / str(row["case_id"]) / "grid.zarr"
+
+
+def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    if not rows:
+        path.write_text("")
+        return
+    fieldnames: list[str] = []
+    for row in rows:
+        for key in row:
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def run(
@@ -224,7 +252,7 @@ def run(
     amp: bool,
     strict: bool,
 ) -> None:
-    manifest = load_frame(manifest_path)
+    manifest = load_rows(manifest_path)
     device = torch.device(device_name if device_name != "auto" else ("cuda" if torch.cuda.is_available() else "cpu"))
     checkpoint = load_checkpoint(weights_path, device)
     cfg = checkpoint.get("config", {})
@@ -233,7 +261,7 @@ def run(
     rows = []
     missing = []
     model = None
-    for _, row in manifest.iterrows():
+    for row in manifest:
         grid_zarr = resolve_grid_zarr(row, grid_dir)
         if not grid_zarr.exists():
             missing.append({"case_id": row.get("case_id"), "station_id": row.get("station_id"), "grid_zarr": str(grid_zarr)})
@@ -253,10 +281,10 @@ def run(
             {
                 "case_id": row.get("case_id"),
                 "station_id": row.get("station_id"),
-                "date": as_date(row).date().isoformat(),
+                "date": as_date(row),
                 "timestamp_utc": row.get("timestamp_utc"),
-                "lat": float(row.get("lat")) if "lat" in row else float(store["input"].attrs.get("lat", np.nan)),
-                "lon": float(row.get("lon")) if "lon" in row else float(store["input"].attrs.get("lon", np.nan)),
+                "lat": float(row["lat"]) if is_present(row.get("lat")) else float(store["input"].attrs.get("lat", np.nan)),
+                "lon": float(row["lon"]) if is_present(row.get("lon")) else float(store["input"].attrs.get("lon", np.nan)),
                 "grid_zarr": str(grid_zarr),
                 "inference_s": dt,
                 "device": str(device),
@@ -266,27 +294,22 @@ def run(
         )
         rows.append(values)
 
-    out = pd.DataFrame(rows)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    out.to_csv(output_path, index=False)
-    try:
-        out.to_parquet(output_path.with_suffix(".parquet"), index=False)
-    except Exception:
-        pass
+    write_csv(output_path, rows)
     meta = {
         "manifest": str(manifest_path),
         "weights": str(weights_path),
         "norm_yaml": str(norm_yaml),
         "n_manifest": int(len(manifest)),
-        "n_inferred": int(len(out)),
+        "n_inferred": int(len(rows)),
         "n_missing_grid_zarr": int(len(missing)),
         "checkpoint_config": {k: str(v) for k, v in cfg.items()},
     }
     output_path.with_suffix(".run.json").write_text(json.dumps(meta, indent=2))
     if missing:
-        pd.DataFrame(missing).to_csv(output_path.with_name(output_path.stem + "_missing.csv"), index=False)
+        write_csv(output_path.with_name(output_path.stem + "_missing.csv"), missing)
     print(f"manifest_rows={len(manifest)}")
-    print(f"inferred={len(out)}")
+    print(f"inferred={len(rows)}")
     print(f"missing_grid_zarr={len(missing)}")
     print(f"output={output_path}")
 
