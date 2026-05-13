@@ -218,6 +218,34 @@ Par defaut, le pressure-gradient utilise les niveaux ERA5 850/800/700 hPa si
 disponibles dans `inflow.json`. Si `era5_grid` manque, le script bascule sur
 une approximation par vent libre du profil a 1500 m.
 
+Resultat canary reel `ct_d_fire_0170_case_ts014`, lance le 2026-05-13 sur Aqua:
+
+- artifact: `/scratch/maitreje/dsw/wind_canary/ct_d_fire_0170_ts014`;
+- job PBS: `21304211.aqua`;
+- les quatre variantes convergent et exportent `grid.zarr`;
+- le pressure-gradient corrige partiellement le damping, mais ne restaure pas
+  encore le bulk central.
+
+Moyenne sur `2,10,20,50,100 m AGL`, crop central 2 km:
+
+| variante | crop / inflow | center / inflow | crop / ERA5 u10 |
+|---|---:|---:|---:|
+| `control` | 0.545 | 0.514 | 0.644 |
+| `pg_geo` | 0.616 | 0.544 | 0.721 |
+| `pg_geo_flip` | 0.647 | 0.600 | 0.759 |
+| `mean_force` | 0.685 | 0.655 | 0.809 |
+
+Lecture:
+
+- `pg_geo_flip` est meilleur que `pg_geo`, donc le signe OpenFOAM/source doit
+  etre traite comme suspect jusqu'au canary plat;
+- meme le diagnostic `mean_force` reste sous l'inflow dans le crop central;
+- a 2 m, le bord amont est deja proche de l'inflow (`control` 0.96,
+  `mean_force` 1.12), mais le domaine perd fortement vers l'aval;
+- conclusion: ne pas regenerer les 9k avec ce simple patch. Il faut maintenant
+  calibrer sur terrain plat/ridge analytique ou passer au target speed-up
+  conservatif pour le surrogate FWI.
+
 ### Phase B - decision
 
 Adopter le nouveau teacher si:
