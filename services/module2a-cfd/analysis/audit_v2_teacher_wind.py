@@ -101,7 +101,17 @@ def centre_surface_speed(g) -> tuple[float, float, float]:
 
 def mean_stats(values: np.ndarray, mask: np.ndarray) -> dict[str, float]:
     sub = np.asarray(values, dtype=np.float64)[mask]
+    sub = sub[np.isfinite(sub)]
+    if sub.size == 0:
+        return {
+            "n": 0,
+            "mean": float("nan"),
+            "p10": float("nan"),
+            "p50": float("nan"),
+            "p90": float("nan"),
+        }
     return {
+        "n": int(sub.size),
         "mean": float(np.nanmean(sub)),
         "p10": float(np.nanpercentile(sub, 10)),
         "p50": float(np.nanpercentile(sub, 50)),
@@ -109,18 +119,28 @@ def mean_stats(values: np.ndarray, mask: np.ndarray) -> dict[str, float]:
     }
 
 
+def flow_unit(inflow: dict) -> tuple[float, float]:
+    """Return horizontal flow direction vector in CFD x/y coordinates."""
+    fx = finite_float(inflow.get("flowDir_x"))
+    fy = finite_float(inflow.get("flowDir_y"))
+    norm = math.hypot(fx, fy)
+    if norm > 1e-6:
+        return fx / norm, fy / norm
+    wind_dir = finite_float(inflow.get("wind_dir"))
+    if not math.isfinite(wind_dir):
+        return float("nan"), float("nan")
+    wd_rad = math.radians(wind_dir)
+    return -math.sin(wd_rad), -math.cos(wd_rad)
+
+
 def edge_masks(shape: tuple[int, int], inflow: dict, width: int = 10) -> tuple[np.ndarray, np.ndarray]:
     """Return upstream/downstream edge masks from meteorological wind_dir."""
     ni, nj = shape
     up = np.zeros((ni, nj), dtype=bool)
     down = np.zeros((ni, nj), dtype=bool)
-    wind_dir = finite_float(inflow.get("wind_dir"))
-    if not math.isfinite(wind_dir):
+    ix, iy = flow_unit(inflow)
+    if not math.isfinite(ix) or not math.isfinite(iy):
         return up, down
-    wd_rad = math.radians(wind_dir)
-    # Unit vector of where wind blows TO. x=east, y=north.
-    ix = -math.sin(wd_rad)
-    iy = -math.cos(wd_rad)
     w = max(1, min(width, ni // 2, nj // 2))
     if abs(ix) >= abs(iy):
         if ix > 0:
@@ -137,6 +157,54 @@ def edge_masks(shape: tuple[int, int], inflow: dict, width: int = 10) -> tuple[n
             up[:, -w:] = True
             down[:, :w] = True
     return up, down
+
+
+def terrain_masks(g, terrain: np.ndarray, inflow: dict, base_mask: np.ndarray) -> dict[str, np.ndarray | float]:
+    """Build simple relief masks inside the requested crop."""
+    x = np.asarray(g["coords/x"][:], dtype=np.float64)
+    y = np.asarray(g["coords/y"][:], dtype=np.float64)
+    z = np.asarray(terrain, dtype=np.float64)
+    dzdx, dzdy = np.gradient(z, x, y, edge_order=1)
+    slope_deg = np.degrees(np.arctan(np.hypot(dzdx, dzdy)))
+
+    base = np.asarray(base_mask, dtype=bool) & np.isfinite(z) & np.isfinite(slope_deg)
+    if not base.any():
+        empty = np.zeros_like(base, dtype=bool)
+        return {
+            "slope_deg": slope_deg,
+            "windward": empty,
+            "lee": empty,
+            "crest": empty,
+            "valley": empty,
+            "relief_crop_m": float("nan"),
+            "slope_crop_mean_deg": float("nan"),
+            "slope_crop_p90_deg": float("nan"),
+        }
+
+    fx, fy = flow_unit(inflow)
+    along_flow_slope = dzdx * fx + dzdy * fy if math.isfinite(fx) and math.isfinite(fy) else np.full_like(z, np.nan)
+    slope_ref = max(3.0, float(np.nanpercentile(slope_deg[base], 60)))
+    high_ref = float(np.nanpercentile(z[base], 75))
+    low_ref = float(np.nanpercentile(z[base], 25))
+    windward_ref = float(np.nanpercentile(along_flow_slope[base], 70)) if np.isfinite(along_flow_slope[base]).any() else float("nan")
+    lee_ref = float(np.nanpercentile(along_flow_slope[base], 30)) if np.isfinite(along_flow_slope[base]).any() else float("nan")
+
+    steep = slope_deg >= slope_ref
+    windward = base & steep & np.isfinite(along_flow_slope) & (along_flow_slope >= windward_ref)
+    lee = base & steep & np.isfinite(along_flow_slope) & (along_flow_slope <= lee_ref)
+    crest = base & (z >= high_ref)
+    valley = base & (z <= low_ref)
+
+    return {
+        "slope_deg": slope_deg,
+        "windward": windward,
+        "lee": lee,
+        "crest": crest,
+        "valley": valley,
+        "relief_crop_m": float(np.nanmax(z[base]) - np.nanmin(z[base])),
+        "slope_crop_mean_deg": float(np.nanmean(slope_deg[base])),
+        "slope_crop_p90_deg": float(np.nanpercentile(slope_deg[base], 90)),
+    }
 
 
 def audit_case(grid_zarr: Path, heights: list[float], crop_km: float | None) -> list[dict[str, object]]:
@@ -156,6 +224,7 @@ def audit_case(grid_zarr: Path, heights: list[float], crop_km: float | None) -> 
     u10, v10, era5_u10 = centre_surface_speed(g)
     inflow = load_inflow_from_grid(g)
     mask_up, mask_down = edge_masks(terrain.shape, inflow)
+    relief = terrain_masks(g, terrain, inflow, mask_crop)
     z0_eff = finite_float(g["input"].attrs.get("z0_eff"))
     u_star = finite_float(inflow.get("u_star"))
 
@@ -168,14 +237,26 @@ def audit_case(grid_zarr: Path, heights: list[float], crop_km: float | None) -> 
         crop_stats = mean_stats(speed_h, mask_crop)
         upstream_stats = mean_stats(speed_h, mask_up) if mask_up.any() else {}
         downstream_stats = mean_stats(speed_h, mask_down) if mask_down.any() else {}
+        windward_stats = mean_stats(speed_h, relief["windward"]) if np.asarray(relief["windward"]).any() else {}
+        lee_stats = mean_stats(speed_h, relief["lee"]) if np.asarray(relief["lee"]).any() else {}
+        crest_stats = mean_stats(speed_h, relief["crest"]) if np.asarray(relief["crest"]).any() else {}
+        valley_stats = mean_stats(speed_h, relief["valley"]) if np.asarray(relief["valley"]).any() else {}
         center_speed = float(speed_h[ci, cj])
         inflow_h = inflow_speed_at(inflow, h)
+        crop_values = np.asarray(speed_h, dtype=np.float64)[mask_crop]
+        crop_values = crop_values[np.isfinite(crop_values)]
+        frac_crop_above_inflow = (
+            float(np.mean(crop_values >= inflow_h)) if crop_values.size and math.isfinite(inflow_h) else float("nan")
+        )
         rows.append(
             {
                 "grid_zarr": str(grid_zarr),
                 "case": grid_zarr.parent.name,
                 "site_id": g.attrs.get("site_id", ""),
                 "height_agl_m": h,
+                "terrain_relief_crop_m": relief["relief_crop_m"],
+                "terrain_slope_crop_mean_deg": relief["slope_crop_mean_deg"],
+                "terrain_slope_crop_p90_deg": relief["slope_crop_p90_deg"],
                 "era5_u10_ms": era5_u10,
                 "era5_u10_u_ms": u10,
                 "era5_u10_v_ms": v10,
@@ -193,8 +274,17 @@ def audit_case(grid_zarr: Path, heights: list[float], crop_km: float | None) -> 
                 "cfd_speed_center_ms": center_speed,
                 "cfd_speed_upstream_edge_mean_ms": upstream_stats.get("mean", float("nan")),
                 "cfd_speed_downstream_edge_mean_ms": downstream_stats.get("mean", float("nan")),
+                "cfd_speed_windward_mean_ms": windward_stats.get("mean", float("nan")),
+                "cfd_speed_windward_p90_ms": windward_stats.get("p90", float("nan")),
+                "cfd_speed_lee_mean_ms": lee_stats.get("mean", float("nan")),
+                "cfd_speed_lee_p90_ms": lee_stats.get("p90", float("nan")),
+                "cfd_speed_crest_mean_ms": crest_stats.get("mean", float("nan")),
+                "cfd_speed_crest_p90_ms": crest_stats.get("p90", float("nan")),
+                "cfd_speed_valley_mean_ms": valley_stats.get("mean", float("nan")),
+                "cfd_speed_valley_p90_ms": valley_stats.get("p90", float("nan")),
                 "cfd_u_center_ms": float(u_h[ci, cj]),
                 "cfd_v_center_ms": float(v_h[ci, cj]),
+                "fraction_crop_above_inflow": frac_crop_above_inflow,
                 "ratio_crop_to_era5_u10": crop_stats["mean"] / max(era5_u10, 1e-6),
                 "ratio_center_to_era5_u10": center_speed / max(era5_u10, 1e-6),
                 "ratio_upstream_edge_to_inflow": upstream_stats.get("mean", float("nan")) / max(inflow_h, 1e-6)
@@ -207,6 +297,15 @@ def audit_case(grid_zarr: Path, heights: list[float], crop_km: float | None) -> 
                 if math.isfinite(inflow_h)
                 else float("nan"),
                 "ratio_center_to_inflow": center_speed / max(inflow_h, 1e-6)
+                if math.isfinite(inflow_h)
+                else float("nan"),
+                "ratio_windward_mean_to_inflow": windward_stats.get("mean", float("nan")) / max(inflow_h, 1e-6)
+                if math.isfinite(inflow_h)
+                else float("nan"),
+                "ratio_crest_p90_to_inflow": crest_stats.get("p90", float("nan")) / max(inflow_h, 1e-6)
+                if math.isfinite(inflow_h)
+                else float("nan"),
+                "ratio_valley_mean_to_inflow": valley_stats.get("mean", float("nan")) / max(inflow_h, 1e-6)
                 if math.isfinite(inflow_h)
                 else float("nan"),
             }
@@ -257,6 +356,13 @@ def aggregate(rows: list[dict[str, object]]) -> list[dict[str, object]]:
             "ratio_center_to_inflow",
             "ratio_upstream_edge_to_inflow",
             "ratio_downstream_edge_to_inflow",
+            "ratio_windward_mean_to_inflow",
+            "ratio_crest_p90_to_inflow",
+            "ratio_valley_mean_to_inflow",
+            "fraction_crop_above_inflow",
+            "terrain_relief_crop_m",
+            "terrain_slope_crop_mean_deg",
+            "terrain_slope_crop_p90_deg",
             "z0_eff_m",
             "u_star_ms",
         ]:

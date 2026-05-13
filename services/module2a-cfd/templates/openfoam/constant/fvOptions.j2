@@ -10,6 +10,8 @@
  *
  * Conditional blocks:
  *   physics.coriolis (default true)  — Coriolis force on U (atmCoriolisUSource)
+ *   physics.pressure_gradient.enabled — Constant geostrophic pressure-gradient
+ *   physics.mean_velocity_force.enabled — Diagnostic velocity clamp
  *   canopy.enabled   (default false) — Plant canopy drag (atmPlantCanopy* native)
  *   solver.thermal   (default false) — Ambient k/ε sources + L_max limiter (BBSF)
  *
@@ -45,6 +47,52 @@ coriolisForce
         selectionMode   all;
         latitude        {{ site.latitude | default(39.716) }};
     }
+}
+{% endif -%}
+
+{% set pressure_gradient = physics.pressure_gradient | default({}) -%}
+{% if pressure_gradient.enabled | default(false) -%}
+// -------------------------------------------------------------------------
+// Geostrophic pressure-gradient momentum source
+//   Optional recovery path for ABL wind conservation over long rough fetches.
+//   Use together with Coriolis.  dp_dx/dp_dy are kinematic pressure-gradient
+//   accelerations [m/s2], e.g. dp_dx=-f*Vg and dp_dy=f*Ug.
+// -------------------------------------------------------------------------
+geostrophicPressureGradient
+{
+    type            vectorCodedSource;
+    selectionMode   all;
+    fields          (U);
+    name            geostrophicPressureGradient;
+
+    codeAddSup
+    #{
+        const scalarField& V = mesh().V();
+        vectorField& source = eqn.source();
+        forAll(source, cellI)
+        {
+            source[cellI].x() += {{ "%.9e" | format(pressure_gradient.dp_dx | default(0.0)) }} * V[cellI];
+            source[cellI].y() += {{ "%.9e" | format(pressure_gradient.dp_dy | default(0.0)) }} * V[cellI];
+        }
+    #};
+}
+{% endif -%}
+
+{% set mean_velocity_force = physics.mean_velocity_force | default({}) -%}
+{% if mean_velocity_force.enabled | default(false) -%}
+// -------------------------------------------------------------------------
+// Diagnostic mean-velocity force
+//   Use as a canary only. It tests whether momentum replenishment restores
+//   near-surface wind, but is less physically interpretable than the
+//   geostrophic pressure-gradient source.
+// -------------------------------------------------------------------------
+meanVelocityForceDiagnostic
+{
+    type            meanVelocityForce;
+    selectionMode   all;
+    fields          (U);
+    Ubar            ({{ "%.6f" | format(mean_velocity_force.ubar_x | default(inflow.u_hub * inflow.flowDir_x)) }} {{ "%.6f" | format(mean_velocity_force.ubar_y | default(inflow.u_hub * inflow.flowDir_y)) }} {{ "%.6f" | format(mean_velocity_force.ubar_z | default(0.0)) }});
+    relaxation      {{ "%.6f" | format(mean_velocity_force.relaxation | default(0.2)) }};
 }
 {% endif -%}
 
