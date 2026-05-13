@@ -195,6 +195,29 @@ Sorties:
 - profils amont/centre/aval;
 - cartes 10 m: speed, ratio to inflow, terrain, mask crete/vallee.
 
+Builder reproductible:
+
+```bash
+python3 services/module2a-cfd/analysis/build_wind_conservation_canary.py \
+  --base-case /path/to/prepared/openfoam/case \
+  --output-dir /path/to/wind_canary \
+  --overwrite
+
+bash /path/to/wind_canary/run_canary_local_of.sh
+bash /path/to/wind_canary/export_and_audit_canary.sh
+```
+
+Le builder cree quatre variantes a mesh/inlet identiques:
+
+- `control`: cas original;
+- `pg_geo`: pressure-gradient depuis le fit plan de geopotentiel ERA5;
+- `pg_geo_flip`: meme amplitude, signe inverse, pour valider le signe OpenFOAM;
+- `mean_force`: `meanVelocityForce` diagnostic.
+
+Par defaut, le pressure-gradient utilise les niveaux ERA5 850/800/700 hPa si
+disponibles dans `inflow.json`. Si `era5_grid` manque, le script bascule sur
+une approximation par vent libre du profil a 1500 m.
+
 ### Phase B - decision
 
 Adopter le nouveau teacher si:
