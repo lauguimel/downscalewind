@@ -246,6 +246,33 @@ Lecture:
   calibrer sur terrain plat/ridge analytique ou passer au target speed-up
   conservatif pour le surrogate FWI.
 
+Audit wall-z0 ajoute avec
+`services/module2a-cfd/analysis/audit_wall_z0.py` sur les memes variantes:
+
+- pas de mismatch `z0_eff` vs wall-z0 sur ce cas: `inflow_z0_eff = 0.05 m`,
+  `nut/epsilon terrain z0 = uniform 0.05 m`;
+- premiere cellule terrain mediane: `y = 5.63 m`, soit `y/z0 = 112`, donc on
+  n'est pas dans un regime ou la rugosite depasse la premiere cellule;
+- en revanche, la vitesse cellule murale reste bien sous le log-law attendu
+  avec le `u_star` inflow:
+
+| variante | wall U / log-law median | wall `u*_k` / inflow `u*` median |
+|---|---:|---:|
+| `control` | 0.557 | 0.624 |
+| `pg_geo` | 0.610 | 0.656 |
+| `pg_geo_flip` | 0.652 | 0.694 |
+| `mean_force` | 0.700 | 0.756 |
+
+Lecture wall-z0:
+
+- le probleme n'est probablement pas une valeur `z0=0.05` mal lue par
+  OpenFOAM;
+- le mismatch plausible est plutot dynamique: `atmNutkWallFunction` depend du
+  `k` local, et le `k` proche sol tombe a environ 60-75 % du `u*` inflow;
+- prochaine canary utile: sweep `z0_wall = 0.005, 0.01, 0.03, 0.05` et
+  comparaison `atmNutkWallFunction` vs `atmNutUWallFunction`, a inflow
+  identique, pour separer rugosite trop forte et fermeture turbulente.
+
 ### Phase B - decision
 
 Adopter le nouveau teacher si:
