@@ -65,6 +65,10 @@ geostrophicPressureGradient
     fields          (U);
     name            geostrophicPressureGradient;
 
+    codeCorrect
+    #{
+    #};
+
     codeAddSup
     #{
         const scalarField& V = mesh().V();
@@ -74,6 +78,10 @@ geostrophicPressureGradient
             source[cellI].x() += {{ "%.9e" | format(pressure_gradient.dp_dx | default(0.0)) }} * V[cellI];
             source[cellI].y() += {{ "%.9e" | format(pressure_gradient.dp_dy | default(0.0)) }} * V[cellI];
         }
+    #};
+
+    codeConstrain
+    #{
     #};
 }
 {% endif -%}
