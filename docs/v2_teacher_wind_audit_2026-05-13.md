@@ -86,6 +86,16 @@ Direct teacher-vs-station validation therefore requires generating new OpenFOAM 
 
 The current teacher behaves like a terrain/RANS downscaling product with substantial near-ground momentum loss over finite fetch. For station FWI, especially airport/SYNOP stations in windy regimes, it underestimates 10 m wind more than ERA5.
 
+This is not only a terrain-averaging artefact. At 10 m AGL in windy cases (`ERA5 u10 >= 3 m/s`):
+
+| terrain subset | n | median mean/inflow | median p90/inflow |
+|---|---:|---:|---:|
+| slope < 3 deg | 55 | 0.760 | 0.904 |
+| 3 <= slope < 8 deg | 20 | 0.804 | 0.930 |
+| slope >= 8 deg | 33 | 0.811 | 1.100 |
+
+So complex relief can create local accelerated patches, but the low-speed bias already exists on quasi-flat sites. This points to ABL/momentum degradation in the OpenFOAM setup rather than simply "terrain blocks the wind".
+
 Likely causes to test next:
 
 - horizontal ABL degradation over terrain/noSlip fetch despite lateral log-law BC;
