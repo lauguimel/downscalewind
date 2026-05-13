@@ -1,0 +1,51 @@
+#!/bin/bash -l
+#PBS -N wind_canary_pg
+#PBS -l select=1:ncpus=24:mem=48GB
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -m n
+
+set -euo pipefail
+
+export CONTAINER_RUNTIME=apptainer
+export PYTHONUNBUFFERED=1
+
+DSW="$HOME/dsw"
+OF_SIF="$DSW/containers/openfoam_v2512.sif"
+CANARY="/scratch/maitreje/dsw/wind_canary/ct_d_fire_0170_ts014"
+N_ITER=300
+N_CORES=24
+
+cd "$DSW/services/module2a-cfd"
+
+python3 - <<'PY'
+from pathlib import Path
+import logging
+
+import run_multisite_campaign as RMC
+from run_multisite_campaign import solve_case
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+RMC.CONTAINER_RUNTIME = "apptainer"
+RMC.OF_IMAGE = "/home/maitreje/dsw/containers/openfoam_v2512.sif"
+
+canary = Path("/scratch/maitreje/dsw/wind_canary/ct_d_fire_0170_ts014")
+cases = [
+    canary / "cases" / "case_ts000_control",
+    canary / "cases" / "case_ts000_pg_geo",
+    canary / "cases" / "case_ts000_pg_geo_flip",
+    canary / "cases" / "case_ts000_mean_force",
+]
+
+for case in cases:
+    if not case.exists():
+        raise SystemExit(f"missing case: {case}")
+    ok = solve_case(case, 300, 24)
+    if not ok:
+        raise SystemExit(f"solve failed: {case}")
+PY
+
+bash "$CANARY/export_and_audit_canary.sh"
+
+echo "DONE: $CANARY"
