@@ -223,6 +223,8 @@ def read_end_time(case_dir: Path, default: str = "500") -> str:
 def is_time_dir(path: Path) -> bool:
     if not path.is_dir():
         return False
+    if path.name == "0":
+        return False
     try:
         float(path.name)
     except ValueError:
