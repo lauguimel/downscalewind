@@ -1,0 +1,55 @@
+#!/bin/bash -l
+#PBS -N top_bc_canary
+#PBS -l select=1:ncpus=24:mem=48GB
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -m n
+
+set -euo pipefail
+
+export CONTAINER_RUNTIME=apptainer
+export PYTHONUNBUFFERED=1
+
+DSW="$HOME/dsw"
+CANARY="/scratch/maitreje/dsw/top_bc_canary/ct_d_fire_0170_ts014"
+N_ITER=300
+N_CORES=24
+
+cd "$DSW/services/module2a-cfd"
+
+python3 - <<'PY'
+from pathlib import Path
+import json
+import logging
+
+import run_multisite_campaign as RMC
+from run_multisite_campaign import solve_case
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+RMC.CONTAINER_RUNTIME = "apptainer"
+RMC.OF_IMAGE = "/home/maitreje/dsw/containers/openfoam_v2512.sif"
+
+canary = Path("/scratch/maitreje/dsw/top_bc_canary/ct_d_fire_0170_ts014")
+manifest = json.loads((canary / "top_bc_canary_manifest.json").read_text())
+statuses = {}
+
+for variant in manifest["variants"]:
+    case = Path(variant["case_dir"])
+    if not case.exists():
+        statuses[case.name] = "missing"
+        logging.error("missing case: %s", case)
+        continue
+    ok = solve_case(case, 300, 24)
+    statuses[case.name] = "ok" if ok else "failed"
+
+(canary / "solve_status.json").write_text(json.dumps(statuses, indent=2))
+if any(v != "ok" for v in statuses.values()):
+    logging.error("Some top-BC canary variants failed: %s", statuses)
+else:
+    logging.info("All top-BC canary variants solved")
+PY
+
+bash "$CANARY/export_and_audit_top_bc.sh"
+
+echo "DONE: $CANARY"
