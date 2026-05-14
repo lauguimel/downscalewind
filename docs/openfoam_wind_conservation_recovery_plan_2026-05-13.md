@@ -273,6 +273,40 @@ Lecture wall-z0:
   comparaison `atmNutkWallFunction` vs `atmNutUWallFunction`, a inflow
   identique, pour separer rugosite trop forte et fermeture turbulente.
 
+Resultat du sweep wall-z0, lance le 2026-05-14 sur Aqua:
+
+- artifact: `/scratch/maitreje/dsw/wall_z0_canary/ct_d_fire_0170_ts014`;
+- job PBS: `21310393.aqua`;
+- 8 variantes convergentes: `z0_wall = 0.005, 0.01, 0.03, 0.05 m` x
+  `atmNutkWallFunction`, `atmNutUWallFunction`;
+- inflow conserve identique (`z0_eff = 0.05 m`) pour isoler le terme wall.
+
+Moyenne sur `2,10,20,50,100 m AGL`, crop central 2 km:
+
+| wall fn | z0 wall | crop / inflow | center / inflow | crop / ERA5 u10 |
+|---|---:|---:|---:|---:|
+| `atmNutk` | 0.005 | 0.670 | 0.645 | 0.785 |
+| `atmNutk` | 0.010 | 0.635 | 0.608 | 0.746 |
+| `atmNutk` | 0.030 | 0.575 | 0.543 | 0.678 |
+| `atmNutk` | 0.050 | 0.544 | 0.515 | 0.644 |
+| `atmNutU` | 0.005 | 0.678 | 0.654 | 0.792 |
+| `atmNutU` | 0.010 | 0.644 | 0.620 | 0.755 |
+| `atmNutU` | 0.030 | 0.585 | 0.558 | 0.689 |
+| `atmNutU` | 0.050 | 0.556 | 0.527 | 0.655 |
+
+Lecture du sweep:
+
+- baisser `z0_wall` aide fortement: a 10 m, `crop/inflow` passe de 0.498
+  (`atmNutk`, z0=0.05) a 0.627 (`atmNutk`, z0=0.005);
+- mais meme `z0_wall=0.005` ne restaure pas le bulk: moyenne toutes hauteurs
+  plafonnee a environ 0.67-0.68;
+- `atmNutUWallFunction` est seulement marginalement meilleur que `atmNutk`
+  (+0.01 environ), donc le choix de wall function n'est pas le levier principal;
+- conclusion: `z0=0.05` et la friction murale expliquent une partie du damping,
+  mais pas le facteur 2. Il faut tester maintenant une combinaison `z0_wall`
+  plus faible + pressure-gradient calibre, ou passer au target speed-up
+  conservatif pour ne pas faire apprendre ce biais bulk au surrogate.
+
 ### Phase B - decision
 
 Adopter le nouveau teacher si:
