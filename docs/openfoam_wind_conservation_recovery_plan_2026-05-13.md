@@ -307,6 +307,48 @@ Lecture du sweep:
   plus faible + pressure-gradient calibre, ou passer au target speed-up
   conservatif pour ne pas faire apprendre ce biais bulk au surrogate.
 
+Resultat du canary top-BC, lance le 2026-05-14 sur Aqua:
+
+- artifact: `/scratch/maitreje/dsw/top_bc_canary/ct_d_fire_0170_ts014`;
+- job PBS: `21310669.aqua`;
+- 3 variantes convergentes:
+  - `control`: top courant `U inletOutlet`, `p zeroGradient`,
+    `k/epsilon inletOutlet`;
+  - `slip_top`: `U slip`, `p/p_rgh fixedValue 0`, `k/epsilon zeroGradient`;
+  - `slip_top_pg_geo`: `slip_top` + pressure-gradient ERA5.
+
+Moyenne sur `2,10,20,50,100 m AGL`, crop central 2 km:
+
+| variante | crop / inflow | center / inflow | crop / ERA5 u10 |
+|---|---:|---:|---:|
+| `control` | 0.545 | 0.514 | 0.644 |
+| `slip_top` | 0.584 | 0.562 | 0.689 |
+| `slip_top_pg_geo` | 0.659 | 0.608 | 0.771 |
+
+A 10 m AGL:
+
+| variante | crop / inflow | center / inflow | upstream edge / inflow | downstream edge / inflow |
+|---|---:|---:|---:|---:|
+| `control` | 0.499 | 0.467 | 0.785 | 0.535 |
+| `slip_top` | 0.539 | 0.516 | 0.737 | 0.611 |
+| `slip_top_pg_geo` | 0.630 | 0.575 | 0.738 | 0.671 |
+
+Lecture top-BC:
+
+- le `top` courant fuit probablement: le proxy geometrique `U_owner · Sf` donne
+  pour `control` un flux sortant top positif non nul (`mean Un ≈ 0.54 m/s`,
+  top-out ≈ 0.32 x l'inflow lateral entrant);
+- mais `slip_top` seul ne restaure pas le bulk: +0.04 seulement en moyenne;
+- `slip_top + pg_geo` rejoint le meilleur ordre de grandeur obtenu par
+  `z0_wall=0.005`, mais reste loin du gate 0.85-0.95;
+- les champs reconstruits ne contiennent pas `phi`; `postProcess
+  patchIntegrate(phi,name=top)` ne peut donc pas etre applique a posteriori sur
+  ces artifacts nettoyes. Le proxy top-flux est un diagnostic near-top, pas un
+  flux OpenFOAM exact pour les cas `slip`.
+- conclusion: le top BC est un contributeur, pas la fuite dominante unique. La
+  suite utile est un canary combine `z0_wall=0.005` + `slip_top` +
+  pressure-gradient signe/calibre, ou basculer vers target speed-up conservatif.
+
 ### Phase B - decision
 
 Adopter le nouveau teacher si:
