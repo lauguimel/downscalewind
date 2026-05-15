@@ -1,0 +1,115 @@
+#!/bin/bash -l
+#PBS -N terrain_canary
+#PBS -l select=1:ncpus=24:mem=64GB
+#PBS -l walltime=08:00:00
+#PBS -j oe
+#PBS -m n
+
+set -euo pipefail
+
+export CONTAINER_RUNTIME=apptainer
+export PYTHONUNBUFFERED=1
+
+DSW="$HOME/dsw"
+BASE_CASE="/scratch/maitreje/dsw/top_bc_canary/ct_d_fire_0170_ts014/cases/case_ts000_slip_top_pg_geo"
+CANARY="/scratch/maitreje/dsw/terrain_canary/ct_d_fire_0170_ts014"
+N_ITER=300
+N_CORES=24
+
+cd "$DSW/services/module2a-cfd"
+
+python3 analysis/build_terrain_canary.py \
+  --base-case "$BASE_CASE" \
+  --terrain-kind flat \
+  --output-dir "$CANARY" \
+  --z0-wall 0.005 \
+  --pg-sign flip \
+  --time "$N_ITER" \
+  --overwrite
+
+python3 analysis/build_terrain_canary.py \
+  --base-case "$BASE_CASE" \
+  --terrain-kind ridge_cos2 \
+  --output-dir "$CANARY" \
+  --z0-wall 0.005 \
+  --ridge-height 200 \
+  --ridge-half-width 1000 \
+  --pg-sign flip \
+  --time "$N_ITER" \
+  --overwrite
+
+python3 - <<'PY'
+from pathlib import Path
+import json
+import logging
+
+import run_multisite_campaign as RMC
+from run_multisite_campaign import (
+    check_mesh_quality,
+    run_tbm_mesh,
+    run_write_cell_centres,
+    solve_case,
+)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+RMC.CONTAINER_RUNTIME = "apptainer"
+RMC.OF_IMAGE = "/home/maitreje/dsw/containers/openfoam_v2512.sif"
+RMC.TBM_IMAGE = "/home/maitreje/dsw/containers/terrainblockmesher.sif"
+
+canary = Path("/scratch/maitreje/dsw/terrain_canary/ct_d_fire_0170_ts014")
+manifest = json.loads((canary / "terrain_canary_manifest.json").read_text())
+statuses = {}
+
+for variant in manifest["variants"]:
+    case = Path(variant["case_dir"])
+    if not case.exists():
+        statuses[case.name] = "missing"
+        logging.error("missing case: %s", case)
+        continue
+
+    if not run_tbm_mesh(case, manifest["mesh_cfg"]):
+        statuses[case.name] = "mesh_failed"
+        continue
+    if not check_mesh_quality(case):
+        statuses[case.name] = "checkmesh_failed"
+        continue
+    p_path = case / "0" / "p"
+    p_backup = p_path.read_text() if p_path.exists() else None
+    if not run_write_cell_centres(case):
+        statuses[case.name] = "cellcentres_failed"
+        continue
+    if p_backup is not None:
+        p_path.write_text(p_backup)
+
+    init_rc = RMC.subprocess.run(
+        [
+            RMC.PYTHON,
+            str(RMC.SCRIPTS_DIR / "init_from_era5.py"),
+            "--case-dir",
+            str(case),
+            "--inflow",
+            str(case / "inflow.json"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    (case / "log.init_from_era5").write_text(init_rc.stdout + init_rc.stderr)
+    if init_rc.returncode != 0:
+        statuses[case.name] = "init_failed"
+        logging.error("init_from_era5 failed for %s: %s", case.name, init_rc.stderr[-300:])
+        continue
+
+    ok = solve_case(case, 300, 24)
+    statuses[case.name] = "ok" if ok else "solve_failed"
+
+(canary / "solve_status.json").write_text(json.dumps(statuses, indent=2))
+if any(v != "ok" for v in statuses.values()):
+    raise SystemExit(f"Some terrain canary variants failed: {statuses}")
+logging.info("All terrain canary variants solved")
+PY
+
+bash "$CANARY/export_and_audit_terrain_canary.sh"
+
+echo "DONE: $CANARY"

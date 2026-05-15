@@ -1,0 +1,158 @@
+#!/bin/bash -l
+#PBS -N z0_treat_canary
+#PBS -l select=1:ncpus=24:mem=48GB
+#PBS -l walltime=01:30:00
+#PBS -J 0-3
+#PBS -j oe
+#PBS -m n
+
+set -euo pipefail
+
+export CONTAINER_RUNTIME=apptainer
+export PYTHONUNBUFFERED=1
+
+DSW="$HOME/dsw"
+CANARY="/scratch/maitreje/dsw/z0_treatment_canary/ct_d_fire_0170_ts014"
+N_ITER=300
+N_CORES=24
+
+cd "$DSW/services/module2a-cfd"
+
+python3 - <<'PY'
+from pathlib import Path
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+
+import numpy as np
+
+import run_multisite_campaign as RMC
+from run_multisite_campaign import (
+    check_mesh_quality,
+    run_tbm_mesh,
+    run_write_cell_centres,
+    solve_case,
+)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+
+RMC.CONTAINER_RUNTIME = "apptainer"
+RMC.OF_IMAGE = "/home/maitreje/dsw/containers/openfoam_v2512.sif"
+RMC.TBM_IMAGE = "/home/maitreje/dsw/containers/terrainblockmesher.sif"
+
+idx = int(os.environ["PBS_ARRAY_INDEX"])
+canary = Path("/scratch/maitreje/dsw/z0_treatment_canary/ct_d_fire_0170_ts014")
+manifest = json.loads((canary / "z0_treatment_canary_manifest.json").read_text())
+variants = manifest["variants"]
+if idx >= len(variants):
+    raise SystemExit(f"PBS_ARRAY_INDEX {idx} out of range (n={len(variants)})")
+variant = variants[idx]
+treatment = variant["treatment"]
+case = Path(variant["case_dir"])
+logging.info("Array index %d -> variant %s -> %s", idx, treatment, case)
+
+status_dir = canary / "solve_status"
+status_dir.mkdir(exist_ok=True)
+status_path = status_dir / f"{treatment}.json"
+
+
+def write_status(s: str) -> None:
+    status_path.write_text(json.dumps(
+        {"treatment": treatment, "case": case.name, "status": s},
+        indent=2,
+    ))
+
+
+def apply_z0_cap(z0_file: Path, cap_m: float) -> tuple[float, float, float]:
+    text = z0_file.read_text(errors="replace")
+    m = re.search(r"^\s*(\d+)\s*\n\s*\(", text, re.MULTILINE)
+    if not m:
+        raise ValueError(f"Cannot parse scalar list: {z0_file}")
+    n = int(m.group(1))
+    start = m.end()
+    end = text.rfind(")")
+    arr = np.fromstring(text[start:end], sep="\n", count=n)
+    if len(arr) != n:
+        raise ValueError(f"{z0_file}: expected {n} scalars, got {len(arr)}")
+    raw_max = float(arr.max())
+    capped = np.minimum(arr, cap_m)
+    lines = [str(n), "("]
+    lines.extend(f"{v:.6e}" for v in capped)
+    lines.append(")")
+    z0_file.write_text("\n".join(lines) + "\n")
+    return raw_max, float(capped.min()), float(capped.max())
+
+
+if not case.exists():
+    write_status("missing")
+    raise SystemExit(1)
+
+write_status("running")
+
+if not run_tbm_mesh(case, manifest["mesh_cfg"]):
+    write_status("mesh_failed")
+    raise SystemExit(2)
+if not check_mesh_quality(case):
+    write_status("checkmesh_failed")
+    raise SystemExit(3)
+
+z0_info = variant["z0"]
+if z0_info["mode"] in ("wc", "wc_capped"):
+    rc = subprocess.run(
+        [
+            "python3", "generate_z0_field.py",
+            "--case-dir", str(case),
+            "--worldcover", z0_info["wc_tif"],
+            "--site-lat", str(z0_info["site_lat"]),
+            "--site-lon", str(z0_info["site_lon"]),
+            "--patch", "terrain",
+        ],
+        capture_output=True, text=True, timeout=600,
+    )
+    (case / "log.generate_z0").write_text(rc.stdout + rc.stderr)
+    if rc.returncode != 0:
+        logging.error("generate_z0_field failed for %s: %s", treatment, rc.stderr[-500:])
+        write_status("z0_gen_failed")
+        raise SystemExit(4)
+    if z0_info.get("cap_m") is not None:
+        z0_file = case / "constant" / "boundaryData" / "terrain" / "0" / "z0"
+        raw_max, capped_min, capped_max = apply_z0_cap(z0_file, float(z0_info["cap_m"]))
+        logging.info(
+            "Applied cap=%g m: raw_max=%g, capped range=[%g, %g]",
+            z0_info["cap_m"], raw_max, capped_min, capped_max,
+        )
+
+p_path = case / "0" / "p"
+p_backup = p_path.read_text() if p_path.exists() else None
+if not run_write_cell_centres(case):
+    write_status("cellcentres_failed")
+    raise SystemExit(5)
+if p_backup is not None:
+    p_path.write_text(p_backup)
+
+init_rc = subprocess.run(
+    [
+        RMC.PYTHON, str(RMC.SCRIPTS_DIR / "init_from_era5.py"),
+        "--case-dir", str(case),
+        "--inflow", str(case / "inflow.json"),
+    ],
+    capture_output=True, text=True, timeout=300,
+)
+(case / "log.init_from_era5").write_text(init_rc.stdout + init_rc.stderr)
+if init_rc.returncode != 0:
+    logging.error("init_from_era5 failed for %s: %s", treatment, init_rc.stderr[-300:])
+    write_status("init_failed")
+    raise SystemExit(6)
+
+ok = solve_case(case, 300, 24)
+write_status("ok" if ok else "solve_failed")
+if not ok:
+    raise SystemExit(7)
+
+logging.info("Variant %s solved OK", treatment)
+PY
+
+echo "DONE: array index $PBS_ARRAY_INDEX"
