@@ -536,14 +536,39 @@ def make_z0_treatment_variant(args: argparse.Namespace, treatment_spec: str) -> 
     copy_base_case(base_case, case_dir, overwrite=args.overwrite)
     shutil.copy2(base_case / "inflow.json", case_dir / "inflow.json")
 
-    # Preserve the real terrain STL (the analytic mode regenerates it; here we
-    # want the original site terrain because the whole point is to test z0
-    # treatments on real complex terrain).
-    src_stl = base_case / "constant" / "triSurface" / "terrain.stl"
-    if src_stl.exists():
-        dst_stl = case_dir / "constant" / "triSurface" / "terrain.stl"
-        dst_stl.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_stl, dst_stl)
+    # The v1 base case has a pre-built mesh; the TBM dict and STL inputs were
+    # cleaned after meshing.  Copy (not symlink) the polyMesh and the lateral
+    # boundaryData (cylindrical sections) into the variant so the solver runs
+    # directly without re-meshing or re-initialising ERA5 inlet profiles.
+    # Symlinks would break inside Apptainer because only the case_dir is
+    # bind-mounted, so symlink targets under /mnt/weka/scratch/... fall outside
+    # the container's filesystem.
+    src_polymesh = base_case / "constant" / "polyMesh"
+    if src_polymesh.exists():
+        dst_polymesh = case_dir / "constant" / "polyMesh"
+        if dst_polymesh.exists() or dst_polymesh.is_symlink():
+            if dst_polymesh.is_symlink():
+                dst_polymesh.unlink()
+            else:
+                shutil.rmtree(dst_polymesh)
+        shutil.copytree(src_polymesh, dst_polymesh)
+
+    src_bdata = base_case / "constant" / "boundaryData"
+    if src_bdata.exists():
+        dst_bdata = case_dir / "constant" / "boundaryData"
+        dst_bdata.mkdir(parents=True, exist_ok=True)
+        for sub in src_bdata.iterdir():
+            if sub.name == "terrain":
+                # Skip terrain — WC variants will write a fresh one; uniform
+                # variants do not need it.
+                continue
+            dst_sub = dst_bdata / sub.name
+            if dst_sub.exists() or dst_sub.is_symlink():
+                if dst_sub.is_symlink():
+                    dst_sub.unlink()
+                else:
+                    shutil.rmtree(dst_sub)
+            shutil.copytree(sub, dst_sub)
 
     patch_top_bcs(case_dir)
     render_fvoptions(

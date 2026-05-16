@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#PBS -N z0_treat_canary
+#PBS -N z0_treat_0056
 #PBS -l select=1:ncpus=24:mem=48GB
 #PBS -l walltime=01:30:00
 #PBS -J 0-3
@@ -12,7 +12,7 @@ export CONTAINER_RUNTIME=apptainer
 export PYTHONUNBUFFERED=1
 
 DSW="$HOME/dsw"
-CANARY="/scratch/maitreje/dsw/z0_treatment_canary/ct_d_fire_0170_ts014"
+CANARY="/scratch/maitreje/dsw/z0_treatment_canary/ct_d_fire_0056_ts014"
 N_ITER=300
 N_CORES=24
 
@@ -37,7 +37,7 @@ RMC.CONTAINER_RUNTIME = "apptainer"
 RMC.OF_IMAGE = "/home/maitreje/dsw/containers/openfoam_v2512.sif"
 
 idx = int(os.environ["PBS_ARRAY_INDEX"])
-canary = Path("/scratch/maitreje/dsw/z0_treatment_canary/ct_d_fire_0170_ts014")
+canary = Path("/scratch/maitreje/dsw/z0_treatment_canary/ct_d_fire_0056_ts014")
 manifest = json.loads((canary / "z0_treatment_canary_manifest.json").read_text())
 variants = manifest["variants"]
 if idx >= len(variants):

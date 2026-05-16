@@ -349,6 +349,225 @@ Lecture top-BC:
   suite utile est un canary combine `z0_wall=0.005` + `slip_top` +
   pressure-gradient signe/calibre, ou basculer vers target speed-up conservatif.
 
+### Phase B - flat + ridge canary
+
+Objectif: discriminer entre un deficit physique lie au relief reel et une
+compression dynamique produite par la configuration OpenFOAM.
+
+Builder ajoute:
+
+```bash
+python3 services/module2a-cfd/analysis/build_terrain_canary.py \
+  --base-case /scratch/maitreje/dsw/top_bc_canary/ct_d_fire_0170_ts014/cases/case_ts000_slip_top_pg_geo \
+  --terrain-kind flat \
+  --output-dir /scratch/maitreje/dsw/terrain_canary/ct_d_fire_0170_ts014 \
+  --z0-wall 0.005 \
+  --pg-sign flip \
+  --time 300 \
+  --overwrite
+
+python3 services/module2a-cfd/analysis/build_terrain_canary.py \
+  --base-case /scratch/maitreje/dsw/top_bc_canary/ct_d_fire_0170_ts014/cases/case_ts000_slip_top_pg_geo \
+  --terrain-kind ridge_cos2 \
+  --output-dir /scratch/maitreje/dsw/terrain_canary/ct_d_fire_0170_ts014 \
+  --z0-wall 0.005 \
+  --ridge-height 200 \
+  --ridge-half-width 1000 \
+  --pg-sign flip \
+  --time 300 \
+  --overwrite
+```
+
+PBS prepare: `configs/hpc/terrain_canary_ct_d_fire_0170_ts014.pbs`.
+
+Configuration commune:
+
+- inflow identique au cas `ct_d_fire_0170_ts014`;
+- terrain analytique remaille avec `terrainBlockMesher`;
+- `z0_wall = 0.005 m`, uniforme;
+- `U top slip`, `p/p_rgh top fixedValue 0`, `k/epsilon top zeroGradient`;
+- pressure-gradient geostrophique avec signe `flip`, car le canary Phase A a
+  montre que `pg_geo_flip` battait `pg_geo` sur ce cas;
+- audit aux hauteurs `2,10,20,50,100 m AGL`, crop central 2 km;
+- audit specialise `terrain_canary_metrics.csv`:
+  - flat: `crop_to_inflow`, `center_to_inflow`;
+  - ridge: `crest_max_to_inflow` a 10 m, `lee_min_to_inflow` a 10 m.
+
+Resultat Aqua, lance le 2026-05-14:
+
+- artifact: `/scratch/maitreje/dsw/terrain_canary/ct_d_fire_0170_ts014`;
+- job PBS valide: `21313748.aqua`;
+- les deux variantes convergent, exportent `grid.zarr` et auditent
+  `terrain_canary_metrics.csv`;
+- temps solve: flat 400 s, ridge 692 s sur 24 CPU;
+- note reproducibilite: deux jobs precedents ont ete invalides avant cette
+  execution (`21313373` mauvais import template, `21313457` controlDict mesh
+  `endTime 0` + audit stale); les correctifs sont dans
+  `build_terrain_canary.py`.
+
+Resultats:
+
+| canary | metrique | 2 m | 10 m | 20 m | 50 m | 100 m |
+|---|---:|---:|---:|---:|---:|---:|
+| flat | crop / inflow | 1.343 | 1.031 | 0.978 | 0.945 | 0.965 |
+| flat | center / inflow | 1.333 | 1.023 | 0.970 | 0.939 | 0.963 |
+
+Controle ridge bulk:
+
+| canary | metrique | 2 m | 10 m | 20 m | 50 m | 100 m |
+|---|---:|---:|---:|---:|---:|---:|
+| ridge_cos2 | crop / inflow | 1.371 | 1.081 | 1.036 | 1.020 | 1.036 |
+| ridge_cos2 | center / inflow | 2.132 | 1.590 | 1.448 | 1.294 | 1.230 |
+
+| canary | metrique 10 m | valeur |
+|---|---:|---:|
+| ridge_cos2 | crest max / inflow | 1.624 |
+| ridge_cos2 | lee min / inflow | 0.314 |
+
+Lecture:
+
+- le flat canary passe le gate principal a 10 m (`crop/inflow=1.031`,
+  `center/inflow=1.023`) et reste proche de l'inflow a 20-100 m
+  (`0.945-0.978` pour crop);
+- le surplus a 2 m (`crop/inflow=1.343`) signale une calibration verticale
+  imparfaite pres sol avec `z0_wall=0.005`, mais pas un deficit bulk;
+- la colline analytique produit une acceleration de crete nette
+  (`crest max/inflow=1.624`) dans la plage attendue des speedups
+  orographiques forts;
+- le lee minimum (`0.314`) confirme un sillage fort mais localise, pas une
+  compression globale du domaine.
+
+Decision matrix Phase B:
+
+| flat | ridge crete | decision |
+|---|---:|---|
+| **>=0.95** | **>=1.30** | **dataset valide absolu, modulo offset calibre** |
+| >=0.95 | 1.0-1.2 | dataset valide pattern relatif uniquement |
+| <0.85 | <1.15 | freeze regen, refonte BC laterales requise |
+
+Decision Phase B: ne pas freezer la regeneration pour cause de BC laterales.
+La configuration best-stack restaure la conservation flat et reproduit un
+speedup de crete suffisant sur relief analytique. Le probleme initial du cas
+reel est donc compatible avec une combinaison de relief reel + ancienne config
+damping, pas avec une incapacite structurelle a produire des accelerations
+orographiques. Avant regeneration large, calibrer l'offset vertical/proche sol
+sur flat (`2 m` trop fort, `50 m` legerement bas) et auditer quelques cas reels
+avec la meme stack.
+
+### Phase B - z0_treatment canary on heterogeneous WC site
+
+Une fois la stack BC valide (flat + ridge), reste a trancher: pour la
+regeneration 9k, quelle strategie de rugosite z0 sur la face terrain ?
+
+Quatre options candidates:
+
+1. `wc` natif: WorldCover ESA 2021 mapping classes -> z0 (Wieringa/Davenport)
+   sans cap, applique via `generate_z0_field.py` sur la face `terrain`.
+2. `wc_cap_0.05`: meme mapping clippe a `z0 <= 0.05 m`.
+3. `wc_cap_0.01`: clippe a `z0 <= 0.01 m`.
+4. `uniform_0.05`: z0 constant 0.05 m partout, comme baseline simple.
+
+Builder: `analysis/build_terrain_canary.py --mode z0_treatment --variants wc,wc_cap_0.05,wc_cap_0.01,uniform_0.05`.
+PBS array `-J 0-3` 24 cores par tache, 300 iter, walltime 1:30:00.
+
+#### Tentative 1 - ct_d_fire_0170 (canary degenere)
+
+Premier essai sur `ct_d_fire_0170_case_ts014` (Skiathos, Grece). Job
+`21331014[].aqua`, les 4 variantes convergent. Mais audit a posteriori du
+tif WC `data/raw/worldcover_per_site/ct_d_fire_0170.tif`: 100% classe water
+(code 80, z0=0.0002), site en mer Egee, probable bug de centrage bbox de
+`services/data-ingestion/download_worldcover_per_site.py`. Les 3 variantes
+WC sont donc degenerees, equivalentes a un z0 uniforme 0.0002. Resultat
+non-discriminant:
+
+| variant | crop/inflow @10 m |
+|---|---:|
+| wc | 0.876 |
+| wc_cap_0.05 | 0.876 |
+| wc_cap_0.01 | 0.876 |
+| uniform_0.05 | 0.642 |
+
+Decomposition de l'ecart `uniform_0.05` vs reference flat (1.00):
+- `1.00 - 0.876` = 0.12 d'ombre orographique reelle du relief ts014;
+- `0.876 - 0.642` = 0.23 de friction wall reelle a z0=0.05.
+
+A documenter independamment dans le plan WC ingestion (cf. `dataset_strategy.md`):
+le tif `ct_d_fire_0170.tif` est inutilisable et probablement plusieurs autres
+sites cotiers le sont egalement.
+
+#### Tentative 2 - ct_d_fire_0056 (canary valide)
+
+Refait sur `ct_d_fire_0056_case_ts014` (Sierra Andaluza, ES, 37.34N -2.60E,
+1031 m, slope 12.8 deg), choisi parmi les sites `ts014 solved gold` avec WC
+heterogene. Distribution WC: grass 59%, tree 22%, bare 10%, shrub 7% (water
+0%, 4 classes >5%). Job `21380961[].aqua`, 4 variantes OK en 4.5 min wall.
+
+Distribution z0 sur la face terrain (54 000 faces):
+
+| variant | z0_mean | z0_median | z0_p90 | z0_max |
+|---|---:|---:|---:|---:|
+| uniform_0.05 | 0.050 | 0.05 | 0.05 | 0.05 |
+| wc | **0.147** | 0.03 | 0.50 | **1.00** |
+| wc_cap_0.05 | 0.034 | 0.03 | 0.05 | 0.05 |
+| wc_cap_0.01 | 0.0095 | 0.01 | 0.01 | 0.01 |
+
+`wc` natif est bimodal: grass majoritaire (median 0.03) avec une queue tree
+(p90 0.50, max 1.00) qui tire le mean a 3x la valeur uniforme.
+
+Ratios cles @ 10 m AGL (inflow = 5.103 m/s):
+
+| variant | crop/inflow | center/inflow | **upstream/inflow** | crest_p90/inflow |
+|---|---:|---:|---:|---:|
+| wc | 0.863 | 0.718 | **0.881** | 1.185 |
+| uniform_0.05 | 0.868 | 0.765 | 1.079 | 1.199 |
+| wc_cap_0.05 | 0.911 | 0.844 | 1.099 | 1.221 |
+| wc_cap_0.01 | 0.966 | 0.954 | 1.221 | 1.259 |
+
+Lecture:
+
+- l'effet WC est reel (spread 12% sur crop entre wc et wc_cap_0.01) — le
+  canary precedent ne pouvait pas le voir;
+- `wc` natif **draine l'upstream** (0.881, hors gate [0.95, 1.05]) parce
+  que les patches tree z0~0.5 sur le fetch frichent trop;
+- `wc_cap_0.05` rapproche le comportement de `uniform_0.05` (upstream 1.10
+  vs 1.08, crop 0.91 vs 0.87) **tout en conservant l'heterogeneite**
+  (median 0.03 vs 0.05);
+- `wc_cap_0.01` ecrase tout a 0.01 -> ~smooth wall, sur-correction;
+- l'effet z0 se concentre sur les 20 premiers metres: a 100 m AGL les 4
+  variantes convergent (crop ratio 0.911-0.969, ecart 6%).
+
+#### Decision z0 pour la regeneration 9k
+
+Adopter `wc_capped_0.05`:
+
+- preserve l'argument "rugosite ESA WC realiste" (defensible papier);
+- evite le fetch decay des tree patches isoles;
+- conserve une acceleration de crete intacte (1.221 a 10 m, meme superieur
+  a uniform_0.05 1.199);
+- numeriquement stable, pas de z0 extreme.
+
+Resultat coherent avec le scenario "wc << wc_cap_0.05 <= wc_cap_0.01 ~
+uniform_0.05" du grid de decision: cap necessaire, valeur 0.05 m retenue.
+
+Caveats:
+
+- un seul site, un seul timestamp -> robustesse a valider sur 2-3 sites de
+  plus avant la regen complete;
+- les caps gardent `upstream/inflow` ~1.08-1.10, juste au-dessus de la gate
+  [0.95, 1.05] -> calibrer pg_geo et/ou Coriolis si necessaire mais hors
+  scope z0;
+- anomalie 2 m AGL persistante (`crop/inflow > 1` pour les 4 variantes)
+  suggere un bug de normalisation `inflow_u2` cote
+  `audit_v2_teacher_wind.py`, a investiguer independamment.
+
+Artifacts:
+
+- canary Aqua: `/scratch/maitreje/dsw/z0_treatment_canary/ct_d_fire_0056_ts014/`;
+- audits locaux: `data/validation/z0_treatment_canary/ct_d_fire_0056_ts014/`
+  (`z0_treatment_wind_audit.csv`, `wind_audit_summary.csv`,
+  `wall_audit.csv`, `analysis.md`);
+- PBS: `configs/hpc/z0_treatment_canary_ct_d_fire_0056_ts014.pbs`.
+
 ### Phase B - decision
 
 Adopter le nouveau teacher si:
