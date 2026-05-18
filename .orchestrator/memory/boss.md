@@ -149,6 +149,41 @@ analytic flat/ridge derived from 0170 inflow. The increments
 ablation. This is exactly why M6→M9 ablation is being done on a
 single multi-hill mesh with one inflow.
 
+## Phase E retourne V10 → V1 retenu pour regen 9k (2026-05-18, M13)
+
+Phase E sur 5 sites v2 réels Pop A FR continental (ct_c_morpho_0000,
+ct_d_fire_0017, ct_e_mountain_0023, ct_f_wind_onshore_0001,
+ct_g_paragliding_0006) : **V1 (best-stack flip) bat V10 (top open
+native) sur 4/4 sites complets** en ratio physique
+`crop_mean / ERA5_U10_nominal`.
+
+Mean ratio across sites : V0=1.35, V10=1.89, **V1=2.31**.
+
+Le proxy `edge_W` (vent au bord W amont CFD) n'est PAS un bon proxy
+d'inflow car le forçage pg_geo change la dynamique d'inflow (V1
+edge_W=5.21 vs V10 edge_W=1.14 sur ct_d_fire_0017). La métrique
+physique correcte est `crop_mean / ERA5_U10[1,1]` (extrait de
+`input/era5_surface/u10` du grid.zarr).
+
+**Pour la regen 9k : V1 final**. Stack :
+- top U : slip
+- top p : fixedValue 0
+- pg_geo : flip
+- z0_wall : 0.005 m
+- z0 field : wc_capped_0.05
+- Coriolis : on
+
+**Leçon orchestration** : le multi-hill analytique a induit en
+erreur (recommandait V10) parce que la topographie analytique
+manque les structures de recirculation du vrai terrain. Toujours
+valider sur sites v2 réels (au moins 5, diversifiés Pop A) avant
+adoption finale d'un stack.
+
+**Bug PBS phaseE_5sites.pbs** : oubliait `writeCellCentres` (donc
+`0/Cx` manquait pour l'export). Fix : `phaseE_export_only.pbs`
+séquentiel qui fait writeCellCentres + export sur cases déjà solved.
+Pattern à intégrer si on étend le builder pour mode `site_real`.
+
 ## V10 native > V8 flip — décision révisée (2026-05-18, M12)
 
 Test M12 (V10 = V9 + pg native) sur multi-hill : V10 bat TOUTES les

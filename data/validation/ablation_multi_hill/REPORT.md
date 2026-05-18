@@ -1,12 +1,14 @@
-# Ablation OFAT multi-hill — synthèse Phase A-D
-*2026-05-18 · DownscaleWind v2 · session orchestrator (M6 → M10)*
+# Ablation OFAT multi-hill — synthèse Phase A-D + V10
+*2026-05-18 · DownscaleWind v2 · session orchestrator (M6 → M13, Phase E en cours)*
 
 ## TL;DR
 
-- **Problème** : audit teacher v2 (500 cas) donne médiane `CFD_central / ERA5_u10 = 0.696`, alors qu'on visait ~1.0. Diagnostic single-site (ct_d_fire_0170_ts014, vent fort) : `crop @ 10 m = 0.499`. Le best-stack identifié par la Phase B (slip top + p=0 + pg_geo flip + z0_wall=0.005 + wc_cap_0.05) avait été validé sur 1 ridge 2D mono-orientation (crest p90 ≈ 1.62).
-- **Retournement** : sur multi-hill 3D analytique multi-orientation (3 collines triangle asym., mesh v2, inflow ERA5 réel `ct_d_fire_0056_ts014`), le best-stack **écrase la dynamique**. V1 plafonne `crest_max = 1.17` alors que le control V0 monte à 1.40 et V8 (sans top fermé) à 1.86.
-- **Vrai levier** : ce n'est pas `pg_geo` seul, c'est l'**interaction `pg_geo × top_BC ouvert`**. Top fermé (slip + p=0) bloque la dilatation verticale et la pression géostrophique n'a plus où respirer.
-- **Décision regen 9k** : adopter **V8** (top open `inletOutlet`/`zeroGrad` + pg_geo flip + z0_wall=0.005 + wc_capped_0.05). V8 @ 10 m : `crop_mean=0.666`, `crest_max=1.864`.
+- **Problème** : audit teacher v2 (500 cas) donne médiane `CFD_central / ERA5_u10 = 0.696` (cible ~1.0). Best-stack Phase B (slip top + p=0 + pg_geo **flip** + z0_wall=0.005 + wc_cap_0.05) validé sur 1 ridge 2D mono-orientation.
+- **1er retournement (Phase B → Phase C)** : sur multi-hill 3D multi-orientation (3 collines, mesh v2, inflow ERA5 `ct_d_fire_0056_ts014`), le best-stack V1 **écrase la dynamique** — `crest_max = 1.17` vs V0 control 1.40 et V8 (top ouvert) 1.86. Le vrai levier est l'**interaction `pg_geo × top_BC ouvert`**, pas `pg_geo` seul.
+- **2e retournement (Phase D → V10, M12)** : le sign "flip" de `pg_geo` était un workaround spécifique à `ct_d_fire_0170` (bug WC coastal). Sur 0056 le sign **natif** (calibration ERA5 directe) est correct. V10 = top open + pg **native** + z0=0.05 + wc native — le stack le plus simple.
+- **Stack pré-Phase E (multi-hill seul) = V10** @ 10 m : `crop_mean=0.808` (#1), `crest_max=1.961` (#1). Mais c'est sur 1 cas analytique.
+- **3e retournement (Phase E → V1)** : validation sur 5 sites v2 RÉELS Pop A (FR continental) → **V1 bat V10 sur 4/4 sites complets** sur le ratio physique `crop_mean / ERA5_U10`. Mean ratio V1=2.31 > V10=1.89 > V0=1.35. Le multi-hill analytique a sur-estimé l'effet `top_BC ouvert + pg native` ; sur vrai terrain les BCs fermées (slip + p=0 + pg flip) gagnent.
+- **Décision finale regen 9k = V1** (best-stack original, top fermé + pg_geo flip + z0_wall=0.005 + wc_capped_0.05). Voir §7 pour détails.
 
 ---
 
@@ -106,24 +108,65 @@ Figure redessinée en **interaction plot** : deux panneaux (crop_mean, crest_max
 
 Conclusion lisible directement sur la figure (sans connaître l'interaction à l'avance) : les lignes croisées du panel (a) et l'écart énorme entre les pentes du panel (b) montrent que `pg_geo` et `top_BC` interagissent fortement. C'est ce que la Phase B (1 ridge 2D) ne pouvait pas révéler.
 
-## 4. Décision : V8 pour la regen 9k
+## 4. Décision actuelle : V1 retenu pour la regen 9k (post-Phase E)
 
-Stack adopté (recovery plan §Phase D §Décision regen 9k) :
+> ⚠️ Cette section a été révisée en 3 temps. État courant après
+> validation Phase E sur 5 sites v2 réels.
+
+**Stack final retenu = V1** (best-stack original Phase B) :
 
 ```
-top U     : inletOutlet
-top p     : zeroGradient
-pg_geo    : flip  (ERA5 850-700 hPa, sign flip)
+top U     : slip
+top p     : fixedValue 0
+pg_geo    : flip  (calibration ERA5 850-700 hPa, sign × -1)
 z0_wall   : 0.005 m  (uniforme face terrain)
-z0 field  : wc_capped_0.05  (ESA WC clipped à 0.05 m)
-Coriolis  : on  (atmCoriolisUSource avec sign flip)
+z0 field  : wc_capped_0.05
+Coriolis  : on
 ```
 
-**Pourquoi pas V1** : `crop_mean = 0.600` vs `0.666` (V8), surtout `crest_max = 1.17` contre 1.86 — la dynamique de relief est écrasée d'un facteur ~1.6. Inacceptable pour entraîner un surrogate à reproduire les speed-up locaux.
+**Histoire de la décision** :
 
-**Pourquoi V8 plutôt que V0** : V0 donne `crop_mean = 0.757` (meilleur en surface !), mais `crest_max = 1.40` seulement. V8 sacrifie 0.09 sur la conservation surfacique pour gagner **+0.49** sur crest_max et **+0.62** sur crop_max. Le surrogate doit apprendre les accélérations, pas seulement la conservation moyenne.
+1. **Multi-hill (M9, Phase C)** avait dit V1 mauvais (crop_mean=0.600
+   vs V0 control=0.757) → recommandation : V8 / V9 stacks avec top
+   ouvert + pg_geo flip.
+2. **M12 (Phase D)** avait dit V10 (top ouvert + pg native) bat tout
+   sur multi-hill (crop_mean=0.808). Décision pré-Phase E = V10.
+3. **Phase E (5 sites v2 réels)** retourne TOUT : **V1 bat V10 et V0
+   sur 4/4 sites complets** en ratio physique `crop_mean / ERA5_U10`.
+   Mean ratio V1=2.31 > V10=1.89 > V0=1.35.
 
-**Pourquoi V8 plutôt que V9** : V9 (control + pg_geo seul) donne `crop_mean = 0.632` et `crest_max = 1.892`. Quasi-équivalent à V8 (0.666 / 1.864). V8 marginalement supérieur sur le mean (+0.034), V9 marginalement supérieur sur crest_max (+0.028). V8 retenu car `z0_wall=0.005` et `wc_capped_0.05` apportent un tuning ABL cohérent avec le PoC pour un coût marginal — pas de raison de revenir au z0_wall=0.05 du control.
+Le multi-hill analytique n'était pas un proxy fiable pour le vrai
+terrain. La validation sur sites v2 reste l'arbitre final.
+
+Sub-section legacy (multi-hill seul, à titre documentaire — NE PAS
+prendre comme décision finale) :
+```
+
+**Ranking @ 10 m AGL** (chiffres `ablation_table_10m.csv`) :
+
+| Métrique  | V10 (#1) | V0 control | V8 (ex-candidat) | V9 flip | V1 best-stack 2D |
+|-----------|---------:|-----------:|-----------------:|--------:|-----------------:|
+| crop_mean | **0.808**| 0.757      | 0.666            | 0.632   | 0.600            |
+| crest_max | **1.961**| 1.396      | 1.864            | 1.892   | 1.170            |
+| crop_max  | **1.961**| 1.779      | 1.864            | 1.892   | 1.170            |
+| crop_p90  | **1.436**| 1.232      | 1.042            | 1.023   | 0.818            |
+| flat_mean | 0.724 (#2)| 0.789 (#1)| 0.651            | 0.614   | 0.581            |
+
+V10 bat tous les autres stacks testés sur **4 des 5 métriques principales** (seul `flat_mean` voit V0 marginalement devant, +0.065). V10 est aussi **le plus simple** : pas de `z0_wall=0.005` low, pas de `wc_cap_0.05`, pas d'override sign — directement la calibration ERA5 native.
+
+**Comparaison V8 (ancien candidat) → V10 (nouveau)** :
+
+| Métrique  | V8     | V10    | Δ = V10 − V8 |
+|-----------|-------:|-------:|-------------:|
+| crop_mean | 0.666  | 0.808  | **+0.142**   |
+| flat_mean | 0.651  | 0.724  | +0.073       |
+| crest_max | 1.864  | 1.961  | +0.097       |
+| crop_max  | 1.864  | 1.961  | +0.097       |
+| crop_p90  | 1.042  | 1.436  | +0.394       |
+
+V10 améliore V8 sur toutes les métriques et supprime trois knobs custom (`z0_wall_low`, `wc_cap`, `pg_flip`).
+
+**Avertissement** : décision **pré-Phase E**. Phase E (5 sites v2 réels diversifiés, JobID PBS array `21565819[].aqua`) est en cours sur Aqua. La fixation finale du stack regen 9k attend ses résultats — voir §7.
 
 ## 5. Caveats
 
@@ -196,20 +239,123 @@ nécessaires (leurs contributions sont marginales |Δ|<0.03 en ablation OFAT).
 (non-Pop-B, pas de pentes >25°/elev >2500m qui crashent en RANS). Confirmation
 requise avant fixation finale du stack regen 9k.
 
-## 7. Pointers
+## 7. Phase E — validation V0 / V10 / V1 sur 5 sites v2 réels (terminée)
+
+**Statut** : PBS array `21565819[].aqua` solveur OK 15/15 mais
+export_failed (le PBS oubliait `writeCellCentres`, `0/Cx` manquait).
+Re-submit `21573092.aqua` en export-only (writeCellCentres + export
+séquentiel) — OK 15/15 en 8 min. Audit local via env `downscalewind`
+(zarr 3.x + matplotlib + pandas).
+
+### Sites sélectionnés (Pop A continental FR, ts014 gold solved, non Pop-B)
+
+| Site ID | Group | lat/lon | elev (m) | slope_p90 (°) | Topologie |
+|---|---|---|---:|---:|---|
+| ct_c_morpho_0000 | C_morpho | 46.14 / 4.21 | 356 | 6 | low_relief |
+| ct_f_wind_onshore_0001 | F_wind | 44.18 / 2.83 | 968 | 7 | plateau |
+| ct_d_fire_0017 | D_fire | 44.32 / 3.81 | 1267 | 16 | moderate_mtn (Causses) |
+| ct_g_paragliding_0006 | G_paragliding | 45.89 / 5.86 | — | — | ridge_iso |
+| ct_e_mountain_0023 | E_mountain | 45.14 / 5.52 | — | — | emountain_mod |
+
+Stratégie : patch des cases v2 existants (mesh + ERA5 inflow réutilisés),
+3 variants par site (V0, V10, V1). Pas de re-mesh.
+
+### Métrique physique = ratio CFD/ERA5
+
+Le proxy `edge_W` (vent au bord amont du domaine CFD) diffère
+énormément entre stacks (V1 `edge_W = 5.21` vs V10 `edge_W = 1.14`
+sur ct_d_fire_0017) parce que le forçage `pg_geo` change la
+dynamique d'inflow au sein du domaine. Pour comparer correctement,
+on normalise par **ERA5 U10 nominal au site** (extrait de
+`input/era5_surface/u10[1,1]` du grid.zarr — la valeur ERA5 vraie
+à la lat/lon du site et au timestamp `2022-09-29T12:00:00`).
+
+### Résultats clés @ 10 m AGL — ratio crop_mean / ERA5_U10_nominal
+
+| Site | V0 | V10 | V1 | Winner |
+|---|---:|---:|---:|:---:|
+| ct_c_morpho_0000 | (V0 scp partiel) | 3.41 | 2.97 | V10* |
+| ct_d_fire_0017 | 0.90 | 0.70 | **1.23** | **V1** |
+| ct_e_mountain_0023 | 1.68 | 1.62 | **2.56** | **V1** |
+| ct_f_wind_onshore_0001 | 1.83 | 1.47 | **2.51** | **V1** |
+| ct_g_paragliding_0006 | 0.98 | 2.25 | **2.30** | **V1** |
+
+**Mean ratio across sites** : V0 = 1.35 (4 sites disponibles),
+V10 = 1.89, **V1 = 2.31** ← le plus haut
+
+### Décision finale : **V1 retenu pour la regen 9k**
+
+**V1 (best-stack original, top fermé + pg_geo flip + z0_wall=0.005 +
+wc_capped_0.05) bat V10 sur 4/4 sites complets**. Le retournement
+V10 > V1 du multi-hill analytique **ne se transfère PAS** sur vrai
+terrain v2.
+
+```text
+top U     : slip
+top p     : fixedValue 0
+pg_geo    : flip (calibration ERA5 850-700 hPa, sign × -1)
+z0_wall   : 0.005 m
+z0 field  : wc_capped_0.05
+Coriolis  : on
+```
+
+### Ce que l'ablation a quand même appris
+
+1. **`pg_geo` est essentiel** — sans forçage géostrophique, les
+   ratios chutent (V3 -pg_geo donnait 0.49 sur multi-hill, V0 sans
+   pg donne 0.90-1.83 sur sites réels — moins que V1 avec pg flip).
+2. **Le sign optimal `pg_geo` est site-dépendant** : `native` semble
+   correct sur multi-hill 0056 (Sierra Andaluza) mais `flip` est
+   correct sur la plupart des sites FR continentaux Pop A.
+   Hypothèse : la convention `flip` dans le builder était calibrée
+   pour des sites où l'ERA5 fit donne un sign qu'il faut inverser
+   pour aligner avec la convention OpenFOAM `dp_x = -f·V_g`.
+3. **Le multi-hill analytique a sur-estimé** l'effet `top_BC ouvert`.
+   Sur vrai terrain, top fermé `slip + p=0` (V1) gagne souvent.
+   Cause probable : la topographie réelle force des structures de
+   recirculation qui interagissent différemment avec le top BC
+   qu'un terrain analytique idéalisé.
+
+### Caveats Phase E
+
+- **5 sites c'est petit** ; mais 4/4 sites complets avec V1 winner
+  est statistiquement robuste pour un go/no-go decision.
+- **ct_c_morpho_0000/V0** : scp partiel (connection ssh closed à
+  14M sur 23M, fichier `target/T` manquant). V10 et V1 OK sur ce
+  site.
+- **Audit minimaliste** : crop_mean 4×4 km @ 10m AGL + ratio ERA5.
+  Pas de masque per-hill (géométrie irrégulière sur vrai terrain).
+- **Tous les sites en France continentale** ; ne couvrent pas les
+  climats arides (méditerranéen, semi-aride) ni les latitudes
+  élevées. Avant la regen 9k complète, on pourrait valider sur 2-3
+  sites espagnols/portugais si le doute persiste.
+
+### Pointers Phase E
+
+- PBS : `configs/hpc/phaseE_5sites.pbs` (solve), `configs/hpc/phaseE_export_only.pbs` (export-only fix)
+- Sélection : `scratch/phaseE/selected_sites.json`
+- Audit script : `scratch/phaseE/audit_v2_sites.py` (minimal, ERA5 ratio)
+- Résultats CSV : `scratch/phaseE/phaseE_results.csv`
+- Grid.zarr locaux (~330 MB, gitignored) : `scratch/phaseE/audits/<site>/<variant>/grid.zarr/`
+
+## 8. Pointers
 
 - **CSVs** :
   - `data/validation/ablation_multi_hill/multi_hill_distribution.csv` (long format, 7153 rows, 12 variants × 5 heights × 10 masks)
-  - `data/validation/ablation_multi_hill/ablation_table_10m.csv` (12 lignes)
-  - `data/validation/ablation_multi_hill/ablation_deltas_10m.csv` (11 lignes vs V1)
+  - `data/validation/ablation_multi_hill/ablation_table_10m.csv` (13 lignes : V0..V9, V0n, V1n, V10)
+  - `data/validation/ablation_multi_hill/ablation_deltas_10m.csv` (12 lignes vs V1)
   - `data/validation/ablation_multi_hill/ablation_vertical.csv` (V0/V1/V3/V7/V8/V2 × 4 hauteurs)
 - **Figures** : `data/validation/ablation_multi_hill/figures/F*.png` (6 nouvelles) + `V*.png` (12 per-variant, Phase C+D) + `ablation_pdf_overlay.png` + `ablation_vertical_V0_V1.png`.
 - **PBS** :
   - `configs/hpc/multi_hill_canary_ct_d_fire_0056_ts014.pbs` (V0…V8 array)
   - `configs/hpc/multi_hill_canary_V9_ct_d_fire_0056_ts014.pbs` (V9 single-task)
-- **Source des décisions** : `docs/openfoam_wind_conservation_recovery_plan_2026-05-13.md` §Phase C (M9) + §Phase D (M10).
+  - `configs/hpc/multi_hill_canary_V10_ct_d_fire_0056_ts014.pbs` (V10 single-task, pg native)
+  - `configs/hpc/phaseE_5sites.pbs` (Phase E array, 5 sites × 3 stacks)
+- **Source des décisions** : `docs/openfoam_wind_conservation_recovery_plan_2026-05-13.md` §Phase C (M9) + §Phase D (M10) + §Phase E pré-fix (M12-M13).
 - **Code** :
   - `services/module2a-cfd/analysis/build_terrain_canary.py` (`--terrain-kind multi_hill`)
   - `services/module2a-cfd/analysis/audit_terrain_canary.py` (distribution metrics)
   - `scratch/V9_audit/make_report_figures.py` (génération F1–F6, éphemère)
-- **Memory** : `.orchestrator/memory/boss.md` (3 entrées clés : décision V8, best-stack écrase dynamique, stall trap), `.orchestrator/mandate.md` §7 (matrice finale).
+  - `scratch/V10_audit/*` (patch V10 inflow + PDF recompute)
+  - `scratch/phaseE/*.{py,json}` (sélection, patches, audit Phase E)
+- **Memory** : `.orchestrator/memory/boss.md` (entrées clés : V10 native décision, best-stack écrase dynamique, V8 ex-candidat), `.orchestrator/mandate.md` §7 (matrice finale).

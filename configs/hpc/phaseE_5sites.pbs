@@ -1,0 +1,151 @@
+#!/bin/bash -l
+#PBS -N phaseE_5sites
+#PBS -l select=1:ncpus=24:mem=48GB
+#PBS -l walltime=00:45:00
+#PBS -j oe
+#PBS -m n
+#PBS -J 0-14
+
+# Phase E — V0/V10/V1 ablation on 5 v2 real-terrain Pop A sites.
+# IDX 0..14 ↔ (SITE_IDX = IDX/3, VARIANT_IDX = IDX%3).
+# 5 sites × 3 variants = 15 tasks. No TBM — mesh and boundaryData are re-used
+# from /scratch/maitreje/dsw/complex_terrain_v1/sites/<SITE>/case_ts014/.
+#
+# Output cases:
+#   /scratch/maitreje/dsw/phaseE/<SITE>/cases/case_ts000_<VARIANT>/
+#   + grid.zarr each (after export).
+
+set -euo pipefail
+
+export CONTAINER_RUNTIME=apptainer
+export PYTHONUNBUFFERED=1
+
+DSW="$HOME/dsw"
+SITES_BASE="/scratch/maitreje/dsw/complex_terrain_v1/sites"
+PHASE_E="/scratch/maitreje/dsw/phaseE"
+PATCH_SCRIPT="${DSW}/scratch/phaseE/patch_v2_site_to_variant.py"
+N_ITER=300
+N_CORES=24
+
+# Site / variant arrays (indexed 0..14).
+SITES=(
+  ct_c_morpho_0000
+  ct_f_wind_onshore_0001
+  ct_d_fire_0017
+  ct_g_paragliding_0006
+  ct_e_mountain_0023
+)
+# Per-site (lat, lon, timestamp) for export.
+SITE_LATS=(46.14249  44.18247  44.32  45.89  45.14)
+SITE_LONS=(4.21162   2.83198   3.81   5.86   5.52)
+# ERA5 zarr per site (kept in v3 cache; see check below).
+ERA5_BASE="/scratch/maitreje/dsw/era5_campaign_v3"
+
+VARIANTS=(V0 V10 V1)
+
+IDX=${PBS_ARRAY_INDEX}
+SITE_IDX=$(( IDX / 3 ))
+VAR_IDX=$(( IDX % 3 ))
+SITE=${SITES[$SITE_IDX]}
+VARIANT=${VARIANTS[$VAR_IDX]}
+SITE_LAT=${SITE_LATS[$SITE_IDX]}
+SITE_LON=${SITE_LONS[$SITE_IDX]}
+
+BASE_CASE="${SITES_BASE}/${SITE}/case_ts014"
+CASE_DIR="${PHASE_E}/${SITE}/cases/case_ts000_${VARIANT}"
+STATUS_DIR="${PHASE_E}/solve_status"
+mkdir -p "${STATUS_DIR}"
+STATUS_FILE="${STATUS_DIR}/${SITE}_${VARIANT}.json"
+
+write_status () {
+    printf '{"site":"%s","variant":"%s","case":"%s","status":"%s"}\n' \
+        "${SITE}" "${VARIANT}" "$(basename ${CASE_DIR})" "$1" > "${STATUS_FILE}"
+}
+
+write_status "starting"
+echo "=== Task ${IDX}: site=${SITE} variant=${VARIANT} ==="
+
+if [ ! -d "${BASE_CASE}" ]; then
+    echo "MISSING base case ${BASE_CASE}" >&2
+    write_status "missing_base"
+    exit 1
+fi
+
+# Read timestamp from base case inflow.json for export.
+TIMESTAMP=$(python3 -c "import json; print(json.load(open('${BASE_CASE}/inflow.json'))['timestamp'])")
+echo "  base=${BASE_CASE}"
+echo "  timestamp=${TIMESTAMP}"
+
+# Identify ERA5 zarr (try several conventions).
+ERA5_ZARR=""
+for cand in "${ERA5_BASE}/era5_${SITE}.zarr" "${ERA5_BASE}/${SITE}.zarr"; do
+    if [ -d "$cand" ]; then ERA5_ZARR="$cand"; break; fi
+done
+if [ -z "${ERA5_ZARR}" ]; then
+    # Fallback: look for per-site era5_campaign_v2
+    for cand in "/scratch/maitreje/dsw/era5_campaign_v2/era5_${SITE}.zarr" "/scratch/maitreje/dsw/era5_campaign_v2/${SITE}.zarr"; do
+        if [ -d "$cand" ]; then ERA5_ZARR="$cand"; break; fi
+    done
+fi
+if [ -z "${ERA5_ZARR}" ]; then
+    echo "WARNING: no ERA5 zarr found for ${SITE}; export will need fallback" >&2
+fi
+echo "  era5=${ERA5_ZARR}"
+
+write_status "patching"
+
+cd "${DSW}/services/module2a-cfd"
+
+python3 "${PATCH_SCRIPT}" \
+    --base-case "${BASE_CASE}" \
+    --variant "${VARIANT}" \
+    --output-case "${CASE_DIR}" \
+    --dsw-root "${DSW}" \
+    --overwrite
+
+write_status "solving"
+
+module load GCC/12.3.0 OpenMPI/4.1.5 OpenFOAM/v2406 || true
+
+echo "=== solve simpleFoam ${N_ITER} iters / ${N_CORES} cores ==="
+export CASE_DIR N_ITER N_CORES
+
+python3 - <<'PY'
+import logging, os, sys
+from pathlib import Path
+sys.path.insert(0, ".")
+import run_multisite_campaign as RMC
+from run_multisite_campaign import solve_case
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+RMC.CONTAINER_RUNTIME = "apptainer"
+RMC.OF_IMAGE = os.path.expanduser("~/dsw/containers/openfoam_v2512.sif")
+case_dir = Path(os.environ["CASE_DIR"])
+ok = solve_case(case_dir, int(os.environ["N_ITER"]), int(os.environ["N_CORES"]))
+sys.exit(0 if ok else 5)
+PY
+SOLVE_RC=$?
+if [ "${SOLVE_RC}" -ne 0 ]; then
+    write_status "solve_failed"
+    exit 5
+fi
+
+write_status "exporting"
+echo "=== export grid.zarr ==="
+if [ -n "${ERA5_ZARR}" ]; then
+    python3 "${DSW}/services/module2a-cfd/export_to_grid_zarr_v2.py" \
+        --case-dir "${CASE_DIR}" \
+        --site-id "${SITE}_${VARIANT}" \
+        --site-lat "${SITE_LAT}" \
+        --site-lon "${SITE_LON}" \
+        --era5-zarr "${ERA5_ZARR}" \
+        --timestamp "${TIMESTAMP}" \
+        --time "${N_ITER}" \
+        --output "${CASE_DIR}/grid.zarr" \
+        --overwrite || { write_status "export_failed"; exit 6; }
+else
+    write_status "export_skipped_no_era5"
+    echo "skipping export: no ERA5 zarr available" >&2
+fi
+
+write_status "ok"
+echo "DONE task ${IDX}: ${SITE}/${VARIANT}"

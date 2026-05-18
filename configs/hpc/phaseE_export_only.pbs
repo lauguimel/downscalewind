@@ -1,0 +1,95 @@
+#!/bin/bash -l
+#PBS -N phaseE_export
+#PBS -l select=1:ncpus=4:mem=16GB
+#PBS -l walltime=00:45:00
+#PBS -j oe
+#PBS -m n
+
+# Phase E export-only: run writeCellCentres + export_to_grid_zarr_v2 for the
+# 15 cases that solved OK but had no 0/Cx, causing export_failed.
+# Sequential single task — each case ~1-2 min, total ~15-30 min.
+
+set -uo pipefail
+
+export CONTAINER_RUNTIME=apptainer
+export PYTHONUNBUFFERED=1
+
+DSW="$HOME/dsw"
+PHASE_E="/scratch/maitreje/dsw/phaseE"
+ERA5_BASE="/scratch/maitreje/dsw/era5_campaign_v3"
+N_ITER=300
+
+SITES=(ct_c_morpho_0000 ct_f_wind_onshore_0001 ct_d_fire_0017 ct_g_paragliding_0006 ct_e_mountain_0023)
+SITE_LATS=(46.14249  44.18247  44.31851  45.89  45.14)
+SITE_LONS=(4.21162   2.83198   3.80761   5.86   5.52)
+VARIANTS=(V0 V10 V1)
+
+cd "${DSW}/services/module2a-cfd"
+
+for SI in 0 1 2 3 4; do
+    SITE=${SITES[$SI]}
+    LAT=${SITE_LATS[$SI]}
+    LON=${SITE_LONS[$SI]}
+    ERA5="${ERA5_BASE}/era5_${SITE}.zarr"
+    for V in V0 V10 V1; do
+        CASE="${PHASE_E}/${SITE}/cases/case_ts000_${V}"
+        echo "=========== ${SITE} ${V} ==========="
+        STATUS_FILE="${PHASE_E}/solve_status/${SITE}_${V}.json"
+
+        if [ ! -d "$CASE" ]; then
+            echo "MISSING $CASE"; continue
+        fi
+        if [ ! -d "$CASE/300" ]; then
+            echo "NO solved fields in $CASE/300"; continue
+        fi
+
+        # 1) writeCellCentres with 0/p backup (engineer.md gotcha)
+        if [ ! -f "$CASE/0/Cx" ]; then
+            echo "Running writeCellCentres..."
+            cp "$CASE/0/p" "$CASE/0/p.preCC.bak"
+            python3 - <<PY || true
+import os, sys, logging
+from pathlib import Path
+sys.path.insert(0, ".")
+import run_multisite_campaign as RMC
+from run_multisite_campaign import run_write_cell_centres
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+RMC.CONTAINER_RUNTIME = "apptainer"
+RMC.OF_IMAGE = os.path.expanduser("~/dsw/containers/openfoam_v2512.sif")
+ok = run_write_cell_centres(Path("$CASE"))
+sys.exit(0 if ok else 4)
+PY
+            WCC_RC=$?
+            mv "$CASE/0/p.preCC.bak" "$CASE/0/p" 2>/dev/null || true
+            if [ "$WCC_RC" -ne 0 ]; then
+                echo "writeCellCentres FAILED for $SITE $V"
+                printf '{"site":"%s","variant":"%s","case":"%s","status":"writeCC_failed"}\n' "$SITE" "$V" "case_ts000_${V}" > "$STATUS_FILE"
+                continue
+            fi
+        fi
+
+        # 2) export grid.zarr
+        echo "Running export_to_grid_zarr_v2..."
+        python3 "${DSW}/services/module2a-cfd/export_to_grid_zarr_v2.py" \
+            --case-dir "$CASE" \
+            --site-id "${SITE}_${V}" \
+            --site-lat "$LAT" \
+            --site-lon "$LON" \
+            --era5-zarr "$ERA5" \
+            --timestamp "2022-09-29T12:00:00" \
+            --time "$N_ITER" \
+            --output "$CASE/grid.zarr" \
+            --overwrite
+        EXP_RC=$?
+        if [ "$EXP_RC" -eq 0 ] && [ -d "$CASE/grid.zarr" ]; then
+            printf '{"site":"%s","variant":"%s","case":"%s","status":"ok"}\n' "$SITE" "$V" "case_ts000_${V}" > "$STATUS_FILE"
+            echo "OK $SITE $V"
+        else
+            printf '{"site":"%s","variant":"%s","case":"%s","status":"export_failed_again"}\n' "$SITE" "$V" "case_ts000_${V}" > "$STATUS_FILE"
+            echo "EXPORT FAILED $SITE $V"
+        fi
+    done
+done
+
+echo "=== Phase E export-only DONE ==="
+ls -d ${PHASE_E}/*/cases/*/grid.zarr 2>&1 | wc -l
