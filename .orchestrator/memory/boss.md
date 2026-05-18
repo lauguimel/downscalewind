@@ -40,6 +40,27 @@ helper). It is NOT a physical over-acceleration near the wall.
 How to apply: exclude 2 m AGL from OFAT decisions in M9 until the audit
 script is fixed. Decisions should rest on 10/20/50/100 m AGL stats.
 
+## Stack regen 9k : V8 retenu, pas V1 (2026-05-18, Phase D M10)
+
+Phase D a confirmé : **V8 est le stack optimal**, pas V1.
+- V8 = `inletOutlet top U + zeroGrad top p + pg_geo flip + z0_wall=0.005 + wc_capped_0.05`
+- V8 @ 10m : crop_mean=0.666, flat_mean=0.651, crest_max=1.864
+- V1 @ 10m : crop_mean=0.600, flat_mean=0.581, crest_max=1.170
+
+V9 (control + pg_geo seul, sans z0/wc tuning) : crop_mean=0.632,
+crest_max=1.892. V8 légèrement supérieur sur mean (+0.034), V9
+marginalement supérieur sur crest_max (+0.028). V8 retenu.
+
+**Levier réel = INTERACTION pg_geo × top_BC ouvert**. Top fermé (slip
++ p=0) bloque la dilatation verticale → la pression géostrophique
+n'a plus où respirer → dynamique de relief écrasée. Ce que la Phase B
+ridge 2D mono-orientation avait validé ne tient pas sur 3D
+multi-orientation.
+
+Avant la regen 9k : valider V8 sur 5-10 sites v2 réels diversifiés
+(Pop A continental, topographies variées). C'est la **Phase E** à
+ouvrir comme nouvelle mission orchestrator.
+
 ## Best-stack écrase la dynamique sur multi-hill (2026-05-18, M9)
 
 L'ablation OFAT propre toutes-choses-égales sur multi-hill (3 collines

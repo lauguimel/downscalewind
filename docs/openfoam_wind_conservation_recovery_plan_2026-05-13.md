@@ -650,3 +650,72 @@ Livrables: `data/validation/ablation_multi_hill/ablation_{table,deltas,vertical}
 + `figures/ablation_pdf_overlay.png` + `figures/ablation_vertical_V0_V1.png`.
 Detail ablation, PDFs et profils dans le rapport M9 (orchestrator).
 
+---
+
+## Phase D - V9 = control + pg_geo flip only (M10, 2026-05-18)
+
+Pour confirmer la conclusion M9 ("pg_geo est le seul vrai levier"), on
+teste une 12e variante V9 isolant pg_geo seul sur la config control:
+`top U inletOutlet + top p zeroGradient + pg_geo flip + z0_wall=0.05 +
+wc native`. Single-task PBS (JobID 21547377.aqua), converge en ~10 min.
+
+Resultats @ 10 m AGL:
+
+| Variant | crop_mean | flat_mean | crest_max | crop_max | Config |
+|---|---:|---:|---:|---:|---|
+| V0 control | 0.757 | 0.789 | 1.396 | 1.779 | top ouvert, no pg_geo |
+| **V8 -top entier** | **0.666** | **0.651** | **1.864** | **1.864** | top ouvert + pg_geo + z0=0.005 + wc_cap |
+| V2 -slip_top | 0.657 | 0.640 | 1.801 | 1.801 | (idem V8, diff numerique marginale) |
+| V9 control+pg_geo | 0.632 | 0.614 | **1.892** | **1.892** | top ouvert + pg_geo + z0=0.05 + wc native |
+| V1 best-stack | 0.600 | 0.581 | 1.170 | 1.170 | slip + p=0 + pg_geo + z0=0.005 + wc_cap |
+| V3 -pg_geo | 0.493 | 0.474 | 1.220 | 1.220 | slip + p=0, no pg_geo |
+
+**Decouverte cle**: le levier dominant n'est pas pg_geo seul, c'est
+l'**INTERACTION pg_geo x top_BC ouvert**.
+
+- top OUVERT (inletOutlet + zeroGrad) vs top FERME (slip + p=0):
+  Delta crest_max ~ +0.70 (passage de ~1.17 a ~1.86).
+- pg_geo flip ajoute du momentum (+0.10 sur mean dans le bon contexte).
+- z0_wall=0.005 + wc_cap aident marginalement (+0.03 V8 vs V9).
+
+**Pourquoi V1 best-stack est pire**: `slip top + p=0` ferme la
+circulation verticale et bloque la dilatation. La pression
+geostrophique n'a plus ou "respirer" -> la dynamique de relief
+s'ecrase (crest_max plafonne a 1.17). Ce que la Phase B avait
+valide sur 1 ridge 2D (mono-orientation) ne tient pas sur multi-hill
+3D.
+
+**Decision regen 9k**: adopter **V8** comme stack de production.
+
+```
+top U     : inletOutlet
+top p     : zeroGradient
+pg_geo    : flip (ERA5 850-700 hPa, sign flip)
+z0_wall   : 0.005 m (uniforme face terrain)
+z0 field  : wc_capped_0.05 (ESA WC clipped a 0.05 m)
+Coriolis  : on (atmCoriolisUSource avec sign flip)
+```
+
+V8 donne crop_mean=0.67 (~67%) et crest_max=1.86 sur multi-hill. Le
+100% espere au centre n'est pas atteint mais c'est probablement
+**physiquement borne** par les sillages locaux des collines (chaque
+vallee descend en dessous de l'inflow). La conservation flat=0.65
+est realiste pour un domaine 3D avec 3 collines a 30 m de
+resolution.
+
+**Caveats**:
+1. Une seule mesure multi-hill analytique. Avant la regen complete
+   9k, valider V8 sur 5-10 sites v2 reels diversifies (Pop A continental,
+   topographie variee). Comparer V8 vs V1 et vs V0 sur ces sites.
+2. La calibration pg_geo free-stream a 1500 m (deferred Mandate
+   paragraphe 7) reste a explorer comme ajustement secondaire.
+3. Le 2 m AGL reste exclu (bug audit `inflow_speed_at`).
+4. `lee_p10` (proxy `lee_min`) est sensible au choix de masque
+   per-hill - utiliser `lee_p10` plutot que `min` brut pour la
+   robustesse statistique.
+
+Livrables Phase D:
+- `data/validation/ablation_multi_hill/figures/V9.png`
+- `data/validation/ablation_multi_hill/ablation_table_10m.csv` (12 lignes)
+- `data/validation/ablation_multi_hill/ablation_deltas_10m.csv` (11 lignes vs V1)
+- `configs/hpc/multi_hill_canary_V9_ct_d_fire_0056_ts014.pbs`

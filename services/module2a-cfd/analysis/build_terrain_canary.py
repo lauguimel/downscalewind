@@ -259,6 +259,7 @@ MULTI_HILL_VARIANTS = {
     "V8": ("inletOutlet", "zeroGrad", "flip", 0.005, "wc_cap_0.05", 270.0),
     "V0n": ("inletOutlet", "zeroGrad", "OFF", 0.05, "wc", 0.0),
     "V1n": ("slip", "fixedValue0", "flip", 0.005, "wc_cap_0.05", 0.0),
+    "V9": ("inletOutlet", "zeroGrad", "flip", 0.05, "wc", 270.0),
 }
 
 
