@@ -604,3 +604,49 @@ Si le teacher CFD est corrige, on peut revendiquer un surrogate CFD multi-variab
 Si le teacher reste biaise en bulk mais fiable en motifs relatifs, on revendique
 un downscaling hybride: ERA5/observations pour le bulk, CFD/surrogate pour la
 structure sub-kilometrique du relief.
+
+---
+
+## Phase C - Ablation multi-hill (M6-M9, 2026-05-18)
+
+Cas test: 3 collines analytiques (H=200/250/300 m, L=600/800/1000 m, cos2),
+mesh v2 180x180x40, inflow ERA5 reel `ct_d_fire_0056_ts014`. Onze variantes
+(V0 control, V1 best-stack, V2-V8 retrait OFAT d'un facteur, V0n/V1n
+cross-check rotation 0 degN). Metrique de distribution: ratio
+`|U| / U_inflow` sur masques `crop / flat / crest_{N,SE,SW} / lee_{N,SE,SW} / pdf`.
+2 m AGL exclu (bug audit `inflow_speed_at`).
+
+Resultats @ 10 m AGL (Delta vs V1 best-stack):
+
+| Facteur retire | Delta crop_mean | Delta crest_max | Delta lee_min | Delta flat_mean |
+|---|---:|---:|---:|---:|
+| V0 control (no recovery) | +0.157 | +0.226 | +0.010 | +0.208 |
+| V3 -pg_geo (no body force) | -0.107 | +0.050 | +0.011 | -0.107 |
+| V8 -top entier | +0.066 | +0.694 | +0.012 | +0.070 |
+| V2 -slip_top | +0.057 | +0.631 | +0.019 | +0.059 |
+| V7 top_p zeroGrad | -0.055 | +0.335 | +0.020 | -0.050 |
+| V5 -z0_wall_low | 0.000 | -0.006 | +0.001 | +0.001 |
+| V6 -wc_heterogeneity | -0.023 | -0.073 | +0.005 | -0.020 |
+| V1n rotation 0 degN | 0.000 | -0.007 | 0.000 | 0.000 |
+
+**Conclusions**:
+1. **pg_geo flip est le seul levier benefique** du best-stack: retirer pg_geo
+   coute -0.107 sur crop_mean ET flat_mean.
+2. **Top BCs (slip + p=0) ECRASENT la dynamique de relief**: V1 plafonne
+   crest_max a 1.17, V0/V8 atteignent 1.40/1.86. Sur flat_mean V1=0.581 vs
+   V0=0.789, le best-stack DEGRADE la conservation centrale.
+3. **z0_wall=0.005 et wc_capped_0.05 sont negligeables** (|Delta| <= 0.023) -
+   non discriminants sur multi-hill analytique.
+4. **Cross-check rotation V1n-V1 = 0.000** sur toutes les stats - ablation
+   parfaitement robuste a la direction.
+
+**Decision regen 9k**: NE PAS adopter V1 tel quel. Recommandation: tester un
+stack reduit `pg_geo flip + wc_cap_0.05` (sans slip_top, sans p_top=0,
+sans z0_wall=0.005) sur 5-10 sites v2 reels avant la regen. Caveat: la
+calibration pg_geo free-stream a 1500 m (deferred Mandate paragraphe 7)
+doit etre rouverte avant fixation finale.
+
+Livrables: `data/validation/ablation_multi_hill/ablation_{table,deltas,vertical}_10m.csv`
++ `figures/ablation_pdf_overlay.png` + `figures/ablation_vertical_V0_V1.png`.
+Detail ablation, PDFs et profils dans le rapport M9 (orchestrator).
+

@@ -18,6 +18,16 @@ data/website/
 # Local reference PDFs/exports used during paper review
 references/
 
+# Orchestrator skill ephemerals
+.engineer_brief*.md
+.codex_brief.md
+.engineer_logs/
+.codex_logs/
+scratch/
+tmp/
+test/scratch/
+bench/scratch/
+
 # Local scratch cases and tool caches
 .cache/
 case_topA_inletOutlet/

@@ -34,7 +34,7 @@ sys.path.insert(1, str(MODULE_DIR))
 
 from run_multisite_campaign import DEFAULT_MESH, write_tbm_dict  # noqa: E402
 
-from build_top_bc_canary import patch_top_bcs  # noqa: E402
+from build_top_bc_canary import patch_top_bcs, replace_patch_block  # noqa: E402
 from build_wall_z0_canary import patch_block, patch_wall_fields, read_end_time  # noqa: E402
 from build_wind_conservation_canary import (  # noqa: E402
     estimate_pg_from_era5_geopotential,
@@ -239,6 +239,224 @@ def write_analytic_terrain(
         "stl_extent_m": float(extent),
         "stl_points_per_axis": int(n),
     }
+
+
+MULTI_HILL_HILLS = [
+    {"id": "N", "pos_x": 0.0, "pos_y": 1500.0, "H": 250.0, "L": 800.0, "shape": "cos2"},
+    {"id": "SE", "pos_x": 1299.0, "pos_y": -750.0, "H": 200.0, "L": 600.0, "shape": "cos2"},
+    {"id": "SW", "pos_x": -1299.0, "pos_y": -750.0, "H": 300.0, "L": 1000.0, "shape": "cos2"},
+]
+
+MULTI_HILL_VARIANTS = {
+    "V0": ("inletOutlet", "zeroGrad", "OFF", 0.05, "wc", 270.0),
+    "V1": ("slip", "fixedValue0", "flip", 0.005, "wc_cap_0.05", 270.0),
+    "V2": ("inletOutlet", "zeroGrad", "flip", 0.005, "wc_cap_0.05", 270.0),
+    "V3": ("slip", "fixedValue0", "OFF", 0.005, "wc_cap_0.05", 270.0),
+    "V4": ("slip", "fixedValue0", "native", 0.005, "wc_cap_0.05", 270.0),
+    "V5": ("slip", "fixedValue0", "flip", 0.05, "wc_cap_0.05", 270.0),
+    "V6": ("slip", "fixedValue0", "flip", 0.005, "uniform_0.05", 270.0),
+    "V7": ("slip", "zeroGrad", "flip", 0.005, "wc_cap_0.05", 270.0),
+    "V8": ("inletOutlet", "zeroGrad", "flip", 0.005, "wc_cap_0.05", 270.0),
+    "V0n": ("inletOutlet", "zeroGrad", "OFF", 0.05, "wc", 0.0),
+    "V1n": ("slip", "fixedValue0", "flip", 0.005, "wc_cap_0.05", 0.0),
+}
+
+
+def wind_components_from_dir(wind_dir_deg: float) -> tuple[float, float]:
+    wd = math.radians(float(wind_dir_deg))
+    return -math.sin(wd), -math.cos(wd)
+
+
+def apply_wind_dir(inflow: dict, wind_dir_deg: float) -> dict:
+    fx, fy = wind_components_from_dir(wind_dir_deg)
+    return {**inflow, "wind_dir": float(wind_dir_deg), "flowDir_x": fx, "flowDir_y": fy}
+
+
+def terrain_z_multi_hill(x: np.ndarray, y: np.ndarray, base_z: float) -> np.ndarray:
+    relief = np.zeros_like(x, dtype=np.float64)
+    for hill in MULTI_HILL_HILLS:
+        r = np.hypot(x - hill["pos_x"], y - hill["pos_y"])
+        contrib = np.where(r <= hill["L"], hill["H"] * np.cos(0.5 * math.pi * r / hill["L"]) ** 2, 0.0)
+        relief = np.maximum(relief, contrib)
+    return np.full_like(x, base_z, dtype=np.float64) + relief
+
+
+def write_multi_hill_terrain(case_dir: Path, base_z: float, mesh_cfg: dict, stl_resolution_m: float) -> dict:
+    radius = float(mesh_cfg["cylinder_radius_m"])
+    extent = 2.0 * radius + 2000.0
+    n = int(math.ceil(extent / stl_resolution_m)) + 1
+    coords = np.linspace(-extent / 2.0, extent / 2.0, n, dtype=np.float64)
+    X, Y = np.meshgrid(coords, coords)
+    Z = terrain_z_multi_hill(X, Y, base_z)
+    stl_path = case_dir / "constant" / "triSurface" / "terrain.stl"
+    write_ascii_stl(stl_path, X, Y, Z)
+    system_dir = case_dir / "system"
+    solver_system = {
+        name: (system_dir / name).read_text()
+        for name in ("controlDict", "fvSchemes", "fvSolution")
+        if (system_dir / name).exists()
+    }
+    write_tbm_dict(mesh_cfg, "terrain.stl", case_dir, float(np.nanmin(Z) - 50.0))
+    for name, text in solver_system.items():
+        (system_dir / name).write_text(text)
+    return {
+        "terrain_base_z_m": float(base_z),
+        "terrain_z_min_m": float(np.nanmin(Z)),
+        "terrain_z_max_m": float(np.nanmax(Z)),
+        "stl_resolution_m": float(stl_resolution_m),
+        "stl_extent_m": float(extent),
+        "stl_points_per_axis": int(n),
+        "hills": MULTI_HILL_HILLS,
+    }
+
+
+def patch_top_bcs_variant(case_dir: Path, top_u: str, top_p: str) -> None:
+    u_body = {
+        "slip": "        type            slip;",
+        "inletOutlet": "        type            inletOutlet;\n        inletValue      uniform (0 0 0);\n        value           uniform (0 0 0);",
+    }[top_u]
+    p_body = {
+        "fixedValue0": "        type            fixedValue;\n        value           uniform 0;",
+        "zeroGrad": "        type            zeroGradient;",
+    }[top_p]
+    replacements = {"U": u_body, "p": p_body, "p_rgh": p_body, "k": "        type            zeroGradient;", "epsilon": "        type            zeroGradient;"}
+    for field, body in replacements.items():
+        path = case_dir / "0" / field
+        if path.exists():
+            path.write_text(replace_patch_block(path.read_text(errors="replace"), "top", body))
+
+
+def multi_hill_knobs(args: argparse.Namespace) -> dict:
+    top_u, top_p, pg_mode, z0_wall, z0_treatment, wind_dir = MULTI_HILL_VARIANTS[args.variant]
+    return {
+        "top_u": args.top_u_bc or top_u,
+        "top_p": args.top_p_bc or top_p,
+        "pg_mode": args.pg_mode or pg_mode,
+        "z0_wall": float(z0_wall),
+        "z0_treatment": args.z0_treatment or z0_treatment,
+        "wind_dir": float(args.wind_dir_deg if args.wind_dir_deg is not None else wind_dir),
+    }
+
+
+def placeholder_inflow() -> dict:
+    z = [10, 50, 100, 500, 1000, 1500]
+    spd = [6, 9, 11, 14, 16, 17]
+    return apply_wind_dir(
+        {
+            "site_lat": 37.0,
+            "site_lon": -5.5,
+            "z_levels": z,
+            "wind_speed_levels": spd,
+            "u_profile": spd,
+            "ux_profile": spd,
+            "uy_profile": [0.0] * len(spd),
+            "era5_source": "placeholder",
+            "timestamp": "2020-01-01T00:00:00",
+        },
+        270.0,
+    )
+
+
+def normalize_placeholder_wall_fields(case_dir: Path) -> None:
+    for field in ("nut", "epsilon"):
+        path = case_dir / "0" / field
+        if not path.exists():
+            continue
+        text = path.read_text(errors="replace")
+        for patch_name in ("terrain", "bottom"):
+            def update(body: str, field: str = field) -> str:
+                out = body
+                if field == "nut":
+                    out = re.sub(r"type\s+nutkWallFunction\s*;", "type            atmNutkWallFunction;", out)
+                if field == "epsilon":
+                    out = re.sub(r"type\s+epsilonWallFunction\s*;", "type            atmEpsilonWallFunction;", out)
+                if not re.search(r"\bz0\b", out):
+                    out = re.sub(r"(type\s+\w+\s*;)", r"\1\n        z0              uniform 0.05;", out, count=1)
+                return out
+
+            text, _, _ = patch_block(text, patch_name, update)
+        path.write_text(text)
+
+
+def make_dry_run_base(output_dir: Path, overwrite: bool) -> Path:
+    base = output_dir / "_placeholder_base"
+    src = MODULE_DIR.parents[1] / "data" / "cases" / "phase1_cylinder" / "case_prod_hpc"
+    copy_base_case(src, base, overwrite=overwrite)
+    (base / "inflow.json").write_text(json.dumps(placeholder_inflow(), indent=2))
+    normalize_placeholder_wall_fields(base)
+    return base
+
+
+def apply_multi_hill_z0(case_dir: Path, treatment_spec: str, z0_wall: float, nut_wall_function: str) -> dict:
+    treatment = parse_z0_treatment(treatment_spec)
+    if treatment["kind"] == "uniform":
+        patch_wall_fields(case_dir, treatment["value_m"], nut_wall_function)
+        return {"treatment": treatment_spec, "mode": "uniform", "z0_m": float(treatment["value_m"])}
+    patch_wall_fields(case_dir, z0_wall, nut_wall_function)
+    patch_terrain_z0_block_to_mapped(case_dir)
+    return {
+        "treatment": treatment_spec,
+        "mode": treatment["kind"],
+        "cap_m": float(treatment["cap_m"]) if treatment["cap_m"] is not None else None,
+    }
+
+
+def estimate_multi_hill_pg(inflow: dict, args: argparse.Namespace, pg_mode: str) -> dict:
+    if pg_mode == "OFF":
+        return {"enabled": False, "mode": "OFF"}
+    pg_args = argparse.Namespace(**vars(args))
+    pg_args.pg_sign = pg_mode
+    return {**estimate_pg(inflow, pg_args), "enabled": True, "mode": pg_mode}
+
+
+def make_multi_hill_variant(args: argparse.Namespace) -> tuple[dict, dict]:
+    output_dir = args.output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    base_case = make_dry_run_base(output_dir, args.overwrite) if args.dry_run_inflow else args.base_case.resolve()
+    knobs = multi_hill_knobs(args)
+    inflow = apply_wind_dir(load_inflow(base_case), knobs["wind_dir"])
+    mesh_cfg = dict(DEFAULT_MESH)
+    mesh_cfg.update({"inner_size_m": 6000, "inner_blocks": 30, "cells_per_block_xy": 6, "height_m": 2500, "cells_z": 40})
+    base_z, _ = read_stl_z_range(base_case / "constant" / "triSurface" / "terrain.stl")
+
+    case_name = f"case_ts000_multi_hill_{args.variant}"
+    case_dir = output_dir / "cases" / case_name
+    copy_base_case(base_case, case_dir, overwrite=args.overwrite)
+    (case_dir / "inflow.json").write_text(json.dumps(inflow, indent=2))
+    terrain_meta = write_multi_hill_terrain(case_dir, base_z, mesh_cfg, args.stl_resolution)
+    patch_top_bcs_variant(case_dir, knobs["top_u"], knobs["top_p"])
+    z0_info = apply_multi_hill_z0(case_dir, knobs["z0_treatment"], knobs["z0_wall"], args.nut_wall_function)
+    pg = estimate_multi_hill_pg(inflow, args, knobs["pg_mode"])
+    physics = {"coriolis": True}
+    if pg.get("enabled"):
+        physics["pressure_gradient"] = {"enabled": True, "dp_dx": pg["dp_dx"], "dp_dy": pg["dp_dy"]}
+    render_fvoptions(case_dir, inflow, physics)
+
+    top_label = "slip_fixed_p" if (knobs["top_u"], knobs["top_p"]) == ("slip", "fixedValue0") else f"{knobs['top_u']}_{knobs['top_p']}"
+    variant = {
+        "name": args.variant,
+        "terrain_kind": f"multi_hill_{args.variant}",
+        "case_name": case_name,
+        "case_dir": str(case_dir),
+        "description": f"multi_hill {args.variant}; top_U={knobs['top_u']}; top_p={knobs['top_p']}; pg={knobs['pg_mode']}; z0={knobs['z0_treatment']}; wind_dir={knobs['wind_dir']:g}",
+        "top_bc": top_label,
+        "top_u_bc": knobs["top_u"],
+        "top_p_bc": knobs["top_p"],
+        "pg_mode": knobs["pg_mode"],
+        "wind_dir_deg": knobs["wind_dir"],
+        "z0_wall_m": knobs["z0_wall"],
+        "z0": z0_info,
+        "pressure_gradient": pg,
+        "nut_wall_function": args.nut_wall_function,
+        **terrain_meta,
+    }
+    manifest_path = output_dir / "terrain_canary_manifest.json"
+    manifest = load_existing_manifest(manifest_path)
+    manifest.update({"base_case": str(base_case), "output_dir": str(output_dir), "time": args.time or read_end_time(base_case), "mesh_cfg": mesh_cfg})
+    manifest = write_manifest(output_dir, manifest, variant)
+    write_export_script(output_dir, manifest, inflow, manifest["time"])
+    write_readme(output_dir, manifest)
+    return manifest, variant
 
 
 def estimate_pg(inflow: dict, args: argparse.Namespace) -> dict:
@@ -721,9 +939,17 @@ def make_variant(args: argparse.Namespace) -> tuple[dict, dict]:
 def main(argv: Iterable[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--mode", choices=("analytic", "z0_treatment"), default="analytic")
-    ap.add_argument("--base-case", type=Path, required=True)
-    ap.add_argument("--terrain-kind", choices=("flat", "ridge_cos2"), default=None,
+    ap.add_argument("--base-case", type=Path, default=None)
+    ap.add_argument("--terrain-kind", choices=("flat", "ridge_cos2", "multi_hill"), default=None,
                     help="required for --mode analytic")
+    ap.add_argument("--variant", choices=tuple(MULTI_HILL_VARIANTS), default=None,
+                    help="multi_hill variant id")
+    ap.add_argument("--top-u-bc", choices=("slip", "inletOutlet"), default=None)
+    ap.add_argument("--top-p-bc", choices=("fixedValue0", "zeroGrad"), default=None)
+    ap.add_argument("--pg-mode", choices=("OFF", "flip", "native"), default=None)
+    ap.add_argument("--z0-treatment", choices=("wc", "wc_cap_0.05", "uniform_0.05"), default=None)
+    ap.add_argument("--wind-dir-deg", type=float, default=None)
+    ap.add_argument("--dry-run-inflow", action="store_true")
     ap.add_argument("--variants", default=None,
                     help="comma-separated z0 treatments for --mode z0_treatment "
                          "(e.g. wc,wc_cap_0.05,wc_cap_0.01,uniform_0.05)")
@@ -747,6 +973,8 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = ap.parse_args(list(argv) if argv is not None else None)
 
     if args.mode == "z0_treatment":
+        if args.base_case is None:
+            ap.error("--mode z0_treatment requires --base-case")
         if not args.variants:
             ap.error("--mode z0_treatment requires --variants")
         specs = [s for s in args.variants.split(",") if s.strip()]
@@ -765,6 +993,20 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     if not args.terrain_kind:
         ap.error("--mode analytic requires --terrain-kind")
+    if args.terrain_kind == "multi_hill":
+        if args.variant is None:
+            ap.error("--terrain-kind multi_hill requires --variant")
+        if args.base_case is None and not args.dry_run_inflow:
+            ap.error("--terrain-kind multi_hill requires --base-case unless --dry-run-inflow is set")
+        manifest, variant = make_multi_hill_variant(args)
+        print(f"canary={args.output_dir.resolve()}")
+        print(f"case={variant['case_dir']}")
+        print(f"terrain_kind={variant['terrain_kind']}")
+        print(f"time={manifest['time']}")
+        print(f"export_audit={args.output_dir.resolve() / 'export_and_audit_terrain_canary.sh'}")
+        return 0
+    if args.base_case is None:
+        ap.error("--mode analytic requires --base-case")
     manifest, variant = make_variant(args)
     print(f"canary={args.output_dir.resolve()}")
     print(f"case={variant['case_dir']}")
