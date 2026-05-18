@@ -1,0 +1,156 @@
+#!/bin/bash -l
+#PBS -N mh_V10
+#PBS -l select=1:ncpus=24:mem=48GB
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -m n
+
+# Multi-hill Phase D — V10 = V9 with pg_geo native (instead of flip).
+# (inletOutlet top U, zeroGrad top p, pg_geo native, z0_wall=0.05, wc native).
+# Single-task PBS (no array). Same pipeline as multi_hill_canary_V9_ct_d_fire_0056_ts014.pbs
+# with VARIANT hardcoded to V10.
+
+set -euo pipefail
+
+export CONTAINER_RUNTIME=apptainer
+export PYTHONUNBUFFERED=1
+
+DSW="$HOME/dsw"
+CANARY="/scratch/maitreje/dsw/multi_hill_canary/ct_d_fire_0056_ts014"
+BASE_CASE="/scratch/maitreje/dsw/z0_treatment_canary/ct_d_fire_0056_ts014/cases/case_ts000_wc_cap_0p05"
+ERA5_ZARR="/scratch/maitreje/dsw/era5_campaign_v3/era5_ct_d_fire_0056.zarr"
+SITE_LAT="37.34438"
+SITE_LON="-2.60413"
+TIMESTAMP="2022-09-29T12:00:00"
+N_ITER=300
+N_CORES=24
+
+VARIANT="V10"
+
+CASE_DIR="${CANARY}/cases/case_ts000_multi_hill_${VARIANT}"
+export CASE_DIR N_ITER N_CORES
+STATUS_DIR="${CANARY}/solve_status"
+mkdir -p "${STATUS_DIR}"
+STATUS_FILE="${STATUS_DIR}/${VARIANT}.json"
+
+write_status () {
+    printf '{"variant": "%s", "case": "%s", "status": "%s"}\n' \
+        "${VARIANT}" "$(basename ${CASE_DIR})" "$1" > "${STATUS_FILE}"
+}
+
+cd "${DSW}/services/module2a-cfd"
+
+if [ ! -d "${CASE_DIR}" ]; then
+    echo "MISSING case dir: ${CASE_DIR}" >&2
+    write_status "missing"
+    exit 1
+fi
+
+write_status "running"
+
+echo "=== ${VARIANT}: copy boundaryData from base-case ==="
+mkdir -p "${CASE_DIR}/constant/boundaryData"
+for SEC in section_0 section_1 section_2 section_3 section_4 section_5 section_6 section_7 terrain; do
+    SRC="${BASE_CASE}/constant/boundaryData/${SEC}"
+    DST="${CASE_DIR}/constant/boundaryData/${SEC}"
+    if [ ! -d "${SRC}" ]; then
+        echo "MISSING base section: ${SRC}" >&2
+        write_status "missing_boundary_data"
+        exit 2
+    fi
+    if [ ! -d "${DST}" ]; then
+        cp -r "${SRC}" "${DST}"
+    fi
+done
+
+echo "=== ${VARIANT}: terrainBlockMesher ==="
+python3 - <<'PY'
+import logging
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, ".")
+import run_multisite_campaign as RMC
+from run_multisite_campaign import run_tbm_mesh, DEFAULT_MESH, check_mesh_quality
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+RMC.CONTAINER_RUNTIME = "apptainer"
+RMC.OF_IMAGE  = os.path.expanduser("~/dsw/containers/openfoam_v2512.sif")
+RMC.TBM_IMAGE = os.path.expanduser("~/dsw/containers/terrainblockmesher.sif")
+
+case_dir = Path(os.environ["CASE_DIR"])
+mesh_cfg = dict(DEFAULT_MESH)
+mesh_cfg.update({"inner_size_m": 6000, "inner_blocks": 30, "cells_per_block_xy": 6,
+                 "height_m": 2500, "cells_z": 40})
+if not run_tbm_mesh(case_dir, mesh_cfg):
+    raise SystemExit("tbm_failed")
+if not check_mesh_quality(case_dir):
+    raise SystemExit("mesh_quality_failed")
+PY
+TBM_RC=$?
+if [ "${TBM_RC}" -ne 0 ]; then
+    write_status "tbm_failed"
+    exit 3
+fi
+
+if [ ! -f "${CASE_DIR}/0/Cx" ]; then
+    echo "=== ${VARIANT}: writeCellCentres (with 0/p backup) ==="
+    cp "${CASE_DIR}/0/p" "${CASE_DIR}/0/p.preCC.bak"
+    set +e
+    python3 - <<'PY'
+import logging, os, sys
+from pathlib import Path
+sys.path.insert(0, ".")
+import run_multisite_campaign as RMC
+from run_multisite_campaign import run_write_cell_centres
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+RMC.CONTAINER_RUNTIME = "apptainer"
+RMC.OF_IMAGE = os.path.expanduser("~/dsw/containers/openfoam_v2512.sif")
+case_dir = Path(os.environ["CASE_DIR"])
+ok = run_write_cell_centres(case_dir)
+sys.exit(0 if ok else 4)
+PY
+    WCC_RC=$?
+    set -e
+    mv "${CASE_DIR}/0/p.preCC.bak" "${CASE_DIR}/0/p"
+    if [ "${WCC_RC}" -ne 0 ]; then
+        write_status "writeCellCentres_failed"
+        exit 4
+    fi
+fi
+
+echo "=== ${VARIANT}: simpleFoam ${N_ITER} iters / ${N_CORES} cores ==="
+python3 - <<'PY'
+import logging, os, sys
+from pathlib import Path
+sys.path.insert(0, ".")
+import run_multisite_campaign as RMC
+from run_multisite_campaign import solve_case
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+RMC.CONTAINER_RUNTIME = "apptainer"
+RMC.OF_IMAGE = os.path.expanduser("~/dsw/containers/openfoam_v2512.sif")
+case_dir = Path(os.environ["CASE_DIR"])
+ok = solve_case(case_dir, int(os.environ["N_ITER"]), int(os.environ["N_CORES"]))
+sys.exit(0 if ok else 5)
+PY
+SOLVE_RC=$?
+if [ "${SOLVE_RC}" -ne 0 ]; then
+    write_status "solve_failed"
+    exit 5
+fi
+
+echo "=== ${VARIANT}: export grid.zarr ==="
+python3 "${DSW}/services/module2a-cfd/export_to_grid_zarr_v2.py" \
+    --case-dir "${CASE_DIR}" \
+    --site-id "${VARIANT}" \
+    --site-lat "${SITE_LAT}" \
+    --site-lon "${SITE_LON}" \
+    --era5-zarr "${ERA5_ZARR}" \
+    --timestamp "${TIMESTAMP}" \
+    --time "${N_ITER}" \
+    --output "${CASE_DIR}/grid.zarr" \
+    --overwrite
+
+write_status "ok"
+echo "DONE: ${VARIANT} single task"

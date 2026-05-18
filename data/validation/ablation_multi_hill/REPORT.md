@@ -75,29 +75,36 @@ Trié par |Δ crop_mean| vs V1 best-stack, deux blocs émergent : (i) **les retr
 
 ![F3](figures/F3_pdf_comparison.png)
 
-V1 (best-stack) montre une PDF **étroite et centrée sur ~0.6** : la dynamique de relief est comprimée. V0 et V8 ont une PDF beaucoup plus large avec une queue droite > 1.4 témoignant des accélérations de crête. V9 est intermédiaire : large queue droite (pg_geo actif) mais légèrement décalée vers la gauche (top ouvert sans tuning wall). La masse à `~1.0` est minoritaire dans tous les cas — confirmation que le "100% au centre" est physiquement borné par les sillages.
+V1 (best-stack, rouge) montre une PDF **étroite et centrée sur ~0.6** : la dynamique de relief est comprimée. V0 (gris) et V8 (vert) ont une PDF beaucoup plus large avec une queue droite > 1.4 témoignant des accélérations de crête. V9 (bleu) suit V8 de très près : même mode autour de 0.45 et même queue droite jusqu'à ~1.9 — preuve qu'ajouter `pg_geo` au stack top-ouvert V8 préserve toute la dynamique. La masse à `~1.0` est minoritaire dans tous les cas — confirmation que le "100% au centre" est physiquement borné par les sillages.
+
+> **Note technique (V9 PDF reconstruit 2026-05-18)** : l'audit initial avait écrit des bins à zéro pour V9 (export `grid.zarr` sans `inflow_speed` accessible côté audit ; cf. `scratch/V9_audit/`). Les bins V9 ont été recalculés à partir du `target/U` du `grid.zarr` local, divisés par l'inflow @10 m (constant : 5.103 m/s, identique aux autres variants car même `ts014`), histogramme `bins=40, range=(0, 2.5)` — mêmes conventions que l'audit officiel. 14 400 cellules sur le crop 4×4 km, 31/40 bins non-vides. Script : `scratch/V9_audit/recompute_v9_pdf.py`.
 
 ### 3.4 Profil vertical (F4)
 
 ![F4](figures/F4_vertical_profile.png)
 
-V0 reste au-dessus de 0.66 sur toute la colonne 10–100 m. V1 plafonne à 0.60–0.61 sans gradient vertical marqué (le top fermé bloque la reconstitution). V8 et V9 récupèrent vers 100 m (~0.68 et ~0.69 respectivement), preuve que le top ouvert laisse la circulation se reformer en altitude. Aucun variant n'atteint 1.0 sur cette colonne : la perte ~30% est conservatrice sur cette géométrie 3 collines à 33 m.
+**Lecture du panel (a) — vitesse brute @10 m, crop 4×4 km** : V0 = 3.86 m/s, V8 = 3.40 m/s, V9 = 3.22 m/s, V1 = 3.06 m/s. **V0 (control, top ouvert, no pg_geo) est le plus rapide en moyenne au sol** — ce n'est pas un bug, c'est précisément la découverte centrale de l'OFAT : ajouter les top-BCs fermés du best-stack V1 (slip + p=0) **réduit** la vitesse moyenne au sol, alors qu'on attendait l'inverse. `pg_geo` ne compense pas cette perte (V9 reste sous V0 d'environ −0.6 m/s) ; il ne fait que préserver/amplifier la dynamique de crête (voir F5, F6). Le panel (a) est donc cohérent avec les ratios du panel (b) — il les exprime simplement en m/s.
+
+Panel (b), ratios : V1 plafonne à 0.60–0.61 sans gradient vertical marqué (le top fermé bloque la reconstitution). V8 et V9 récupèrent vers 100 m (~0.68 et ~0.69 respectivement), preuve que le top ouvert laisse la circulation se reformer en altitude. Aucun variant n'atteint 1.0 sur cette colonne : la perte ~30% est conservatrice sur cette géométrie 3 collines à 33 m.
 
 ### 3.5 Sensibilité per-hill (F5)
 
 ![F5](figures/F5_per_hill_crest_lee.png)
 
-Sur chaque crête (N/SE/SW), V8/V9 produisent un speed-up local > 1.5 (jusqu'à 1.86 sur l'agrégat), V0 reste à ~1.4, V1 plafonne à ~1.1. Les `lee_p10` sont **tous saturés à ~0.01–0.30** — le masque per-hill capture surtout les zones de quasi-stagnation, donc cette stat est peu discriminante sur lee_min brut (utiliser p10 plutôt). Pas d'asymétrie N/SE/SW marquée : la rotation V0n/V1n confirme l'isotropie.
+Sur chaque crête, **V8 et V9 amplifient fortement le speed-up sur la crête SE** (max/inflow ≈ 1.86–1.89) — au-dessus de V0 (~1.40) et bien au-dessus de V1 (~1.17). La crête N reste plus modeste (V0 ≈ 1.40 > V9 ≈ 1.07) et la crête SW est en sous-vent dans tous les variants (< 1.0). Côté lee, V8/V9 améliorent légèrement la recovery lee SE (p10/inflow ≈ 0.55) par rapport à V1 (0.23). Pas d'asymétrie N/SE/SW absurde : la rotation V0n/V1n confirme l'isotropie au premier ordre.
+
+> **Note méthodologique** : l'audit n'écrit pas de stats `*_speed_to_inflow` pour les masques per-hill (`crest_N/SE/SW`, `lee_N/SE/SW`), seulement les raw `max_speed` (crest) et `p10_speed` (lee). F5 les normalise au plot par l'inflow @10 m du variant courant (5.103 m/s, identique aux quatre variants tracés). C'est le bug qui rendait F5 vide précédemment (le script cherchait `max_speed_to_inflow` qui n'existait pas sur ces masques).
 
 ### 3.6 Interaction top_BC × pg_geo (F6, figure clé)
 
 ![F6](figures/F6_top_BC_pg_interaction.png)
 
-Le 2×2 (top_BC ouvert/fermé × pg_geo off/on) montre la **non-additivité** :
-- Sur `crop_mean` : passer de "top open" à "top closed" coûte −0.16 si pg_geo OFF (V0→V3 : 0.757→0.493) mais seulement +0.03 si pg_geo ON (V9→V1 : 0.632→0.600).
-- Sur `crest_max` : passer de "top closed" à "top open" gagne +0.18 si pg_geo OFF (V3→V0 : 1.22→1.40) mais +0.72 si pg_geo ON (V1→V9 : 1.17→1.89).
+Figure redessinée en **interaction plot** : deux panneaux (crop_mean, crest_max), abscisse `pg_geo OFF → ON`, deux lignes par panneau — une pour `top OPEN` (V0→V9, bleu marine), une pour `top CLOSED` (V3→V1, orange brûlé). Si les deux lignes étaient parallèles, l'effet de `pg_geo` serait additif. Elles ne le sont pas : c'est cette **non-additivité** qui est la découverte centrale.
 
-Conclusion : `pg_geo` n'exprime sa dynamique de relief que si le top respire. C'est exactement le pattern d'**interaction** que la Phase B (1 ridge 2D) ne pouvait pas révéler.
+- **Panel (a), crop_mean** : top OPEN descend (Δ = −0.13, V0 0.757 → V9 0.632) quand top CLOSED monte (Δ = +0.11, V3 0.493 → V1 0.600). Les deux lignes **se croisent** : `pg_geo` aide la conservation de la moyenne au sol uniquement quand le top est fermé.
+- **Panel (b), crest_max** : top OPEN monte fortement (Δ = +0.50, V0 1.396 → V9 1.892) quand top CLOSED stagne/descend légèrement (Δ = −0.05, V3 1.219 → V1 1.170). `pg_geo` n'**amplifie la dynamique de crête que si le top respire** ; en top fermé il ne fait rien.
+
+Conclusion lisible directement sur la figure (sans connaître l'interaction à l'avance) : les lignes croisées du panel (a) et l'écart énorme entre les pentes du panel (b) montrent que `pg_geo` et `top_BC` interagissent fortement. C'est ce que la Phase B (1 ridge 2D) ne pouvait pas révéler.
 
 ## 4. Décision : V8 pour la regen 9k
 
@@ -143,6 +150,51 @@ Coriolis  : on  (atmCoriolisUSource avec sign flip)
 | V0n     |    5.103 |     0.714 |    0.233 |    0.710 |    1.175 |    1.858 |     0.727 |    0.239 |     1.544 |     1.462 |   0.016 |   0.166 |
 | V1n     |    5.103 |     0.600 |    0.383 |    0.602 |    0.818 |    1.163 |     0.581 |    0.418 |     1.163 |     1.090 |   0.008 |   0.215 |
 | V9      |    5.103 |     0.632 |    0.324 |    0.565 |    1.023 |    1.892 |     0.614 |    0.329 |     1.892 |     1.034 |   0.268 |   0.268 |
+| V10     |    5.103 |     0.808 |    0.281 |    0.742 |    1.436 |    1.961 |     0.724 |    0.301 |     1.961 |     1.905 |   0.192 |   0.192 |
+
+## 5bis. Phase E preliminary — V10 (top open + pg native) retournement
+
+L'observation user a révélé que V4 (slip + pg native) bat V1 (slip + pg flip)
+sur multi-hill. Cela suggérait que le sign "flip" était un workaround spécifique
+à 0170 (Skiathos, bug WC), pas une règle générale.
+
+**V10 = V9 + pg native** (au lieu de flip) sur multi-hill :
+
+| Stack | crop_mean | flat_mean | crest_max | crop_max | crop_p90 |
+|---|---:|---:|---:|---:|---:|
+| V0 control | 0.757 | 0.789 | 1.396 | 1.779 | 1.232 |
+| V8 top open + flip + z0low + wccap | 0.666 | 0.651 | 1.864 | 1.864 | 1.042 |
+| V9 top open + flip | 0.632 | 0.614 | 1.892 | 1.892 | 1.023 |
+| **V10 top open + native** | **0.808** | **0.724** | **1.961** | **1.961** | **1.436** |
+
+V10 bat tout sur les 4 métriques principales. Δ V10−V9 : crop_mean +0.176,
+flat_mean +0.111, crest_max +0.069. V10 dépasse même V0 control de +0.051 sur
+crop_mean.
+
+**Convention pg confirmée** (extracted from fvOptions) :
+
+- V9 (flip)   : `source.x += -7.587e-04 × V`, `source.y += -5.192e-04 × V`
+- V10 (native): `source.x += +7.587e-04 × V`, `source.y += +5.192e-04 × V`
+- V10 = exact −V9. Native sign est physiquement correct (calibration ERA5
+  850–700 hPa, cohérent avec site 0056 Andalousie 37°N + flux W).
+
+**Stack candidat révisé pour la regen 9k = V10** (NB : pré-Phase E) :
+
+```text
+top U     : inletOutlet
+top p     : zeroGradient
+pg_geo    : NATIVE (calibration ERA5 directe, pas de flip)
+z0_wall   : 0.05 m (uniforme défaut)
+z0 field  : wc native (no cap)
+Coriolis  : on
+```
+
+Stack le PLUS SIMPLE et le PLUS PERFORMANT. Pas de z0_wall low ni wc_cap
+nécessaires (leurs contributions sont marginales |Δ|<0.03 en ablation OFAT).
+
+**Phase E lancée** : validation V0/V10/V1 sur 5 sites v2 diversifiés solved
+(non-Pop-B, pas de pentes >25°/elev >2500m qui crashent en RANS). Confirmation
+requise avant fixation finale du stack regen 9k.
 
 ## 7. Pointers
 

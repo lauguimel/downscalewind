@@ -148,3 +148,22 @@ analytic flat/ridge derived from 0170 inflow. The increments
 ("slip_top → +0.04") cannot be added or compared as if from the same
 ablation. This is exactly why M6→M9 ablation is being done on a
 single multi-hill mesh with one inflow.
+
+## V10 native > V8 flip — décision révisée (2026-05-18, M12)
+
+Test M12 (V10 = V9 + pg native) sur multi-hill : V10 bat TOUTES les
+métriques. crop_mean=0.808 (Δ vs V9 flip = +0.176, Δ vs V8 = +0.142),
+crest_max=1.961 (le plus haut), flat_mean=0.724.
+
+**Convention pg confirmée** :
+- native : `source.x += +7.587e-04 × V`, `source.y += +5.192e-04 × V`
+- flip   : opposé (multiplication par -1)
+- Sur 0056 (Sierra Andaluza, 37°N, flux 270°W) → native correct.
+- Sur 0170 (Skiathos, bug WC) → flip aidait à compenser un fit ERA5
+  corrompu. Workaround spécifique, pas règle générale.
+
+**Stack régen 9k révisé (pré-Phase E)** : V10 = inletOutlet + zeroGrad
+top + pg native + z0=0.05 + wc native. Plus simple que V8 ET meilleur.
+
+Phase E à valider sur 5 sites v2 diversifiés solved (éviter Pop B
+steep terrain qui crash RANS).
