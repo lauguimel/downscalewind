@@ -149,6 +149,36 @@ analytic flat/ridge derived from 0170 inflow. The increments
 ablation. This is exactly why M6→M9 ablation is being done on a
 single multi-hill mesh with one inflow.
 
+## Phase G ouverte 2026-05-21 — extension dataset OBS + inférence surrogate aux stations
+
+**Stratégie validée par user** : pas de re-simulation OF. Inférence
+surrogate v2 (best identifié = `~/dsw/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt`,
+val_mse=0.121, 24 AGL FWI 0-100 m, ERA5 surface in input) aux coordonnées
+des stations OBS comme oracle CFD.
+
+**Sources OBS ciblées** : Perdigão IOP 2017 (déjà ingéré) + SYNOP MF
+~62 + AEMET ES ~250 + IPMA PT ~120 (via OGIMET archive) + ICOS 7
+existants = **~480 stations** (sub-1000 du brief mais >10× seuil
+LOSO honest).
+
+**Caveats à archiver** :
+- IPMA n'a pas d'archive open historique 2018-2023 → OGIMET (synops
+  décodés gratuits) est le fallback obligatoire pour PT.
+- AEMET API rate-limit 60 req/min → ingestion en 5 batchs régionaux
+  séquentiels (Norte/Centro/Sur/Baleares/Canarias).
+- ViT-Large (val_loss 0.4966) tenu en réserve si val_mse plus bas du
+  base_agl100_k24 ne se généralise pas en M_G8.
+
+**Pairing strategy** : pas d'index dans cases v2, M_G6 extrait input
+surrogate à la volée depuis SRTM+WC+ERA5_europe.zarr. Stratification
+4×3×4 = 48 cellules × 30 timestamps × 480 stations ≈ 690k pairings.
+
+How to apply : avant tout audit final, vérifier que la stratification
+n'a pas un trou critique sur une classe sous-représentée (alpine
+summits, coastal sites). Penser à inclure les sites ICOS Méditerranéen
+(FR-Pue, ES-LJu) dans la validation focused car ils sont les pivots
+des résultats FWI antérieurs.
+
 ## VERDICT FINAL session 2026-05-18/20 : V0 statu quo, ne pas regen 9k (M17)
 
 Après 6 retournements (Phase B → C → D → E → M14 → step-back → M16 → M17),

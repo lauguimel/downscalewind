@@ -1,5 +1,54 @@
 # Department memory — DownscaleWind
 
+## Surrogate v2 best per use-case (2026-05-21, M_G0)
+
+Sur Aqua sous `~/dsw/data/models/surrogate_v2_*/best.pt` :
+
+- `vit_large_resid_s4_geo_agl/best.pt` : val_loss=0.4966 (le plus bas),
+  val_mse=0.2259. Bon pour volumes 3D.
+- `vit_base_resid_s4_geo_agl100_k24_surface/best.pt` : val_loss=0.5843
+  mais val_mse=**0.1212** (le plus bas !), 24 niveaux AGL FWI 0-100 m
+  + ERA5 surface input. **Recommandé pour pairing stations à 10 m**.
+
+How to apply : pour Phase G (inférence aux stations OBS), utiliser
+le `_agl100_k24_surface`. Pour benchmarks volume entier 3D, prendre
+`_vit_large_resid_s4_geo_agl`. Code Aqua :
+`~/dsw/services/module2b-surrogate/src/{dataset_v2_vit,model_vit_v2}.py`.
+
+## OBS multi-sources schema (2026-05-21, M_G0)
+
+NaN-pad sur l'axe `heights/` car SYNOP/AEMET/IPMA n'ont que 10 m AGL
+alors que Perdigão a 6 hauteurs et ICOS varie par tour. Ne pas créer
+1 Zarr par source — merger sous `data/raw/obs_unified.zarr/`. Schema :
+
+```
+stations/ {station_id, lat, lon, elev, source, country, z0_class_wc}
+heights/ {height_m (H,)}
+data/ {u, v, wind_speed, wind_dir, t2m, rh} chunks=(time=720, S=1, H=-1)
+coords/time (int64 ns UTC hourly)
+```
+
+How to apply : tout pipeline ingestion (M_G1/G2/G3/G4) doit écrire au
+même schema → merge trivial en M_G5. Source obligatoire dans coord
+`station/source` pour stratifier en M_G8.
+
+## OBS sources caveats (2026-05-21, M_G0)
+
+- **SYNOP Météo France** : dataset 90 "SYNOP essentielles OMM" sur
+  donneespubliques.meteofrance.fr. CSV.gz mensuels, FTP bulk, no key,
+  ~62 stations FR métro. Cadence 3h (pas hourly natif). Historique
+  1996→présent.
+- **AEMET Espagne** : opendata.aemet.es/opendata/api. Clé API gratuite
+  (env). ~250 stations. Rate-limit 60 req/min, 2 GET en chaîne par
+  requête (token + data). Ingestion en 5 batchs régionaux séquentiels.
+- **IPMA Portugal** : api.ipma.pt n'expose qu'un open live 24-72h.
+  Archive historique non-publique. **Fallback OGIMET obligatoire**
+  pour archive 2018-2023 (synops décodés gratuits).
+
+How to apply : tout pipeline ingestion d'une de ces sources doit
+intégrer ses caveats spécifiques. Prévoir cache disque pour AEMET
+(rate-limit) et OGIMET parser pour IPMA.
+
 ## WC audit (heterogeneous site selection)
 
 - ESA WC 2021 class → z0 lookup (Wieringa/Davenport, meters):
