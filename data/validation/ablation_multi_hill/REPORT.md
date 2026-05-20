@@ -1,14 +1,19 @@
-# Ablation OFAT multi-hill — synthèse Phase A-D + V10
-*2026-05-18 · DownscaleWind v2 · session orchestrator (M6 → M13, Phase E en cours)*
+# Ablation OFAT multi-hill — synthèse Phase A → M17
+*2026-05-18 / 2026-05-19 · DownscaleWind v2 · session orchestrator (M6 → M17)*
 
-## TL;DR
+## TL;DR (état FINAL, post step-back)
 
-- **Problème** : audit teacher v2 (500 cas) donne médiane `CFD_central / ERA5_u10 = 0.696` (cible ~1.0). Best-stack Phase B (slip top + p=0 + pg_geo **flip** + z0_wall=0.005 + wc_cap_0.05) validé sur 1 ridge 2D mono-orientation.
-- **1er retournement (Phase B → Phase C)** : sur multi-hill 3D multi-orientation (3 collines, mesh v2, inflow ERA5 `ct_d_fire_0056_ts014`), le best-stack V1 **écrase la dynamique** — `crest_max = 1.17` vs V0 control 1.40 et V8 (top ouvert) 1.86. Le vrai levier est l'**interaction `pg_geo × top_BC ouvert`**, pas `pg_geo` seul.
-- **2e retournement (Phase D → V10, M12)** : le sign "flip" de `pg_geo` était un workaround spécifique à `ct_d_fire_0170` (bug WC coastal). Sur 0056 le sign **natif** (calibration ERA5 directe) est correct. V10 = top open + pg **native** + z0=0.05 + wc native — le stack le plus simple.
-- **Stack pré-Phase E (multi-hill seul) = V10** @ 10 m : `crop_mean=0.808` (#1), `crest_max=1.961` (#1). Mais c'est sur 1 cas analytique.
-- **3e retournement (Phase E → V1)** : validation sur 5 sites v2 RÉELS Pop A (FR continental) → **V1 bat V10 sur 4/4 sites complets** sur le ratio physique `crop_mean / ERA5_U10`. Mean ratio V1=2.31 > V10=1.89 > V0=1.35. Le multi-hill analytique a sur-estimé l'effet `top_BC ouvert + pg native` ; sur vrai terrain les BCs fermées (slip + p=0 + pg flip) gagnent.
-- **Décision finale regen 9k = V1** (best-stack original, top fermé + pg_geo flip + z0_wall=0.005 + wc_capped_0.05). Voir §7 pour détails.
+> **6 retournements** au cours de la session ont convergé vers une vérité simple :
+> **le stack V0 (statu quo v2) est défendable** ; les patches BC explorés (V1, V8, V9, V10) étaient des **degrés de liberté empiriques** sans physique solide ; la voie d'amélioration **n'est pas dans le stack CFD mais dans l'extension du dataset OBS + un ML correction stratifié**.
+
+- **Audit initial** : médiane `crop/inflow = 0.696` sur 500 cas → "30% déficit". Best-stack Phase B (slip top + p=0 + pg flip + z0_wall=0.005 + wc_cap_0.05) validé sur 1 ridge 2D mono-orientation.
+- **1er retournement (Phase B → C)** : sur multi-hill 3D, V1 ÉCRASE la dynamique (crest_max=1.17 vs V0 1.40). Vrai levier : `pg_geo × top_BC ouvert`.
+- **2e retournement (Phase D → V10, M12)** : V10 (top open + pg native) bat tout sur multi-hill (crop_mean=0.808, crest_max=1.961).
+- **3e retournement (Phase E → V1)** : sur 5 sites v2 réels, V1 bat V10 sur 4/4 sites (mean ratio 2.31 vs 1.89). **V1 retenu** pour regen 9k.
+- **4e retournement (M14 audit direction)** : V10 inverse le vent sur 2/5 sites (alpine fort relief), V1 marginal 1/5. Cause racine : convention pg_geo calibrée sur geopotential 850-700 hPa = **mauvaise altitude** (rotation Ekman 30-60° entre surface et 750 hPa). Le sign "flip" est un workaround approximatif, pas une physique solide. **Décision V1 mise en doute**.
+- **5e retournement (step-back A+B convergents)** : le "0.696" est un **artefact d'audit** — sur 500 cas, **médiane = 0.88**, p10=0.53, p90=1.71 ; le 0.696 ne vaut QUE pour n=20 cas vent fort ≥5 m/s (4% du sample). **41% des cas ont CFD ≥ ERA5**. Tall-tower 2020 (15 pairings) : V0 actuel bat ERA5 sur 11/15 pairings (MAE médian −18%). V0 = statu quo est défendable.
+- **6e retournement (M17 ML POC)** : XGBoost bias correction ne bat pas CFD V0 raw en LOSO (avec 7 sites seulement, le ML apprend la climatologie pas la physique). Affine fix est pire que CFD raw partout.
+- **Verdict FINAL** : **V0 statu quo v2 est état de l'art** sur les ressources actuelles. L'investissement utile n'est pas dans un nouveau stack BC mais dans **(G) extension du dataset OBS à ~1000+ stations** (Perdigão IOP 2017 + SYNOP France/ES/PT + ICOS multi-sites) **(H) ML stratifié** (altitude × pente × terrain class × wind class) **avec un DNN** (XGBoost insuffisant), inspiré du module 3 precip stratified QM. Voir §9 roadmap.
 
 ---
 
@@ -108,35 +113,67 @@ Figure redessinée en **interaction plot** : deux panneaux (crop_mean, crest_max
 
 Conclusion lisible directement sur la figure (sans connaître l'interaction à l'avance) : les lignes croisées du panel (a) et l'écart énorme entre les pentes du panel (b) montrent que `pg_geo` et `top_BC` interagissent fortement. C'est ce que la Phase B (1 ridge 2D) ne pouvait pas révéler.
 
-## 4. Décision actuelle : V1 retenu pour la regen 9k (post-Phase E)
+## 4. Décision FINALE : V0 statu quo (post step-back A+B + M16 + M17)
 
-> ⚠️ Cette section a été révisée en 3 temps. État courant après
-> validation Phase E sur 5 sites v2 réels.
+> ⚠️ Cette section a été révisée **4 fois** au cours de la session.
+> État FINAL après step-back stratégique adversarial + bench OBS
+> direct (M16) + POC ML correction (M17). Voir §10 historique des
+> retournements.
 
-**Stack final retenu = V1** (best-stack original Phase B) :
+**Stack final retenu = V0 (statu quo dataset v2 actuel)** :
 
 ```
-top U     : slip
-top p     : fixedValue 0
-pg_geo    : flip  (calibration ERA5 850-700 hPa, sign × -1)
-z0_wall   : 0.005 m  (uniforme face terrain)
-z0 field  : wc_capped_0.05
-Coriolis  : on
+top U     : inletOutlet
+top p     : zeroGradient
+pg_geo    : OFF
+z0_wall   : 0.05 m  (uniforme face terrain)
+z0 field  : wc native (no cap)
+Coriolis  : on (atmCoriolisUSource)
+ambient turb source : kAmb=0.001, εAmb=7.208e-8 (Parente 2011)
+solveur   : simpleFoam k-ε, 300 iter
 ```
 
-**Histoire de la décision** :
+C'est essentiellement la **config Venkatraman Perdigão (WES 2023)**
+adaptée à 9k sites (mesh adapté, inflow mappedFile ERA5 cylindrique
+au lieu de log-law analytique). **Pas de regen 9k** — le dataset v2
+existant (9252 grid.zarr sur Aqua) reste tel quel.
 
-1. **Multi-hill (M9, Phase C)** avait dit V1 mauvais (crop_mean=0.600
-   vs V0 control=0.757) → recommandation : V8 / V9 stacks avec top
-   ouvert + pg_geo flip.
-2. **M12 (Phase D)** avait dit V10 (top ouvert + pg native) bat tout
-   sur multi-hill (crop_mean=0.808). Décision pré-Phase E = V10.
-3. **Phase E (5 sites v2 réels)** retourne TOUT : **V1 bat V10 et V0
-   sur 4/4 sites complets** en ratio physique `crop_mean / ERA5_U10`.
-   Mean ratio V1=2.31 > V10=1.89 > V0=1.35.
+**Pourquoi V0** (synthèse) :
 
-Le multi-hill analytique n'était pas un proxy fiable pour le vrai
-terrain. La validation sur sites v2 reste l'arbitre final.
+1. **Le "30% déficit" initial était un artefact d'audit** (step-back
+   A+B 2026-05-19) : le 0.696 ne vaut que pour n=20 cas vent fort
+   ≥5 m/s (4% du sample500), médiane sur tout le sample = 0.88,
+   41% des cas ont CFD ≥ ERA5.
+2. **V0 actuel bat ERA5** sur les vraies métriques OBS (tall-tower
+   2020 : MAE médian −18% sur 15 pairings, audit M_step_back_A1b).
+3. **Les patches BC (V1, V8, V9, V10) sont des degrés de liberté
+   empiriques** sans physique solide : ils flippent décision selon
+   le test set (Phase B ridge 2D → C multi-hill 3D → E sites réels).
+4. **M14 audit physique direction** : V10 inverse le vent sur 2/5
+   sites alpine, V1 marginal 1/5 — la convention pg_geo calibrée sur
+   geopotential 850-700 hPa est mal alignée à la couche limite
+   (rotation Ekman 30-60° entre 750 hPa et surface).
+5. **M16 audit OBS direct** : biais affine `U_cfd = 0.54·U_obs +
+   1.88` (R²=0.43) hors sommets alpins, **mais ERA5 a la même
+   compression** (a=0.47). C'est physique RANS k-ε + mesh + wall
+   functions, pas BC tuning fixable.
+6. **M17 POC ML correction** : XGBoost (a=0.04 sur feature CFD
+   importance) ne bat pas CFD raw en LOSO. Avec 7 sites le ML
+   apprend une climatologie, pas une physique. Affine fix est pire
+   que CFD raw partout. **Dataset OBS insuffisant pour ML utile**.
+
+**Histoire des décisions** (résumé : voir §10) :
+
+| Phase | Décision provisoire | Cause de retournement |
+|---|---|---|
+| Phase B (ridge 2D) | best-stack V1 | trop spécifique 2D |
+| Phase C (multi-hill M9) | V8/V9 (top ouvert) | écrase V1 |
+| Phase D (M12) | V10 (top ouvert + pg native) | sur 1 cas analytique |
+| Phase E (5 sites v2) | V1 (retour) | rev `43f5e90`, ratio 2.31 sur sites vent faible |
+| M14 (audit direction) | V1 douteux | rotation Ekman pg_geo |
+| step-back A+B + M16 | V0 statu quo | 0.696 = artefact d'audit ; CFD ≈ Venkatraman |
+| M17 (ML POC) | V0 statu quo confirmé | ML ne bat pas CFD raw avec 7 sites |
+| **FINAL** | **V0 statu quo** | converge |
 
 Sub-section legacy (multi-hill seul, à titre documentaire — NE PAS
 prendre comme décision finale) :
@@ -337,6 +374,124 @@ Coriolis  : on
 - Audit script : `scratch/phaseE/audit_v2_sites.py` (minimal, ERA5 ratio)
 - Résultats CSV : `scratch/phaseE/phaseE_results.csv`
 - Grid.zarr locaux (~330 MB, gitignored) : `scratch/phaseE/audits/<site>/<variant>/grid.zarr/`
+
+## 9. Roadmap post-session : Phase G + Phase H
+
+La session a démontré que **le levier d'amélioration n'est plus dans le
+stack CFD** (V0 statu quo est défendable, M17 ML correction sur 7 sites
+échoue, patches BC sont des degrés de liberté empiriques). L'investissement
+utile pivote vers :
+
+### Phase G — Extension du dataset OBS à ~1000+ stations
+
+**Objectif** : passer de 7 sites ICOS tall-tower 2020 à un dataset massif
+qui permette du vrai ML de correction (et non un site-embedding).
+
+**Sources à ingérer** :
+- **Perdigão IOP 2017** (`data/raw/perdigao_obs.zarr` déjà dispo, 48 towers
+  × multi-heights × milliers de timestamps)
+- **SYNOP Météo France** (~150 stations sur la France, hourly, vent
+  10 m)
+- **AEMET Espagne** (~600 stations)
+- **IPMA Portugal** (~200 stations)
+- **ICOS sites multi-héritages** (au-delà des 7 tall-tower 2020)
+- Réseaux européens type EU-METEOR, EUROFAB si accessibles
+
+**Pour chaque station** : extraire `(lat, lon, elev, height_obs, u10_obs,
+v10_obs, T2m_obs, timestamp)` aligné avec un timestamp v2 simulé proche
+(ou si pas dispo, simuler v2 à ces coordonnées avec un PBS dédié).
+
+**Cible** : ~10⁴-10⁵ pairings (station × timestamp × height), couvrant
+plusieurs régimes synoptiques (Mistral, Atlantique, anticyclones,
+convectifs).
+
+### Phase H — ML correction stratifiée (DNN) inspirée du module 3 precip
+
+**Pattern à reproduire** : le `qm_stratified.npz` du module 3 precip fait
+QM par `(season, elevation, climate_zone)`. Pour le vent, stratifier par :
+- `class_topo` : plain / foothill / mountain / summit / coastal
+- `height_bucket` : 10/20/50/100 m AGL
+- `wind_class_inflow` : low (<3) / mid (3-7) / high (>7) m/s
+- `season` : winter / spring / summer / autumn
+- `climate_zone` : Cfb / Csa / BSk (Köppen)
+
+**Modèle** : DNN (4-6 hidden layers, ~100-200 units, residual connections)
+au lieu d'XGBoost. M17 a montré que XGBoost feature-importance dominée
+par lat/lon/elev (climatologie). DNN avec features de zone (3×3 grid
+features autour de la station) + features stratifiées + embedding terrain
+local devrait dépasser ce plafond.
+
+**Features (~30-50)** :
+- CFD zone 3×3 stats (mean, p10, p50, p90, max, std) à plusieurs hauteurs
+- ERA5 local (u10, v10, T2m, d2m, pressure-level u/v/T jusqu'à 700 hPa)
+- Terrain local (elev, slope, aspect, std_elev, roughness, z0 WC)
+- Météorologie (Richardson bulk, stratification proxy, season, hour)
+- Lat/lon (mais avec embedding plutôt que coordonnées brutes pour limiter
+  l'overfit climatologique)
+
+**Validation** : LOSO (Leave-One-Site-Out) **avec 50+ sites** pour que
+chaque pli laisse au moins 49 sites en training. Métriques :
+MAE par class wind × class terrain × height. Si DNN bat CFD raw sur LOSO
+≥80% des sites → adopter dans pipeline d'inférence.
+
+**Coût estimé** :
+- Phase G : ingestion + alignement v2 + grid.zarr extraction zone 3×3 :
+  ~2-3 semaines (1 mission par source OBS)
+- Phase H : feature engineering + DNN training + LOSO + cross-validation :
+  ~1 semaine (un Department + 1 GPU H100)
+
+### Phase I — Domaine élargi pour les sommets alpins (optionnel)
+
+Les sommets >2000 m (JFJ 3580 m, PUY 1465 m) ont biais −58% indépendant
+méthode : domaine 6×6×2.5 km insuffisant pour résoudre l'accélération
+sommitale. Si Phase H ne suffit pas pour cette classe terrain :
+- **Phase I** : re-simuler ~50 cas alpine summit avec domaine **10×10×5 km**
+  et mesh raffiné près du sommet (~12 m horizontal local).
+- Coût ~10× compute par case. Ciblé.
+- Alternative : flagger "non-utilisable" pour FWI/wind farms tant que
+  Phase I pas faite.
+
+### Verdict roadmap
+
+| Phase | Coût | Impact attendu | Priorité |
+|---|---|---|---|
+| **G — Dataset OBS extension** | 2-3 sem | Haut (débloquer Phase H) | **1** |
+| **H — DNN stratifié** | 1 sem | Haut si G OK | **2** (après G) |
+| I — Alpine summit re-sim | ~10× compute | Moyen (~5% sites concernés) | **3** (optionnel) |
+
+## 10. Historique des retournements (transparence)
+
+Cette session a vu **6 retournements de décision** avant convergence.
+Documenté pour ne pas reproduire les mêmes pièges :
+
+| # | Date | Phase | Décision provisoire | Cause de retournement |
+|---|---|---|---|---|
+| 1 | 2026-05-13 | Phase B (ridge 2D) | best-stack V1 (slip+p=0+pg flip+z0=0.005+wc_cap) | mono-orientation 2D, sur-confiant |
+| 2 | 2026-05-18 | Phase C (M9 multi-hill 3D) | V8 (top open + pg flip + z0=0.005 + wc_cap) | V1 écrase la dynamique 3D |
+| 3 | 2026-05-18 | Phase D (M12) | V10 (top open + pg native) | V10 best sur multi-hill (crop_mean=0.808) |
+| 4 | 2026-05-18 | Phase E (5 sites v2 réels) | retour V1 | V1 bat V10 sur 4/4 sites complets |
+| 5 | 2026-05-19 | M14 (audit direction physique) | V1 mis en doute | rotation Ekman 30-60° = sign pg_geo mal calibré |
+| 6 | 2026-05-19 | step-back A+B + M16 + M17 | **V0 statu quo** | 0.696 = artefact d'audit + ML insuffisant |
+
+**Leçons orchestration** (à archiver memory.boss) :
+
+1. **1 cas analytique ≠ vérité universelle**. Multi-hill 3D dit X, sites
+   réels disent not-X. Toujours valider sur ≥5 vrais sites avant adoption.
+2. **Le sign d'un patch empirique est suspect** : pg_geo "flip" vs "native"
+   a flippé selon le site → c'était un degré de liberté, pas une physique
+   solide.
+3. **Les audits CSV sont des proxies fragiles** : `crop/inflow` médian sur
+   500 cas non-stratifiés cachait le fait que 96% du sample est vent
+   faible/moyen où CFD ≥ ERA5. Le 30% déficit était sur 4% du sample.
+4. **Le bench OBS direct doit être fait AVANT d'investir dans des stack BC**.
+   On a passé 3 jours sur les BC avant de mesurer que V0 actuel bat ERA5
+   sur tall-tower 2020 (-18% MAE).
+5. **ML correction sur N=7 sites = climatologie, pas physique**. Ne PAS
+   confondre "j'ai un dataset OBS" avec "j'ai assez de stations pour
+   généraliser". Seuil empirique : ~30-50 sites min pour LOSO honest.
+6. **Adversarial dual-spawn (A+B) est puissant** : les deux Departments
+   step-back ont convergé indépendamment vers le même verdict. Quand
+   les deux s'accordent c'est solide.
 
 ## 8. Pointers
 

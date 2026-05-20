@@ -149,6 +149,63 @@ analytic flat/ridge derived from 0170 inflow. The increments
 ablation. This is exactly why M6→M9 ablation is being done on a
 single multi-hill mesh with one inflow.
 
+## VERDICT FINAL session 2026-05-18/20 : V0 statu quo, ne pas regen 9k (M17)
+
+Après 6 retournements (Phase B → C → D → E → M14 → step-back → M16 → M17),
+convergence vers **V0 = dataset v2 actuel = état de l'art**.
+
+**Conclusions empilées** :
+- Le "30% déficit" initial (`crop/inflow = 0.696`) est un **artefact
+  d'audit** : ne vaut que pour n=20 cas vent fort ≥5 m/s (4% du
+  sample500). Médiane sur tout le sample = 0.88. 41% des cas ont
+  CFD ≥ ERA5.
+- **V0 actuel bat ERA5** sur tall-tower 2020 : MAE médian −18% sur
+  15 pairings. **CFD < OBS sur 8/15** (= ERA5 idem 10/15) ; **CFD > OBS
+  sur 4/15**. Pas systématique.
+- Tous les patches BC (V1, V8, V9, V10) sont des **degrés de liberté
+  empiriques** qui flippent décision selon le test set (2D → 3D → réel).
+- pg_geo "flip" vs "native" : la convention native est physiquement
+  correcte (`source.x = -f·V_g`) mais la calibration sur geopotential
+  850-700 hPa = mauvaise altitude (rotation Ekman 30-60° entre 750 hPa
+  et surface). Sign optimal site-dépendant → patch fragile, à éviter.
+- Sur OBS : biais affine `U_cfd = 0.54·U_obs + 1.88` (R²=0.43) hors
+  alpine summits. **Mais ERA5 a la même compression** (a=0.47). C'est
+  physique RANS k-ε + mesh grossier + wall functions, pas BC tuning.
+- M17 POC XGBoost sur 7 sites : **ne bat pas CFD raw** en LOSO. Avec
+  7 sites le ML apprend climatologie (top features = lat/lon/elev,
+  CFD importance 0.04). Affine fix est pire que CFD raw partout.
+- Dataset OBS actuel insuffisant pour ML correction utile.
+
+**Stack final** = V0 = `inletOutlet top + zeroGradient + pg OFF +
+z0=0.05 + wc native + Coriolis ON + Parente ambient + atmNutk +
+simpleFoam k-ε 300 iter` = essentiellement **Venkatraman Perdigão WES
+2023 adapté aux 9k sites v2**.
+
+**Roadmap post-session** (voir REPORT.md §9) :
+- **Phase G** (2-3 sem) : extension dataset OBS à ~1000+ stations
+  (Perdigão IOP 2017 + SYNOP FR/ES/PT + ICOS multi)
+- **Phase H** (1 sem) : DNN bias correction stratifié (terrain × height
+  × wind class × season), inspiré du module 3 precip stratified QM
+- **Phase I** (~10× compute, optionnel) : domaine 10×10×5 km pour
+  ~50 cas alpine summit
+
+**Leçons orchestration** :
+1. 1 cas analytique ≠ vérité universelle (Phase B ridge 2D → Phase C
+   multi-hill 3D inversait la décision)
+2. Sign d'un patch empirique est suspect (pg_geo flip vs native)
+3. Audits CSV proxies fragiles (crop/inflow médian sur 500 cas non
+   stratifiés cachait que 96% du sample est vent faible où CFD ≥ ERA5)
+4. **Bench OBS direct AVANT d'investir dans stack BC** — on a passé
+   3 jours sur BC tuning avant de mesurer que V0 actuel bat ERA5
+5. ML correction sur N=7 sites = climatologie pas physique. Seuil
+   empirique : ~30-50 sites min pour LOSO honest
+6. **Adversarial dual-spawn (A+B convergents) = solide** — les deux
+   Departments step-back ont indépendamment conclu V0 statu quo
+
+**Le commit `43f5e90` ("V1 retained for 9k regen") est mis en doute
+par cette session**. À traiter via commit fix qui pointe vers le
+verdict V0 final.
+
 ## Phase E retourne V10 → V1 retenu pour regen 9k (2026-05-18, M13)
 
 Phase E sur 5 sites v2 réels Pop A FR continental (ct_c_morpho_0000,
