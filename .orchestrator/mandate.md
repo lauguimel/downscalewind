@@ -128,7 +128,21 @@ conditionnent la décision Phase H.
 - **Exit criterion**: Zarr Perdigão au schema M_G5 + smoke read OK
   (read 5 stations × 10 timestamps × multi-heights).
 
-### M_G2 — Pipeline ingestion SYNOP Météo France
+### M_G2bis — Pipeline ingestion NOAA ISD (remplace M_G2 SYNOP MF RED + M_G4 OGIMET RED)
+
+- **Status**: planned (lancée 2026-05-21 après pivot)
+- **Goal**: Codex implémente `services/data-ingestion/ingest_noaa_isd.py` qui télécharge l'archive NOAA Integrated Surface Database (ISH format), filtre les stations EU (FR/ES/PT/IT/DE/etc), et écrit `data/raw/obs_unified_noaa_isd.zarr` au schema unifié défini dans `.orchestrator/mandate.md` §7.
+- Source : ~12 000 stations EU, hourly, vent 10 m AGL, T2m, RH, période 1973→présent
+- Endpoint : `ftp://ftp.ncdc.noaa.gov/pub/data/noaa/<YYYY>/<USAF>-<WBAN>-<YYYY>.gz` (ISH format)
+- Stations metadata : `ftp://ftp.ncdc.noaa.gov/pub/data/noaa/isd-history.csv`
+- **Allowed edit zones**:
+  - `services/data-ingestion/ingest_noaa_isd.py` (nouveau, ≤500 LOC)
+  - `services/data-ingestion/utils/isd_parser.py` (helper ISH parser, ≤300 LOC)
+  - `data/raw/obs_unified_noaa_isd.zarr/`
+  - `tmp/noaa_cache/`
+- **Exit criterion**: smoke = ingestion 3 mois 2023 Q1 sur ≥30 stations FR/ES/PT, zarr lisible via `shared.obs_io.read_obs`.
+
+### M_G2 — Pipeline ingestion SYNOP Météo France (RED 2026-05-21, blocker externe)
 
 - **Status**: planned
 - **Goal**: Codex implémente

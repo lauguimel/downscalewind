@@ -81,8 +81,8 @@ def write_unified_obs_zarr(
     source: str,
 ) -> None:
     """Write a Phase G unified OBS Zarr store."""
-    if source not in {"perdigao", "icos"}:
-        raise ValueError("source must be 'perdigao' or 'icos'")
+    if source not in {"perdigao", "icos", "noaa_isd"}:
+        raise ValueError("source must be 'perdigao', 'icos', or 'noaa_isd'")
 
     times_ns, n_times, n_stations, n_heights = _validate_inputs(
         times_ns, station_records, data_per_station

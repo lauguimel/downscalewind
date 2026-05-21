@@ -149,6 +149,32 @@ analytic flat/ridge derived from 0170 inflow. The increments
 ablation. This is exactly why M6→M9 ablation is being done on a
 single multi-hill mesh with one inflow.
 
+## Sources OBS Phase G — 2026-05-21 RED + pivot NOAA ISD
+
+**Bilan smoke audit 2026-05-21** :
+
+- **M_G2 SYNOP Météo France RED** : URL `donneespubliques.meteofrance.fr/donnees_libres/Txt/Synop/postesSynop.csv` retourne une page HTML "Données non disponibles". URL invalidée par le provider. Code OK mais source bloquée.
+- **M_G4 OGIMET RED** : parser HTML ne trouve plus la table dans les pages OGIMET (format serveur changé entre l'écriture de la spec et l'exécution). lxml installé OK mais structure HTML attendue absente.
+- **Open-Meteo Historical Weather API = ERA5 reanalysis sur grille**, pas obs in-situ. **NE PAS** l'utiliser comme proxy OBS pour benchmark surrogate v2 → circulaire (le surrogate downscale déjà ERA5).
+- **Open-Meteo Forecast API = IFS** : non-circulaire mais pas obs in-situ non plus. Utilisable comme baseline intermédiaire si besoin.
+
+**Pivot 2026-05-21 = NOAA ISD** (Integrated Surface Database) :
+- `ftp://ftp.ncdc.noaa.gov/pub/data/noaa/` ou Climate Data Online API
+- ~12k stations EU, SYNOP-derived, vraies obs in-situ
+- Hourly, multi-decade, vent 10 m AGL + T + RH
+- Format ISH (Integrated Surface History) à parser
+
+How to apply : avant d'investir dans un nouveau pipeline d'ingestion "obs", vérifier que la source est bien in-situ (pas reanalysis). Le critère discriminant : si la source fournit des données à toute coordonnée arbitraire = c'est du modèle/grille, pas des stations.
+
+## Erreur Boss rm hâtif (2026-05-21) — lesson learned
+
+J'ai supprimé `_obs_unified.py` et `utils/obs_zarr_writer.py` en pensant qu'ils étaient des orphelins du 1er kill M_G3, sans avoir vérifié les imports. **Ils étaient en réalité utilisés par les 4 scripts ingest_* livrés par M_G1/G1.5/G4**. Heureusement récupérables depuis les engineer logs (Codex apply_patch contient le code complet).
+
+How to apply : avant tout `rm` de fichiers non-tracked, exécuter
+`grep -r "filename_without_ext" --include='*.py'` pour vérifier
+qu'aucun import ne les référence. CLAUDE.md warning "investigate before
+deleting" était précisément pour ce cas.
+
 ## Phase G ouverte 2026-05-21 — extension dataset OBS + inférence surrogate aux stations
 
 **Stratégie validée par user** : pas de re-simulation OF. Inférence

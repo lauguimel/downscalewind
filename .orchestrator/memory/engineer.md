@@ -1,5 +1,20 @@
 # Engineer memory — DownscaleWind OF / canary work
 
+## NOAA isd-history.csv columns have SPACES (not underscores) (2026-05-21, M_G2bis)
+
+The NOAA CSV ships columns `"STATION NAME"`, `"ELEV(M)"`, etc. (literal
+spaces, not underscores). After `pd.read_csv`, normalize via:
+
+```python
+history.columns = [str(c).strip().replace(" ", "_") for c in history.columns]
+```
+
+Otherwise downstream code that expects `STATION_NAME` raises
+`ValueError: isd-history.csv missing required columns`.
+
+How to apply: any NOAA / NOAA-derived CSV ingester must do this column
+normalization at read time. Also true for legacy NOAA CDO datasets.
+
 ## `station_id_str` must be Python str ≤16 chars, not bytes (2026-05-21, M_G3)
 
 When appending data to `shared/obs_io.py` via `append_obs_data(..., station_id=...)`,
