@@ -1,5 +1,33 @@
 # Engineer memory — DownscaleWind OF / canary work
 
+## `station_id_str` must be Python str ≤16 chars, not bytes (2026-05-21, M_G3)
+
+When appending data to `shared/obs_io.py` via `append_obs_data(..., station_id=...)`,
+pass a Python `str` (truncated to ≤16 chars matching the `S16` array width).
+The helper does `stations["station_id"].to_numpy() == station_id` (string
+compare) and encodes to bytes internally. Passing bytes causes silent
+type-coerce failures that yield zero matches and no error.
+
+How to apply: any Engineer writing to `obs_unified_*.zarr/` uses string
+station IDs throughout (`f"aemet_{idema}"[:16]`, `f"synop_{numer_sta}"`,
+etc.), never `b"..."`.
+
+## Zarr 3.1.5 UnstableSpecificationWarning on fixed-width bytes (2026-05-21, M_G5)
+
+Zarr 3.1.5 emits `UnstableSpecificationWarning` for fixed-width bytes
+arrays (`S16`, `S2`, `NullTerminatedBytes`). When writing
+`stations/{station_id, source, country}` or similar bytes arrays, the
+warning is noisy. `shared/obs_io.py` filters the warning at import:
+
+```python
+import warnings
+import zarr
+warnings.filterwarnings("ignore", category=zarr.UnstableSpecificationWarning)
+```
+
+How to apply: any new Engineer code that creates bytes arrays in Zarr
+3.x stores must replicate this filter, OR accept noisy smoke output.
+
 ## audit_terrain_canary.py order: figure BEFORE CSV (2026-05-18)
 
 `audit_terrain_canary.py` writes the PNG figure BEFORE the CSV. If

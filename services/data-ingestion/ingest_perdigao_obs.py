@@ -54,6 +54,11 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from shared.logging_config import get_logger
+from _obs_unified import (
+    CANONICAL_HEIGHTS_M,
+    readback_unified_obs_summary,
+    write_unified_obs_zarr,
+)
 
 log = get_logger("ingest_perdigao_obs")
 
@@ -63,6 +68,7 @@ IOP_END   = np.datetime64("2017-06-15T23:59", "ns")
 
 # Values above this threshold are ISFS FillValue (1e37f)
 FILL_VALUE_THRESHOLD = 1e36
+HOUR_NS = np.int64(3_600_000_000_000)
 
 
 # ── ISFS parser ───────────────────────────────────────────────────────────────
@@ -289,10 +295,152 @@ def _aggregate_to_30min(
     return times_30min, data_30min
 
 
+def _times_to_ns(times: np.ndarray) -> np.ndarray:
+    times = np.asarray(times)
+    if np.issubdtype(times.dtype, np.datetime64):
+        return times.astype("datetime64[ns]").astype(np.int64)
+    return times.astype(np.int64)
+
+
+def _aggregate_30min_to_hourly(
+    times: np.ndarray, data_dict: dict[str, np.ndarray]
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Aggregate 30-min data to hourly means using UTC hour bins."""
+    import warnings
+
+    times_ns = _times_to_ns(times)
+    hour_bins = (times_ns // HOUR_NS) * HOUR_NS
+    times_hour = np.unique(hour_bins).astype(np.int64)
+    data_hourly: dict[str, np.ndarray] = {}
+    for varname, arr in data_dict.items():
+        arr = np.asarray(arr, dtype=np.float32)
+        out = np.full((len(times_hour),) + arr.shape[1:], np.nan, dtype=np.float32)
+        for i, hour_ns in enumerate(times_hour):
+            mask = hour_bins == hour_ns
+            if mask.any():
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    out[i] = np.nanmean(arr[mask], axis=0)
+        data_hourly[varname] = out
+    return times_hour, data_hourly
+
+
+def _decode_station_id(value: str | bytes | np.bytes_) -> str:
+    if isinstance(value, str):
+        return value
+    return bytes(value).decode("ascii").rstrip("\x00")
+
+
+def _perdigao_to_unified(parsed_30min: dict) -> tuple[np.ndarray, list[dict], list[dict[str, np.ndarray]]]:
+    """Convert legacy Perdigão 30-min arrays to Phase G unified OBS payloads."""
+    times_hour, hourly = _aggregate_30min_to_hourly(
+        parsed_30min["times"],
+        {
+            "u": parsed_30min["u"],
+            "v": parsed_30min["v"],
+            "T": parsed_30min["T"],
+            "RH": parsed_30min["RH"],
+        },
+    )
+
+    n_times = len(times_hour)
+    n_sites = len(parsed_30min["sites"])
+    n_heights = len(CANONICAL_HEIGHTS_M)
+    by_var = {
+        "u": np.full((n_times, n_sites, n_heights), np.nan, dtype=np.float32),
+        "v": np.full((n_times, n_sites, n_heights), np.nan, dtype=np.float32),
+        "t2m": np.full((n_times, n_sites, n_heights), np.nan, dtype=np.float32),
+        "rh": np.full((n_times, n_sites, n_heights), np.nan, dtype=np.float32),
+    }
+
+    source_heights = {float(h): i for i, h in enumerate(parsed_30min["heights"])}
+    for target_idx, height in enumerate(CANONICAL_HEIGHTS_M):
+        src_idx = source_heights.get(float(height))
+        if src_idx is None:
+            continue
+        by_var["u"][:, :, target_idx] = hourly["u"][:, :, src_idx]
+        by_var["v"][:, :, target_idx] = hourly["v"][:, :, src_idx]
+        by_var["t2m"][:, :, target_idx] = hourly["T"][:, :, src_idx] + np.float32(273.15)
+        by_var["rh"][:, :, target_idx] = hourly["RH"][:, :, src_idx]
+
+    by_var["wind_speed"] = np.hypot(by_var["u"], by_var["v"]).astype(np.float32)
+    by_var["wind_dir"] = (
+        (270.0 - np.degrees(np.arctan2(by_var["v"], by_var["u"]))) % 360.0
+    ).astype(np.float32)
+
+    station_records: list[dict] = []
+    data_per_station: list[dict[str, np.ndarray]] = []
+    for i, raw_site in enumerate(parsed_30min["sites"]):
+        station_records.append(
+            {
+                "station_id": _decode_station_id(raw_site),
+                "lat": float(parsed_30min["lat"][i]),
+                "lon": float(parsed_30min["lon"][i]),
+                "elev": float(parsed_30min["altitude_m"][i]),
+                "country": "PT",
+            }
+        )
+        data_per_station.append({var: by_var[var][:, i, :] for var in by_var})
+
+    return times_hour, station_records, data_per_station
+
+
+def _load_perdigao_legacy_30min(path: Path, smoke: bool) -> dict:
+    """Load existing legacy Perdigão Zarr without modifying it."""
+    import zarr
+
+    root = zarr.open_group(str(path), mode="r")
+    n_times = min(100, root["coords/time"].shape[0]) if smoke else root["coords/time"].shape[0]
+    n_sites = min(3, root["coords/site_id"].shape[0]) if smoke else root["coords/site_id"].shape[0]
+    return {
+        "sites": [_decode_station_id(s) for s in root["coords/site_id"][:n_sites]],
+        "heights": root["coords/height_m"][:].astype(np.float32),
+        "times": root["coords/time"][:n_times].astype(np.int64),
+        "u": root["sites/u"][:n_times, :n_sites, :].astype(np.float32),
+        "v": root["sites/v"][:n_times, :n_sites, :].astype(np.float32),
+        "T": root["sites/T"][:n_times, :n_sites, :].astype(np.float32),
+        "RH": root["sites/RH"][:n_times, :n_sites, :].astype(np.float32),
+        "lat": root["coords/lat"][:n_sites].astype(np.float32),
+        "lon": root["coords/lon"][:n_sites].astype(np.float32),
+        "altitude_m": root["coords/altitude_m"][:n_sites].astype(np.float32),
+    }
+
+
+def _parse_perdigao_raw_30min(raw_path: Path, iop_only: bool) -> dict:
+    data = _parse_isfs_daily(raw_path)
+    times_30min, data_30min = _aggregate_to_30min(
+        data["times"],
+        {
+            "u": data["u"],
+            "v": data["v"],
+            "u_std": data["u_std"],
+            "T": data["T"],
+            "RH": data["RH"],
+        },
+    )
+    if iop_only:
+        mask = (times_30min >= IOP_START) & (times_30min <= IOP_END)
+        times_30min = times_30min[mask]
+        for key in data_30min:
+            data_30min[key] = data_30min[key][mask]
+    return {
+        "sites": data["sites"],
+        "heights": data["heights"],
+        "times": times_30min,
+        "u": data_30min["u"],
+        "v": data_30min["v"],
+        "T": data_30min["T"],
+        "RH": data_30min["RH"],
+        "lat": data["lat"],
+        "lon": data["lon"],
+        "altitude_m": data["altitude_m"],
+    }
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────────
 
 @click.command()
-@click.option("--site",       required=True,
+@click.option("--site", default="perdigao", show_default=True,
               help="Site identifier (e.g. perdigao)")
 @click.option("--raw-dir",
               default=str(Path(__file__).resolve().parents[2] / "data" / "raw" / "perdigao_obs_raw"),
@@ -302,13 +450,26 @@ def _aggregate_to_30min(
               default=str(Path(__file__).resolve().parents[2] / "data" / "raw" / "perdigao_obs.zarr"),
               show_default=True,
               help="Output Zarr store path")
+@click.option("--out",
+              default=None,
+              help="Output path for Phase G unified observation Zarr")
+@click.option("--smoke", is_flag=True, default=False,
+              help="Unified smoke mode: 3 stations x 100 legacy 30-min timestamps")
 @click.option("--config-dir",
               default=str(Path(__file__).resolve().parents[2] / "configs" / "sites"),
               show_default=True,
               help="Directory for site config YAML files")
 @click.option("--iop-only/--no-iop-only", default=True, show_default=True,
               help="Restrict output to IOP period (2017-05-01 to 2017-06-15)")
-def main(site: str, raw_dir: str, output: str, config_dir: str, iop_only: bool):
+def main(
+    site: str,
+    raw_dir: str,
+    output: str,
+    out: str | None,
+    smoke: bool,
+    config_dir: str,
+    iop_only: bool,
+):
     """
     Convert NCAR/EOL ISFS NetCDF observations to a Zarr store.
 
@@ -325,6 +486,54 @@ def main(site: str, raw_dir: str, output: str, config_dir: str, iop_only: bool):
     raw_path    = Path(raw_dir)
     output_path = Path(output)
     config_path = Path(config_dir)
+
+    if out is not None:
+        if smoke:
+            log.info("Unified smoke mode: reading legacy Perdigão Zarr", extra={
+                "legacy_path": str(output_path),
+            })
+            parsed_30min = _load_perdigao_legacy_30min(output_path, smoke=True)
+        else:
+            if not raw_path.exists():
+                log.error("raw-dir not found", extra={"path": str(raw_path)})
+                sys.exit(1)
+            nc_count = len(list(raw_path.glob("*.nc")) + list(raw_path.glob("*.nc4")))
+            if nc_count == 0:
+                log.error(
+                    "No NetCDF files found for unified Perdigão ingestion",
+                    extra={"raw_dir": str(raw_path)},
+                )
+                sys.exit(1)
+            log.info("Parsing Perdigão raw data for unified Zarr", extra={
+                "site": site,
+                "n_nc_files": nc_count,
+            })
+            parsed_30min = _parse_perdigao_raw_30min(raw_path, iop_only=iop_only)
+
+        times_ns, station_records, data_per_station = _perdigao_to_unified(parsed_30min)
+        unified_path = Path(out)
+        write_unified_obs_zarr(
+            unified_path,
+            times_ns,
+            station_records,
+            data_per_station,
+            source="perdigao",
+        )
+        if smoke:
+            n_times, n_stations, n_heights, n_valid_ws = readback_unified_obs_summary(
+                unified_path, "perdigao"
+            )
+            print(
+                f"Smoke OK. Unified Perdigão Zarr: {unified_path} "
+                f"({n_times} times x {n_stations} stations x {n_heights} heights, "
+                f"valid wind_speed={n_valid_ws})"
+            )
+        else:
+            print(f"Done. Unified Perdigão Zarr store: {unified_path}")
+        return
+
+    if smoke:
+        raise click.ClickException("--smoke is only supported with --out")
 
     if not raw_path.exists():
         log.error("raw-dir not found", extra={"path": str(raw_path)})

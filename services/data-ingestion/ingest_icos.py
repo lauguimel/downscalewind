@@ -43,6 +43,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +55,12 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from shared.logging_config import get_logger
 from shared.fwi import compute_fwi_series
+from shared.data_io import wind_speed_direction_to_uv
+from _obs_unified import (
+    CANONICAL_HEIGHTS_M,
+    readback_unified_obs_summary,
+    write_unified_obs_zarr,
+)
 
 log = get_logger("ingest_icos")
 
@@ -831,6 +838,154 @@ def _harmonize_dataframe(
     return result
 
 
+# ── Unified OBS conversion from existing legacy Zarrs ───────────────────────
+
+
+_HEIGHT_VAR_RE = re.compile(r"^(ws|wd|T|RH)_(\d+)m$")
+
+
+def _canonical_suffix_keys(meteo) -> dict[tuple[str, int], str]:
+    canonical = {int(h) for h in CANONICAL_HEIGHTS_M.tolist()}
+    keys: dict[tuple[str, int], str] = {}
+    for name in meteo.array_keys():
+        m = _HEIGHT_VAR_RE.match(name)
+        if not m:
+            continue
+        var, height_text = m.group(1), m.group(2)
+        height = int(height_text)
+        if height in canonical:
+            keys[(var, height)] = name
+    return keys
+
+
+def _select_icos_smoke_stations(
+    zarr_dir: Path, stations_filter: list[str] | None
+) -> list[str]:
+    """Pick up to 3 existing stations with canonical suffixed wind arrays."""
+    import zarr
+
+    allowed = set(stations_filter) if stations_filter else None
+    selected: list[str] = []
+    for path in sorted(Path(zarr_dir).glob("icos_*.zarr")):
+        root = zarr.open_group(str(path), mode="r")
+        sid = root.attrs.get("station_id")
+        if not sid or (allowed is not None and sid not in allowed):
+            continue
+        keys = _canonical_suffix_keys(root["meteo"])
+        has_wind = any(("ws", int(h)) in keys and ("wd", int(h)) in keys for h in CANONICAL_HEIGHTS_M)
+        if has_wind:
+            selected.append(str(sid))
+        if len(selected) == 3:
+            break
+    if not selected:
+        raise click.ClickException("No ICOS legacy Zarr has canonical suffixed wind arrays")
+    return selected
+
+
+def _slice_unified_payload(
+    times_ns: np.ndarray,
+    data_per_station: list[dict[str, np.ndarray]],
+    n_times: int,
+) -> tuple[np.ndarray, list[dict[str, np.ndarray]]]:
+    n_keep = min(n_times, len(times_ns))
+    sliced_data = [
+        {var: arr[:n_keep, :] for var, arr in station_data.items()}
+        for station_data in data_per_station
+    ]
+    return times_ns[:n_keep], sliced_data
+
+
+def _icos_from_existing_zarrs(
+    zarr_dir: Path,
+    stations_filter: list[str] | None,
+) -> tuple[np.ndarray, list[dict], list[dict[str, np.ndarray]]]:
+    """Read legacy ICOS station Zarrs and map them to unified OBS payloads."""
+    import zarr
+
+    zarr_dir = Path(zarr_dir)
+    station_filter = set(stations_filter) if stations_filter else None
+    station_infos: list[dict] = []
+    for path in sorted(zarr_dir.glob("icos_*.zarr")):
+        root = zarr.open_group(str(path), mode="r")
+        sid = root.attrs.get("station_id")
+        if not sid:
+            log.warning("ICOS legacy Zarr without station_id", extra={"path": str(path)})
+            continue
+        if station_filter is not None and sid not in station_filter:
+            continue
+        if sid not in ICOS_STATIONS:
+            log.warning("Skipping ICOS station missing metadata", extra={"station": sid})
+            continue
+        times = root["coords/time"][:].astype(np.int64)
+        if times.size == 0:
+            continue
+        station_infos.append(
+            {
+                "path": path,
+                "station_id": str(sid),
+                "times": times,
+                "keys": _canonical_suffix_keys(root["meteo"]),
+            }
+        )
+
+    if not station_infos:
+        raise click.ClickException(f"No matching ICOS legacy Zarrs found in {zarr_dir}")
+
+    times_union = np.unique(np.concatenate([info["times"] for info in station_infos])).astype(np.int64)
+    n_times = len(times_union)
+    n_heights = len(CANONICAL_HEIGHTS_M)
+    station_records: list[dict] = []
+    data_per_station: list[dict[str, np.ndarray]] = []
+
+    for info in station_infos:
+        root = zarr.open_group(str(info["path"]), mode="r")
+        meteo = root["meteo"]
+        sid = info["station_id"]
+        meta = ICOS_STATIONS[sid]
+        station_records.append(
+            {
+                "station_id": sid,
+                "lat": float(meta["lat"]),
+                "lon": float(meta["lon"]),
+                "elev": float(meta["altitude_m"]),
+                "country": meta["country"],
+            }
+        )
+
+        station_data = {
+            "u": np.full((n_times, n_heights), np.nan, dtype=np.float32),
+            "v": np.full((n_times, n_heights), np.nan, dtype=np.float32),
+            "wind_speed": np.full((n_times, n_heights), np.nan, dtype=np.float32),
+            "wind_dir": np.full((n_times, n_heights), np.nan, dtype=np.float32),
+            "t2m": np.full((n_times, n_heights), np.nan, dtype=np.float32),
+            "rh": np.full((n_times, n_heights), np.nan, dtype=np.float32),
+        }
+        target_idx = np.searchsorted(times_union, info["times"])
+        for h_idx, height in enumerate(CANONICAL_HEIGHTS_M.astype(int)):
+            for src_var, target_var in (
+                ("ws", "wind_speed"),
+                ("wd", "wind_dir"),
+                ("T", "t2m"),
+                ("RH", "rh"),
+            ):
+                key = info["keys"].get((src_var, int(height)))
+                if key is None:
+                    continue
+                values = meteo[key][:].astype(np.float32)
+                if src_var == "T":
+                    values = values + np.float32(273.15)
+                station_data[target_var][target_idx, h_idx] = values
+
+        u, v = wind_speed_direction_to_uv(
+            station_data["wind_speed"], station_data["wind_dir"]
+        )
+        station_data["u"] = u.astype(np.float32)
+        station_data["v"] = v.astype(np.float32)
+        data_per_station.append(station_data)
+
+    return times_union, station_records, data_per_station
+
+
 # ── Zarr writer ──────────────────────────────────────────────────────────────
 
 
@@ -1024,6 +1179,17 @@ def _compute_daily_fwi(
     default=False,
     help="Skip FWI computation",
 )
+@click.option(
+    "--out",
+    default=None,
+    help="Output path for Phase G unified observation Zarr",
+)
+@click.option(
+    "--smoke",
+    is_flag=True,
+    default=False,
+    help="Unified smoke mode: 3 stations x 100 hourly timestamps",
+)
 def main(
     stations: tuple[str, ...],
     start: str,
@@ -1031,6 +1197,8 @@ def main(
     output_dir: str,
     fwi_dir: str,
     skip_fwi: bool,
+    out: str | None,
+    smoke: bool,
 ):
     """Download ICOS/FLUXNET station data for fire weather validation.
 
@@ -1062,6 +1230,45 @@ def main(
                 extra={"station": sid},
             )
             sys.exit(1)
+
+    if out is not None:
+        station_filter = list(stations) if stations else None
+        if smoke:
+            station_filter = _select_icos_smoke_stations(output_path, station_filter)
+            log.info("Unified smoke mode: selected ICOS stations", extra={
+                "stations": station_filter,
+            })
+        times_ns, station_records, data_per_station = _icos_from_existing_zarrs(
+            output_path,
+            station_filter,
+        )
+        if smoke:
+            times_ns, data_per_station = _slice_unified_payload(
+                times_ns, data_per_station, n_times=100
+            )
+        unified_path = Path(out)
+        write_unified_obs_zarr(
+            unified_path,
+            times_ns,
+            station_records,
+            data_per_station,
+            source="icos",
+        )
+        if smoke:
+            n_times, n_stations, n_heights, n_valid_ws = readback_unified_obs_summary(
+                unified_path, "icos"
+            )
+            print(
+                f"Smoke OK. Unified ICOS Zarr: {unified_path} "
+                f"({n_times} times x {n_stations} stations x {n_heights} heights, "
+                f"valid wind_speed={n_valid_ws})"
+            )
+        else:
+            print(f"Done. Unified ICOS Zarr store: {unified_path}")
+        return
+
+    if smoke:
+        raise click.ClickException("--smoke is only supported with --out")
 
     summary: dict[str, dict] = {}
 

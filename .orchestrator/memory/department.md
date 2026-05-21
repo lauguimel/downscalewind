@@ -1,5 +1,52 @@
 # Department memory — DownscaleWind
 
+## `append_obs_data` time-axis pattern (2026-05-21, M_G3)
+
+Pattern d'appel optimal pour `shared.obs_io` quand on a un axe `time`
+fixé à l'avance (cas batched ingestion API) :
+
+1. Construire le full `time_array` (e.g. tous les hours de la période
+   d'ingestion).
+2. Appeler `create_obs_store(path, stations_df, heights_array,
+   time_array=full_T)` une seule fois.
+3. Pour chaque station, appeler `append_obs_data(path, source,
+   station_id, time_array=same_T, data_dict=..., height_idx_map=...)`.
+   L'helper match via `_positions_in_existing_times` (matches exacts,
+   pas de resize), donc pas de réécriture du store.
+
+How to apply : M_G2 (SYNOP), M_G4 (IPMA+OGIMET) et toutes les
+ingestions Phase G+ doivent suivre ce pattern pour éviter des resize
+en cascade qui multiplient le coût write.
+
+## Rate-limit logging : timestamp début, pas fin (2026-05-21, M_G3)
+
+Quand on log les timestamps des requêtes API pour audit rate-limit
+(e.g. AEMET 60 req/min), logger le timestamp **de début de requête**,
+pas de fin. Sinon la latence réseau fausse l'audit `Δt ≥ 1.0 s`. Calc :
+
+```python
+unix_ts_start = time.time() - (time.monotonic() - last_call_monotonic)
+```
+
+How to apply : tout pipeline ingestion avec rate-limit (M_G4 OGIMET 1
+req/5s, futurs APIs externes) doit suivre ce pattern.
+
+## OBS unified Zarr `H`-axis NaN-padding (2026-05-21, M_G5)
+
+Le schema `data/raw/obs_unified.zarr/` axe `H` (heights) accommode des
+sources hétérogènes (SYNOP/AEMET/IPMA = 10 m seul, Perdigão = 6 hauteurs,
+ICOS = tour-spécifique) via NaN-padding. Le caller fournit un
+`height_idx_map={height_m: idx_in_H}` à `append_obs_data()`, l'helper
+écrit aux index correspondants et laisse NaN ailleurs. `read_obs` drop
+les rows entièrement NaN sur les heights demandées.
+
+How to apply : tout pipeline ingestion M_G1/G2/G3/G4 doit (1) initialiser
+le store via `create_obs_store(path, stations_df, heights_array)` avec
+le full set des heights couvertes par TOUTES les sources ([10, 20, 40,
+60, 80, 100] est l'union sûre), puis (2) appeler `append_obs_data(...
+height_idx_map={10.0: 0, 20.0: 1, ...})`. Helper validé via
+test/scratch/test_obs_io.py.
+
 ## Surrogate v2 best per use-case (2026-05-21, M_G0)
 
 Sur Aqua sous `~/dsw/data/models/surrogate_v2_*/best.pt` :
