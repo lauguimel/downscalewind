@@ -1,5 +1,38 @@
 # Department memory — DownscaleWind
 
+## M_G8 audit thresholds + strata axes (2026-05-23)
+
+**Verdict thresholds (Phase H GO/NO-GO/RESCOPE)** :
+- GO : MAE < 1.5 m/s ET |bias| < 1.0 m/s ET spread MAE class_topo > 0.5 m/s
+  (= pattern stratifié exploitable par DNN)
+- NO-GO : MAE > 3.0 m/s (= plafond saturé)
+- YELLOW : N_pairings < 1000 (= dataset insuffisant pour LOSO honest)
+- RESCOPE : autres cas, e.g. certaines strates exploitables seulement
+
+**Strates minimales (6 axes + 2 croisements)** :
+- class_topo (plain/foothill/mountain/summit), height_bucket
+  (10/20/50/100), wind_class (low/mid/high), season (DJF/MAM/JJA/SON),
+  era5_freshness (on_time/interpolated/far), source
+- Croisements clés : topo×wind, season×height
+
+How to apply : tout audit OBS vs surrogate doit utiliser cette grille
+pour éviter explosion combinatoire et permettre verdict reproductible.
+
+## M_G7 parquet upgrade requis pour audit ERA5 baseline (2026-05-23, M_G8)
+
+Le parquet actuel de M_G7 n'inclut PAS `speed_era5_baseline` (vent ERA5
+au point central du grid.zarr). M_G8 skip la comparaison vs ERA5
+baseline sans cette colonne → décision GO/NO-GO perd un degré de
+liberté.
+
+Fix : dans `infer_at_stations.py`, après extraction du grid.zarr, lire
+`era5_surface/u10, v10` au centre (i=1, j=1 du 3×3) et écrire
+`u10_era5_baseline`, `v10_era5_baseline`, `speed_era5_baseline` dans
+le parquet à côté de `speed_pred`.
+
+How to apply : faire un PATCH ciblé sur M_G7 (mission M_G7+ ou M_G8.5)
+avant le run production massif sur Aqua. ~30 LOC ajoutés.
+
 ## `append_obs_data` time-axis pattern (2026-05-21, M_G3)
 
 Pattern d'appel optimal pour `shared.obs_io` quand on a un axe `time`

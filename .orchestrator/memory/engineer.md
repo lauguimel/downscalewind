@@ -1,5 +1,32 @@
 # Engineer memory — DownscaleWind OF / canary work
 
+## ERA5 hourly + d2m Europe pipeline ready (2026-05-23, M_G6.5)
+
+`services/data-ingestion/ingest_era5_europe_hourly.py` produit un Zarr
+ERA5 Europe hourly (Δt=1h) avec **d2m** inclus, débloquant M_G7
+production sans le bug "predictions constantes en blocs 6h".
+
+Variables surface canoniques pour surrogate v2 (alias CDS) :
+```
+["10m_u_component_of_wind", "10m_v_component_of_wind",
+ "2m_temperature", "2m_dewpoint_temperature"]
+```
+
+**Ne PAS oublier `2m_dewpoint_temperature` (d2m)** sinon
+`build_era5_baseline_tensor(mode='surface')` crash au runtime.
+
+Pressure levels canoniques (dataset v2) :
+```
+[1000, 925, 850, 700, 500, 400, 300, 250, 200, 150]
+```
+
+Différent de l'ancien `era5_europe.zarr` (qui avait 600 au lieu de 150).
+Si on re-ingère le legacy, harmoniser.
+
+How to apply : pour M_G7 production massive, utiliser
+`data/raw/era5_europe_hourly_*.zarr` (à créer en re-running
+ingest_era5_europe_hourly.py sur la fenêtre de prod 2018-2023).
+
 ## ERA5 d2m required for surrogate v2 surface input (2026-05-23, M_G7)
 
 `src.dataset_v2.build_era5_baseline_tensor(mode='surface')` consumes
