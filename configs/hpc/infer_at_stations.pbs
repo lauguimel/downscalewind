@@ -1,0 +1,49 @@
+#!/bin/bash -l
+#PBS -N infer_at_stations
+#PBS -l select=1:ncpus=8:mem=64GB:ngpus=1
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -m n
+
+# M_G7 — batched surrogate v2 inference at OBS stations on Aqua H100.
+# Reads multi-source obs_unified_*.zarr + hourly ERA5 europe (with d2m),
+# materialises one grid.zarr per pairing, batched inference (32),
+# extracts u/v/w at the central column interpolated to height_obs.
+
+cd $PBS_O_WORKDIR
+
+BASE="$HOME/dsw"
+: "${OBS_ZARRS:=$BASE/data/raw/obs_unified_perdigao.zarr,$BASE/data/raw/obs_unified_icos.zarr,$BASE/data/raw/obs_unified_noaa_isd.zarr}"
+: "${ERA5_STORE:=$BASE/data/raw/era5_europe.zarr}"
+: "${CHECKPOINT:=$BASE/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt}"
+: "${NORM_YAML:=/scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml}"
+: "${DEM:=$BASE/data/raw/srtm_perdigao_30m.tif}"
+: "${WORLDCOVER:=$BASE/data/raw/worldcover_perdigao.tif}"
+: "${OUTPUT:=$BASE/data/inference/surrogate_at_stations.parquet}"
+: "${BATCH_SIZE:=32}"
+: "${WORKDIR:=/scratch/maitreje/dsw/infer_at_stations_workdir}"
+
+[ -f "$CHECKPOINT" ] || { echo "MISSING:$CHECKPOINT"; exit 1; }
+[ -d "$ERA5_STORE" ] || { echo "MISSING:$ERA5_STORE"; exit 1; }
+nvidia-smi >/dev/null || { echo "GPU missing"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+cd "$BASE"
+python -u services/module2b-surrogate/infer_at_stations.py \
+  --obs-zarrs "$OBS_ZARRS" \
+  --era5-store "$ERA5_STORE" \
+  --checkpoint "$CHECKPOINT" \
+  --norm-yaml "$NORM_YAML" \
+  --dem "$DEM" \
+  --worldcover "$WORLDCOVER" \
+  --output "$OUTPUT" \
+  --device cuda --amp \
+  --batch-size "$BATCH_SIZE" \
+  --stratify-timestamps \
+  --workdir "$WORKDIR"

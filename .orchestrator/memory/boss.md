@@ -175,6 +175,37 @@ How to apply : avant tout `rm` de fichiers non-tracked, exécuter
 qu'aucun import ne les référence. CLAUDE.md warning "investigate before
 deleting" était précisément pour ce cas.
 
+## Phase G — M_G7 done, inférence surrogate aux stations validée (2026-05-23)
+
+`services/module2b-surrogate/infer_at_stations.py` (514 LOC) +
+`utils/inference_batch.py` (121 LOC) +
+`configs/hpc/infer_at_stations.pbs` (49 LOC) livrent le pipeline batched
+d'inférence aux pairings OBS.
+
+**Smoke confirmé sur Perdigão rne01 mai 2017 IOP** : 10/10 pairings,
+`speed_pred` 1.93-2.29 m/s vs `speed_obs` 1.11-2.27 m/s → magnitudes
+physiques cohérentes, **légère surestimation typique V0** confirmant le
+verdict de la session précédente (biais affine `U_cfd = 0.54·U_obs +
+1.88` sur ICOS, M16). À ce stade le surrogate v2 reproduit fidèlement
+ce qu'aurait donné un OpenFOAM v2 sur ces coords.
+
+**best.pt local** : `/Users/guillaume/dsw/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt`
+(116 MB downloadé Aqua→local).
+
+**Caveats à propager à M_G8** :
+- ERA5 d2m requis (legacy store sans d2m crash) → utiliser
+  `era5_europe_spring2017_v2.zarr` pour smoke. Production large = re-
+  ingest ERA5 hourly avec d2m.
+- ERA5 Δt=6h → predictions constantes par blocs 6h ; le parquet
+  contient `era5_time_delta_minutes` pour tracer.
+- M_G8 doit stratifier audit par `abs(era5_time_delta_minutes)` et
+  reporter ERA5-on-time vs ERA5-interpolated séparément.
+
+How to apply : M_G8 = audit OBS vs surrogate stratifié. M_G7 production
+peut être lancé via PBS Aqua H100 dès que le full NOAA ISD zarr est
+disponible. Penser à régénérer ERA5 hourly Europe avec d2m comme
+prérequis production-scale.
+
 ## Phase G — M_G6 done, extract input surrogate à coords arbitraires (2026-05-22)
 
 `services/module2b-surrogate/extract_v2_input_at_coords.py` (338 LOC) +

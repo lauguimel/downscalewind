@@ -1,5 +1,32 @@
 # Engineer memory — DownscaleWind OF / canary work
 
+## ERA5 d2m required for surrogate v2 surface input (2026-05-23, M_G7)
+
+`src.dataset_v2.build_era5_baseline_tensor(mode='surface')` consumes
+`{t2m, d2m, u10, v10}` from the ERA5 store. Legacy
+`data/raw/era5_europe.zarr` is missing `d2m` → crashes the surrogate.
+Use `era5_europe_spring2017_v2.zarr` (has d2m) for IOP smoke. For
+production at Europe scale, re-ingest ERA5 hourly with d2m included.
+
+How to apply: any new ERA5 ingester for Phase G / Phase H must include
+d2m. Smoke tests must verify presence before consuming.
+
+## ERA5 6-hour cadence yields predictions constant in 6-h blocks (2026-05-23, M_G7)
+
+When the ERA5 store has Δt=6h (typical for cheap Europe extracts),
+`extract_v2_input_at_coords` rounds OBS timestamps to the nearest ERA5
+sample. Consecutive hourly OBS within the same 6h ERA5 window receive
+the SAME surrogate input → SAME prediction. Visible in smoke as 4-then-6
+identical rows.
+
+Mitigation: ingest ERA5 hourly for the inference period, OR aggregate
+OBS to 6h cadence for fair comparison. Track via
+`era5_time_delta_minutes` column in the parquet output.
+
+How to apply: M_G8 audit must stratify by `abs(era5_time_delta_minutes)`
+and report performance separately for "ERA5-on-time" (Δt=0) vs
+"ERA5-interpolated" (Δt>30 min).
+
 ## Surrogate v2 input dim formula (2026-05-22, M_G6)
 
 For the production checkpoint
