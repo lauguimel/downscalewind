@@ -175,6 +175,31 @@ How to apply : avant tout `rm` de fichiers non-tracked, exécuter
 qu'aucun import ne les référence. CLAUDE.md warning "investigate before
 deleting" était précisément pour ce cas.
 
+## Phase G — M_G6 done, extract input surrogate à coords arbitraires (2026-05-22)
+
+`services/module2b-surrogate/extract_v2_input_at_coords.py` (338 LOC) +
+`utils/inference_input.py` (341 LOC) livrent le pipeline pure
+`(lat, lon, timestamp) → grid.zarr/input` au format consommé par
+`WindV2DatasetViT`. Smoke 3/3 OK sur Perdigão, shapes validées
+identiques au reference Aqua `ct_d_fire_0056_case_ts014`.
+
+**Caveats à archiver** :
+- z0_eff calculé en geometric mean omnidirectionnel sur patch 3 km
+  radius (≠ upstream-only de prepare_inflow original). Choix justifié
+  pour inférence sans direction connue, mais à valider en M_G8 vs OBS.
+- ERA5 store `era5_europe_spring2017_v2.zarr` est Δt=6h ; pour pairings
+  hourly stricts M_G7 doit interpoler en amont OU utiliser un store
+  hourly (e.g. `era5_europe.zarr` si Δt=1h, à vérifier).
+- Pas de normalisation appliquée à l'écriture du grid.zarr ; runtime
+  `WindV2DatasetViT` applique `DEFAULT_NORM ∪ overrides
+  (dataset_v2_norm.yaml)` à la lecture.
+
+How to apply : M_G7 inférence doit (1) vérifier la cadence ERA5 du
+store utilisé, (2) batched-load les grid.zarr produits par M_G6,
+(3) appliquer `WindV2DatasetViT` puis le best.pt, (4) extraire U/V/W
+au voxel central (90, 90, k(z_obs=elev+10m)) en interpolant via
+`coords/z[180,180,40]`.
+
 ## Phase G ouverte 2026-05-21 — extension dataset OBS + inférence surrogate aux stations
 
 **Stratégie validée par user** : pas de re-simulation OF. Inférence

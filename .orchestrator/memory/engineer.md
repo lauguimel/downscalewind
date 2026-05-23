@@ -1,5 +1,48 @@
 # Engineer memory — DownscaleWind OF / canary work
 
+## Surrogate v2 input dim formula (2026-05-22, M_G6)
+
+For the production checkpoint
+`~/dsw/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt`,
+the input expected by `WindV2DatasetViT.__getitem__` is exactly:
+
+```
+era5_flat_dim = 4 * N_p * 9 + 4 * 9 + N_p + 2
+              = (4 vars × N_p plevels × 3×3) + (4 surf vars × 3×3) + N_p plevels + (lat + z0_eff)
+```
+
+With `N_p=10` pressure levels → `era5_flat_dim = 408`. Plus
+`terrain_2d: (2, 180, 180)`, `geo: (2, 180, 180, 24)` for the AGL grid.
+
+How to apply: any extract_v2_input pipeline must respect this signature
+exactly. The contract is enforced at runtime in
+`services/module2b-surrogate/src/dataset_v2_vit.py` — read it before
+inventing fields.
+
+## Zarr 3.1.5 `create_dataset` removed; use `create_array` (2026-05-22, M_G6)
+
+`zarr.Group.create_dataset(name, data=arr)` fails with
+`TypeError: missing 'shape'` on zarr 3.1.5. Pattern:
+
+```python
+a = g.create_array(name, shape=arr.shape, dtype=arr.dtype, ...)
+a[...] = arr
+```
+
+How to apply: every new Zarr writer in this codebase. The existing
+`shared/data_io.py` and `shared/obs_io.py` already follow this pattern.
+
+## `np.datetime64(int, "ns")` does not work; cast via array (2026-05-22, M_G6)
+
+`np.datetime64(int_ns, "ns")` raises. Use:
+
+```python
+ts = np.array(int(int_ns)).astype("datetime64[ns]")
+```
+
+How to apply: any int64-ns → ISO conversion. Recurring pattern in
+timestamp handling across pipelines.
+
 ## NOAA isd-history.csv columns have SPACES (not underscores) (2026-05-21, M_G2bis)
 
 The NOAA CSV ships columns `"STATION NAME"`, `"ELEV(M)"`, etc. (literal
