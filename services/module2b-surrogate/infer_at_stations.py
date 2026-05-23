@@ -389,8 +389,15 @@ def run_inference(
         for (row, gz), fields in zip(chunk_meta, fields_l):
             vals = extract_at_station(fields, levels, float(row["height_obs"]))
             ts_iso = str(np.array(int(row["timestamp_ns"])).astype("datetime64[ns]"))
-            era5_attrs = dict(zarr.open_group(str(gz), mode="r")["input/inflow_meta"].attrs)
+            gz_root = zarr.open_group(str(gz), mode="r")
+            era5_attrs = dict(gz_root["input/inflow_meta"].attrs)
             era5_delta_s = float(era5_attrs.get("era5_time_delta_s", 0.0))
+            try:
+                u10_era5 = float(gz_root["input/era5_surface/u10"][1, 1])
+                v10_era5 = float(gz_root["input/era5_surface/v10"][1, 1])
+                speed_era5_baseline = float(math.hypot(u10_era5, v10_era5))
+            except (KeyError, IndexError):
+                u10_era5 = v10_era5 = speed_era5_baseline = float("nan")
             out_rows.append({
                 "station_id": row["station_id"],
                 "timestamp": ts_iso,
@@ -401,6 +408,9 @@ def run_inference(
                 "speed_obs": row["speed_obs"],
                 "u_pred": vals["u_pred"], "v_pred": vals["v_pred"],
                 "w_pred": vals["w_pred"], "speed_pred": vals["speed_pred"],
+                "u10_era5_baseline": u10_era5,
+                "v10_era5_baseline": v10_era5,
+                "speed_era5_baseline": speed_era5_baseline,
                 "era5_time_delta_minutes": era5_delta_s / 60.0,
                 "obs_zarr": row.get("obs_zarr", ""),
             })
