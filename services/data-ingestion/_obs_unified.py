@@ -142,7 +142,14 @@ def write_unified_obs_zarr(
     )
 
     data_group = root.require_group("data")
-    chunks = (min(720, n_times), 1, n_heights)
+    # Chunks aim for ~50-100 MB float32 chunks (Blosc-friendly). Bundling
+    # stations into the chunk avoids the O(N_stations * N_chunks_time)
+    # filesystem-fanout that fragmented earlier NOAA runs (~80h ETA).
+    chunks = (
+        min(8760, n_times),  # up to one year per chunk on time axis
+        max(1, min(n_stations, 64)),  # bundle stations
+        n_heights,
+    )
     meta = {
         "u": ("East wind", "m s-1"),
         "v": ("North wind", "m s-1"),

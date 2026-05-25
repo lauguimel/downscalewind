@@ -135,7 +135,17 @@ def create_obs_store(
 
     data = root.require_group("data")
     data_shape = (n_times, n_stations, n_heights)
-    data_chunks = (DATA_CHUNK_TIME, 1, max(n_heights, 1))
+    # Chunks: 1 station per chunk, full time axis. The append pattern
+    # is "append 1 station at a time", so bundling stations would force
+    # 64× read-modify-write per append. NOAA prod (356 stations × 52608
+    # ts) generated 158k chunks/var with the old (720, 1, H) layout
+    # → 80h+ ETA. New layout (n_times, 1, H) → ~2136 chunks/var, no
+    # write amplification.
+    data_chunks = (
+        max(n_times, 1) if n_times else DATA_CHUNK_TIME,
+        1,
+        max(n_heights, 1),
+    )
     for var in DATA_VARS:
         arr = _create_array(data, var, shape=data_shape, dtype=np.float32,
                             chunks=data_chunks, fill_value=np.nan)
@@ -174,13 +184,31 @@ def append_obs_data(
     time_indices = _ensure_times(root, times)
 
     old_count = _count_pairings_for_station(root, station_idx)
+    # Vectorized append: read the full station column once, update in
+    # memory, write back once. The previous per-timestamp loop triggered
+    # T × N_vars read-modify-write Zarr ops (~315k IO per station with
+    # 52608 hourly steps × 6 vars) — see engineer.md "OBS append_obs_data
+    # vectorization (2026-05-25)" for the diagnostic that revealed the
+    # bottleneck during NOAA prod (~11 min/station).
+    time_indices_arr = np.asarray(time_indices)
+    contiguous = (
+        time_indices_arr.size > 0
+        and time_indices_arr.size == time_indices_arr[-1] - time_indices_arr[0] + 1
+        and np.array_equal(time_indices_arr, np.arange(time_indices_arr[0], time_indices_arr[-1] + 1))
+    )
+    if contiguous:
+        t_lo = int(time_indices_arr[0])
+        t_hi = int(time_indices_arr[-1]) + 1
+        time_selector: tuple[slice | np.ndarray, int, slice] = (slice(t_lo, t_hi), station_idx, slice(None))
+    else:
+        time_selector = (time_indices_arr, station_idx, slice(None))
     for var in DATA_VARS:
         values = _values_for_var(var, data_dict, len(times), len(dest_height_idx))
         arr = root[f"data/{var}"]
-        for row_idx, time_idx in enumerate(time_indices):
-            current = np.asarray(arr[time_idx, station_idx, :], dtype=np.float32)
-            current[dest_height_idx] = values[row_idx]
-            arr[time_idx, station_idx, :] = current
+        current = np.asarray(arr[time_selector], dtype=np.float32)
+        for col, h_idx in enumerate(dest_height_idx):
+            current[:, h_idx] = values[:, col]
+        arr[time_selector] = current
 
     new_count = _count_pairings_for_station(root, station_idx)
     root.attrs["n_pairings_total"] = int(root.attrs.get("n_pairings_total", 0) + new_count - old_count)

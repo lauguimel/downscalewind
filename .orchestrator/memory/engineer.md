@@ -1,5 +1,65 @@
 # Engineer memory — DownscaleWind OF / canary work
 
+## OBS append_obs_data MUST be vectorized (2026-05-25, NOAA prod root cause)
+
+The ORIGINAL bottleneck on NOAA prod (~11 min/station, 60+ h ETA) was
+NOT the chunks layout — it was a per-timestamp RMW loop inside
+`shared/obs_io.py:append_obs_data`:
+
+```python
+# BAD (315k Zarr ops per station for 52608 ts × 6 vars)
+for row_idx, time_idx in enumerate(time_indices):
+    current = np.asarray(arr[time_idx, station_idx, :], dtype=np.float32)
+    current[dest_height_idx] = values[row_idx]
+    arr[time_idx, station_idx, :] = current
+```
+
+Fixed by reading the full station column once, mutating in memory,
+writing back once:
+
+```python
+# GOOD (1 read + 1 write per var per station)
+time_selector = (slice(t_lo, t_hi), station_idx, slice(None))  # contiguous case
+current = np.asarray(arr[time_selector], dtype=np.float32)
+for col, h_idx in enumerate(dest_height_idx):
+    current[:, h_idx] = values[:, col]
+arr[time_selector] = current
+```
+
+Result: 362 stations × 6 vars × 52608 ts ingested in ~30 min (vs
+60+ h with the loop). 1000× speedup.
+
+How to apply: ANY zarr writer that takes per-element data MUST stage
+the full slice in memory before writing. Never loop element-by-element
+through a Zarr array — every access decompresses+recompresses a whole
+chunk. The chunks layout optimization helps but is secondary.
+
+## OBS unified Zarr chunks: bundle stations (2026-05-24, NOAA prod fix)
+
+`_obs_unified.write_unified_obs_zarr` originally used
+`chunks = (min(720, n_times), 1, n_heights)` → 1 chunk per
+(time_block, station, height). For NOAA prod (356 stations × 52608
+hourly timestamps), this generated **~26344 chunks per variable ×
+6 variables = ~158k fsync+metadata operations** → 31 MB/h write
+rate, 80+ h ETA.
+
+Fix:
+```python
+chunks = (
+    min(8760, n_times),       # up to one year per chunk
+    max(1, min(n_stations, 64)),  # bundle stations
+    n_heights,
+)
+```
+
+→ ~36 chunks per variable, total writes O(seconds) instead of hours.
+Validated on Perdigão smoke (13 chunks total vs 64078 before).
+
+How to apply: any future Zarr writer for tall sparse multi-station
+data MUST bundle the small axis (here: stations) into the chunk.
+Single-axis-1 chunks fragment filesystem badly with Blosc + Zarr V3
+metadata fanout (1 file per chunk).
+
 ## ERA5 hourly + d2m Europe pipeline ready (2026-05-23, M_G6.5)
 
 `services/data-ingestion/ingest_era5_europe_hourly.py` produit un Zarr

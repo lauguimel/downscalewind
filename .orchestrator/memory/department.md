@@ -1,5 +1,28 @@
 # Department memory — DownscaleWind
 
+## Diagnostic perf : profiler les patterns I/O, pas que les chunks (2026-05-25)
+
+Quand un pipeline Zarr est anormalement lent (NOAA prod : 31 MB/h, ETA
+80 h), le réflexe naturel est d'inspecter les chunks. C'est nécessaire
+mais SOUVENT pas suffisant : le vrai bottleneck est typiquement dans le
+**code append/write** qui peut faire des accès O(T) au lieu de O(1)
+sur un slice.
+
+Pattern de diagnostic :
+1. Compter les chunks créés vs attendus → suspect si fragmenté
+2. **Lire le code write_obs/append_obs** et chercher les loops sur
+   `arr[i, j, :]` ou `arr[..., k]` qui itèrent sur une dimension
+3. Vectoriser : `arr[slice, j, :]` (1 IO Zarr) au lieu de loop
+   `for i: arr[i, j, :]` (T IO Zarr)
+
+Sur NOAA prod : le chunks patch seul aurait donné un speedup ~10x ; le
+vectorize patch a donné le 1000x manquant. Combiné : 60h → 30min.
+
+How to apply : pour toute mission "Zarr ingestion is slow", spawner un
+Engineer brief qui demande explicitement de (1) inspecter chunks ET
+(2) profiler le code append pour patterns per-element. Ne pas se
+contenter du premier suspect.
+
 ## M_G8 audit thresholds + strata axes (2026-05-23)
 
 **Verdict thresholds (Phase H GO/NO-GO/RESCOPE)** :
