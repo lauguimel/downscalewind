@@ -110,10 +110,43 @@ def load_parquet(path: Path) -> pd.DataFrame:
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"parquet missing required columns: {sorted(missing)}")
-    logger.info("Loaded %s | rows=%d | sources=%s | stations=%d",
+    has_baseline = "speed_era5_baseline" in df.columns
+    df.attrs["has_baseline"] = has_baseline
+    logger.info("Loaded %s | rows=%d | sources=%s | stations=%d | baseline=%s",
                 path, len(df), sorted(df["source"].unique()),
-                df["station_id"].nunique())
+                df["station_id"].nunique(), has_baseline)
     return df
+
+
+def fig_surrogate_vs_baseline_mae(df: pd.DataFrame, out: Path) -> None:
+    """Bar chart comparing MAE_surrogate vs MAE_era5_baseline per topo class."""
+    if "speed_era5_baseline" not in df.columns:
+        return
+    classes = ["plain", "foothill", "mountain", "summit"]
+    mae_surr, mae_base, n_strata = [], [], []
+    for c in classes:
+        sub = df[df["class_topo"] == c].dropna(
+            subset=["speed_obs", "speed_pred", "speed_era5_baseline"])
+        if len(sub) == 0:
+            mae_surr.append(np.nan); mae_base.append(np.nan); n_strata.append(0)
+            continue
+        s = pairing_metrics(sub["speed_obs"].to_numpy(), sub["speed_pred"].to_numpy())
+        b = pairing_metrics(sub["speed_obs"].to_numpy(), sub["speed_era5_baseline"].to_numpy())
+        mae_surr.append(s["MAE"]); mae_base.append(b["MAE"]); n_strata.append(len(sub))
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    x = np.arange(len(classes))
+    ax.bar(x - 0.18, mae_base, 0.36, label="ERA5 baseline (raw u10/v10)", color="#888")
+    ax.bar(x + 0.18, mae_surr, 0.36, label="Surrogate v2", color="#2a7")
+    ax.set_xticks(x); ax.set_xticklabels(
+        [f"{c}\nN={n}" for c, n in zip(classes, n_strata)])
+    ax.set_ylabel("MAE (m/s)")
+    ax.set_title("Surrogate vs ERA5 baseline — MAE by class_topo")
+    ax.legend(loc="upper left", fontsize=9)
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out, dpi=140)
+    plt.close(fig)
+    logger.info("wrote %s", out)
 
 
 def write_csv(df: pd.DataFrame, path: Path) -> None:
@@ -437,11 +470,23 @@ def write_report(
                  f"L'audit présent ouvre la stratification à >7 sites pour vérifier "
                  f"si ce biais affine est universel ou strate-dépendant.")
     lines.append(f"")
-    lines.append(f"**ERA5 baseline comparison**: skip — `speed_era5_baseline` "
-                 f"absent du parquet M_G7. Caveat : la baseline ERA5 n'est pas "
-                 f"comparée directement ici. Pour Phase H, ajouter `speed_era5_baseline` "
-                 f"au parquet via `infer_at_stations.py` (extraire `era5_surface/u10,v10` "
-                 f"du grid.zarr au point central).")
+    if df.attrs.get("has_baseline") and "speed_era5_baseline" in df.columns:
+        from utils.strata import pairing_metrics  # local import to avoid cycles
+        gb = pairing_metrics(df["speed_obs"].to_numpy(),
+                             df["speed_era5_baseline"].to_numpy())
+        delta_mae = gb["MAE"] - global_metrics["MAE"]
+        sign = "improvement" if delta_mae > 0 else "regression"
+        lines.append(
+            f"**ERA5 baseline comparison**: surrogate {sign} ΔMAE = {delta_mae:+.3f} m/s "
+            f"(ERA5 baseline MAE = {gb['MAE']:.3f}, bias = {gb['bias']:+.3f}, "
+            f"R² = {gb['R2']:.3f}). Voir `metrics_global_baseline.csv` et "
+            f"`surrogate_vs_baseline_mae.png` pour les détails par class_topo."
+        )
+    else:
+        lines.append(
+            f"**ERA5 baseline comparison**: skip — `speed_era5_baseline` absent du parquet. "
+            f"Re-run `infer_at_stations.py` (≥ commit 9f0fcc9) qui exporte la colonne."
+        )
     lines.append(f"")
 
     lines.append(f"## §2 Methodology — stratification\n")
@@ -536,6 +581,17 @@ def run_audit(parquet: Path, output_dir: Path) -> dict:
                               index=False, float_format="%.4f")
     logger.info("global metrics: %s", json.dumps(g, indent=2))
 
+    # global ERA5 baseline metrics (M_G8.5 upgrade — only if column present)
+    g_baseline = None
+    if "speed_era5_baseline" in df.columns:
+        baseline = df["speed_era5_baseline"].to_numpy()
+        g_baseline = pairing_metrics(df["speed_obs"].to_numpy(), baseline)
+        pd.DataFrame([g_baseline]).to_csv(csv_dir / "metrics_global_baseline.csv",
+                                          index=False, float_format="%.4f")
+        logger.info("ERA5 baseline metrics: %s", json.dumps(g_baseline, indent=2))
+        logger.info("surrogate improvement over baseline: ΔMAE=%+.3f m/s",
+                    g_baseline["MAE"] - g["MAE"])
+
     # per-strata
     metrics_by: dict[str, pd.DataFrame] = {}
     for by in STRATA_SETS:
@@ -549,6 +605,8 @@ def run_audit(parquet: Path, output_dir: Path) -> dict:
     fig_distribution_by_source(df, fig_dir / "distribution_by_source.png")
     fig_era5_freshness_impact(df, fig_dir / "era5_freshness_impact.png")
     fig_bias_by_season_height(df, fig_dir / "bias_by_season_height.png")
+    if "speed_era5_baseline" in df.columns:
+        fig_surrogate_vs_baseline_mae(df, fig_dir / "surrogate_vs_baseline_mae.png")
 
     # verdict
     by_topo = metrics_by["class_topo"]
