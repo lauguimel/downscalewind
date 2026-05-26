@@ -175,6 +175,36 @@ How to apply : avant tout `rm` de fichiers non-tracked, exécuter
 qu'aucun import ne les référence. CLAUDE.md warning "investigate before
 deleting" était précisément pour ce cas.
 
+## VERDICT FINAL Phase G — M_G9 GO Phase H + Conditional Phase I (2026-05-26)
+
+Production run M_G7 sur Aqua H100 (jobs 21901136 killed walltime → 21950018 + parquet checkpointing) a livré **57,010 pairings exploitables** (95 stations NOAA FR/ES dans bbox tiles DEM, fenêtre winter 2022-23 4 mois). C'est **8350× plus** que le M17 baseline (N=7 ICOS).
+
+**Métriques globales** :
+- MAE surrogate v2 = 1.476 m/s
+- MAE ERA5 baseline raw = 1.361 m/s
+- ΔMAE = -0.115 m/s (surrogate REGRESS -8.4%)
+- Affine fit `speed_pred = 0.593·speed_obs + 1.475` (R²=0.606)
+
+**M16/M17 verdict CONFIRMÉ statistiquement** : pattern affine (slope ~0.55, intercept ~+1.5) reproduit à grande échelle. Compression dynamique typique RANS k-ε + wall function.
+
+**Décisions M_G9** (trinité) :
+
+1. **Surrogate v2 raw = NO-GO déploiement**. MAE 1.476 m/s + REGRESS vs ERA5 brut → ne pas exposer aux applications fire/wind/paragliding sans correction.
+
+2. **Phase H DNN bias correction = GO**. Dataset suffisant (57k pairings × 6 strata), pattern affine reproductible exploitable. Cible : DNN correction `speed_corr = f(speed_pred, terrain_class, height_bucket, wind_class, season, era5_freshness)` apprenant à fermer le 8% gap.
+
+3. **Phase I alpine = CONDITIONAL**. summit (N=51) MAE 2.754, bias -2.259, R² 0.08 → RANS 6km insuffisant. Re-simuler ~50 cas alpine domaine 10×10×5 km **si Phase H DNN ne suffit pas pour cette classe**.
+
+**Caveats prod run** :
+- 2 jobs walltime kill 6h (CPU-bound `materialise_grid_zarr`, GPU 0-5% utilization). Optimisations future : multiprocessing.Pool sur les prep grid.zarr.
+- Coverage limitée à tiles DEM dispo (FR + nord ES, ~26% de la population NOAA). PT zéro stations.
+- Single window winter2223 (4 mois). Saisons MAM/JJA/SON à valider via Phase H.
+
+**Code livré** :
+- 10 commits Phase G (c577ecf → 01ae5fb)
+- Pipeline complet : OBS unifié + surrogate input extract + inference batched + audit stratifié
+- Memory engineer.md/department.md enrichies (12 patterns Zarr/PBS/audit)
+
 ## Phase G — M_G7 done, inférence surrogate aux stations validée (2026-05-23)
 
 `services/module2b-surrogate/infer_at_stations.py` (514 LOC) +
