@@ -105,6 +105,7 @@ def load_obs_pairings(
     height_target: float = 10.0,
     max_pairings: int | None = None,
     stratify: bool = False,
+    era5_time_window_ns: tuple[int, int] | None = None,
 ) -> pd.DataFrame:
     """Build a long-form DataFrame of `(station_id, timestamp, source, ...)`
     pairings across the listed obs Zarrs.
@@ -164,6 +165,12 @@ def load_obs_pairings(
     if not frames:
         return pd.DataFrame()
     df = pd.concat(frames, ignore_index=True)
+    if era5_time_window_ns is not None:
+        n_before = len(df)
+        t_lo, t_hi = era5_time_window_ns
+        df = df[(df["timestamp_ns"] >= t_lo) & (df["timestamp_ns"] <= t_hi)].reset_index(drop=True)
+        logger.info("ERA5 time-window pre-filter: %d → %d pairings (%.1f%% kept)",
+                    n_before, len(df), 100.0 * len(df) / max(1, n_before))
     if stratify:
         df = _stratify_pairings(df)
     if max_pairings is not None and len(df) > max_pairings:
@@ -420,6 +427,13 @@ def run_inference(
         logger.info("[%d/%d] built=%d skipped=%d elapsed=%.1fs",
                     min(start + batch_size, len(df)), len(df),
                     n_built, n_skipped, elapsed)
+        # Periodic parquet checkpoint to survive walltime kills.
+        # Flush every ~1000 new rows (overwrite all-rows-so-far).
+        if out_rows and len(out_rows) >= 1000 and len(out_rows) // 1000 != getattr(run_inference, "_last_flush", -1):
+            output.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(out_rows).to_parquet(output, index=False)
+            run_inference._last_flush = len(out_rows) // 1000
+            logger.info("checkpoint: wrote %d rows to %s", len(out_rows), output)
 
     if not out_rows:
         logger.error("No pairings produced output — aborting parquet write.")
@@ -451,9 +465,10 @@ def run_inference(
 @click.option("--dem", type=click.Path(exists=True, path_type=Path),
               default="data/raw/srtm_perdigao_30m.tif",
               help="DEM GeoTIFF (Copernicus GLO-30 / SRTM)")
-@click.option("--worldcover", type=click.Path(exists=True, path_type=Path),
-              default="data/raw/worldcover_perdigao.tif",
-              help="ESA WorldCover 2021 GeoTIFF for z0_eff")
+@click.option("--worldcover", type=click.Path(exists=False, path_type=Path),
+              default=None,
+              help="ESA WorldCover 2021 GeoTIFF for z0_eff (optional; pipeline "
+                   "uses fallback z0 if absent)")
 @click.option("--output", type=click.Path(path_type=Path), required=True,
               help="Output parquet path")
 @click.option("--device", default="auto", help="cpu, cuda or auto")
@@ -486,11 +501,28 @@ def cli(obs_zarrs, era5_store, checkpoint, norm_yaml, dem, worldcover, output,
     obs_paths = [Path(p.strip()) for p in obs_zarrs.split(",") if p.strip()]
     if smoke and max_pairings is None:
         max_pairings = 10
+    # Pre-filter OBS pairings on ERA5 time window (avoid 96% skip rate at
+    # materialise_grid_zarr stage — saw 478k → 9k built on job 21901136
+    # walltime kill, root cause: ERA5 store only covers 4 months).
+    era5_window = None
+    try:
+        era5_root = zarr.open_group(str(era5_store), mode="r")
+        era5_times_ns = np.asarray(era5_root["coords/time"][:], dtype=np.int64)
+        margin_ns = int(max_era5_delta_h * 3600 * 1_000_000_000)
+        era5_window = (int(era5_times_ns[0]) - margin_ns,
+                       int(era5_times_ns[-1]) + margin_ns)
+        logger.info("ERA5 time window: [%s, %s] ± %.1f h",
+                    str(np.array(era5_times_ns[0]).astype("datetime64[ns]")),
+                    str(np.array(era5_times_ns[-1]).astype("datetime64[ns]")),
+                    max_era5_delta_h)
+    except Exception as exc:
+        logger.warning("Could not pre-filter ERA5 time window: %s", exc)
     df = load_obs_pairings(
         obs_paths,
         height_target=height_target,
         max_pairings=max_pairings,
         stratify=stratify_timestamps,
+        era5_time_window_ns=era5_window,
     )
     if df.empty:
         logger.error("No usable OBS pairings found — aborting.")
