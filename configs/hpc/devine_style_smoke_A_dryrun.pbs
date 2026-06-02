@@ -1,0 +1,44 @@
+#!/bin/bash -l
+#PBS -N dvA_dryrun
+#PBS -l select=1:ncpus=8:mem=32GB:ngpus=1
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -m n
+
+# Phase H' M_H'1 config sweep — Dept A DRY-RUN
+# Exercises warmup_cosine + grad_clip + tau override on 4 train + 2 val
+# pairings, 1 epoch. Validates trainer code BEFORE qsub-ing the 4 long jobs.
+
+cd "$PBS_O_WORKDIR"
+
+BASE="$HOME/dsw"
+CFG="$BASE/configs/training/devine_style_smoke_A_dryrun.yaml"
+OUT="$BASE/data/models/surrogate_v2_devine_A_dryrun"
+mkdir -p "$OUT"
+
+[ -f "$CFG" ] || { echo "MISSING CFG:$CFG"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+export OMP_NUM_THREADS=2
+
+cd "$BASE"
+echo "=== Phase H' M_H'1 dryrun ==="
+nvidia-smi -L
+
+python -u services/module2b-surrogate/train_v2_devine_style.py \
+  --config "$CFG" 2>&1 | tee "$OUT/dryrun.log"
+RC=${PIPESTATUS[0]}
+echo "RC=$RC"
+
+echo "=== history ==="
+cat "$OUT/history.yaml" 2>/dev/null || echo "no history.yaml"
+echo "=== summary ==="
+cat "$OUT/summary.json" 2>/dev/null || echo "no summary.json"
+
+exit $RC

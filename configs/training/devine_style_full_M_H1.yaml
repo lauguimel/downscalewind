@@ -1,0 +1,49 @@
+# DEVINE-style M_H'1a (JJA 2023 only) training (Phase H')
+# Config V2 (winner of Dept A empirical sweep): lr=5e-4 + grad_clip=1.0
+# Dataset = JJA 2023 FR/ES/PT = 63k pairings × 214 stations
+# PRIORITY rationale: JJA = fire weather season = NatComms paper track strategique
+# ETA ~30-40h on H100 (cache empty for JJA, ~3.8h materialisation + ~5h/epoch training)
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+pairings_parquet: /home/maitreje/dsw/data/inference/noaa_jja2023_v2.parquet
+era5_store: /home/maitreje/dsw/data/raw/era5_europe_hourly_jja2023.zarr
+dem: /home/maitreje/dsw/data/raw/srtm_tiles/
+worldcover: /home/maitreje/dsw/data/raw/worldcover_esa/   # heterogeneous z0_eff (M_H+ Axe 4 deliverable)
+
+# ── Frozen surrogate v2 ──────────────────────────────────────────────────────
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt
+surrogate_preset: base
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+target_agl_levels: agl_0_100_24
+n_pressure_levels: 10
+
+# ── Splits ───────────────────────────────────────────────────────────────────
+val_frac: 0.20
+seed: 42
+exclude_substrings: ["perdigao"]   # hold-out Perdigao IOP as separate test
+# no max_stations / max_pairings : use FULL dataset (264k pairings)
+
+# ── ANN architecture (DEVINE Table 2 ANN_speed) ──────────────────────────────
+topo_dim: 8
+hidden_units: [50, 10]
+dropout: 0.25
+
+# ── Training : V2 WINNER config ──────────────────────────────────────────────
+epochs: 8                 # tighter than 10 given walltime constraint
+batch_size: 4
+lr: 5.0e-4                # V2 winner (lower than smoke v3 default 1e-3)
+grad_clip_norm: 1.0       # V2 winner
+# tau_under/tau_over use DEVINE default 0.6/0.4 (V3 showed 0.55/0.45 EMPIRE)
+num_workers: 4            # bump from 2 (smoke) to absorb materialization
+n_prep_workers: 8         # bump from 4
+max_era5_delta_h: 3.5
+overwrite_cache: false    # reuse smoke v3 cache where applicable
+
+# ── Early stopping ───────────────────────────────────────────────────────────
+# (if implemented in train_v2_devine_style.py; otherwise relies on best.pt checkpointing)
+# Reasonable defaults if supported : patience=2, min_delta=0.005
+
+# ── I/O ──────────────────────────────────────────────────────────────────────
+output_dir: /home/maitreje/dsw/data/models/surrogate_v2_devine_M_H1_jja
+cache_dir: /scratch/maitreje/dsw/phase_H_prime_M_H1_jja_cache
+device: cuda

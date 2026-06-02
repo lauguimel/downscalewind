@@ -1,0 +1,64 @@
+#!/bin/bash -l
+#PBS -N devine_smoke_v2
+#PBS -l select=1:ncpus=16:mem=64GB:ngpus=1
+#PBS -l walltime=06:00:00
+#PBS -j oe
+#PBS -m n
+
+# Phase H' M_H'0_v2 — DEVINE-style smoke RIGOUREUX (NN correction + frozen surrogate v2)
+# 200 stations × winter2223 (~25k pairings), 15 epochs, 1 H100/A100.
+
+cd "$PBS_O_WORKDIR"
+
+BASE="$HOME/dsw"
+CFG="$BASE/configs/training/devine_style_smoke.yaml"
+OUT="$BASE/data/models/surrogate_v2_devine_smoke_v2"
+mkdir -p "$OUT"
+
+[ -f "$CFG" ] || { echo "MISSING CFG:$CFG"; exit 1; }
+[ -f "$BASE/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt" ] || \
+    { echo "MISSING surrogate best.pt"; exit 1; }
+[ -d "$BASE/data/raw/era5_europe_winter2223.zarr" ] || \
+    { echo "MISSING ERA5 winter2223 store"; exit 1; }
+[ -f "$BASE/data/inference/noaa_winter2223.parquet" ] || \
+    { echo "MISSING noaa parquet"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+export OMP_NUM_THREADS=2
+export MKL_NUM_THREADS=2
+export OPENBLAS_NUM_THREADS=2
+
+cd "$BASE"
+echo "=== Phase H' M_H'0 devine_style_smoke ==="
+nvidia-smi -L
+echo "CFG=$CFG"
+echo "OUT=$OUT"
+
+python -u services/module2b-surrogate/train_v2_devine_style.py \
+  --config "$CFG" 2>&1 | tee "$OUT/train.log"
+RC_TRAIN=${PIPESTATUS[0]}
+if [ $RC_TRAIN -ne 0 ]; then
+    echo "TRAIN FAILED rc=$RC_TRAIN"
+    exit $RC_TRAIN
+fi
+
+if [ -f "$OUT/best.pt" ]; then
+    echo "=== eval (raw vs corrected) ==="
+    python -u services/module2b-surrogate/eval_devine_style.py \
+      --config "$CFG" \
+      --ann-checkpoint "$OUT/best.pt" \
+      --out-dir "$OUT" 2>&1 | tee "$OUT/eval.log"
+else
+    echo "WARNING: no best.pt produced; skipping eval"
+fi
+
+echo "=== summary ==="
+cat "$OUT/eval_summary.json" 2>/dev/null || echo "no eval_summary.json"
+echo "=== history (last entries) ==="
+tail -50 "$OUT/history.yaml" 2>/dev/null || echo "no history.yaml"

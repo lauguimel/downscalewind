@@ -1,0 +1,46 @@
+# DEVINE-style smoke — Dept A config sweep V2 low_lr + grad_clip
+# Hypothesis: lr halved (5e-4) + global grad clip 1.0 reduces optim aggressiveness
+# enough to avoid the epoch 1 overshoot while not crippling convergence speed.
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+pairings_parquet: /home/maitreje/dsw/data/inference/noaa_winter2223.parquet
+era5_store: /home/maitreje/dsw/data/raw/era5_europe_winter2223.zarr
+dem: /home/maitreje/dsw/data/raw/srtm_tiles/
+worldcover: /home/maitreje/dsw/data/raw/worldcover_esa/
+
+# ── Frozen surrogate v2 ──────────────────────────────────────────────────────
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt
+surrogate_preset: base
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+target_agl_levels: agl_0_100_24
+n_pressure_levels: 10
+
+# ── Splits (FROZEN — must equal v3 to keep Δmae comparable) ─────────────────
+val_frac: 0.20
+seed: 42
+exclude_substrings: ["perdigao"]
+max_stations: 200
+max_train_pairings: 25000
+max_val_pairings: 6000
+
+# ── ANN architecture (DEVINE Table 2 ANN_speed) ──────────────────────────────
+topo_dim: 8
+hidden_units: [50, 10]
+dropout: 0.25
+
+# ── Training (V2 = low lr + grad clip) ───────────────────────────────────────
+epochs: 5
+batch_size: 4
+lr: 0.0005                    # half of baseline
+lr_schedule: constant
+grad_clip_norm: 1.0
+
+num_workers: 2
+n_prep_workers: 4
+max_era5_delta_h: 3.5
+overwrite_cache: false
+
+# ── I/O ──────────────────────────────────────────────────────────────────────
+output_dir: /home/maitreje/dsw/data/models/surrogate_v2_devine_A_V2_low_lr_clip
+cache_dir: /scratch/maitreje/dsw/phase_H_prime_smoke_cache
+device: cuda

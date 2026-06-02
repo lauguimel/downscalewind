@@ -1,0 +1,49 @@
+# DEVINE-style smoke — Dept A config sweep V1 warmup_cosine
+# Hypothesis: smooth optim start fixes the epoch 1 val_mae overshoot
+# (v3 saw 1.405 → 1.486 at ep1, then re-stabilised by ep2).
+# Linear warmup 1e-4 → 1e-3 over first epoch, then cosine to 1e-4 over remaining 4.
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+pairings_parquet: /home/maitreje/dsw/data/inference/noaa_winter2223.parquet
+era5_store: /home/maitreje/dsw/data/raw/era5_europe_winter2223.zarr
+dem: /home/maitreje/dsw/data/raw/srtm_tiles/
+worldcover: /home/maitreje/dsw/data/raw/worldcover_esa/
+
+# ── Frozen surrogate v2 ──────────────────────────────────────────────────────
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt
+surrogate_preset: base
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+target_agl_levels: agl_0_100_24
+n_pressure_levels: 10
+
+# ── Splits (FROZEN — must equal v3 to keep Δmae comparable) ─────────────────
+val_frac: 0.20
+seed: 42
+exclude_substrings: ["perdigao"]
+max_stations: 200
+max_train_pairings: 25000
+max_val_pairings: 6000
+
+# ── ANN architecture (DEVINE Table 2 ANN_speed) ──────────────────────────────
+topo_dim: 8
+hidden_units: [50, 10]
+dropout: 0.25
+
+# ── Training (V1 = warmup_cosine) ────────────────────────────────────────────
+epochs: 5
+batch_size: 4
+lr: 0.001                     # peak
+lr_schedule: warmup_cosine
+warmup_epochs: 1
+lr_min_warmup: 0.0001         # 1e-4 start
+lr_final: 0.0001              # cosine end
+
+num_workers: 2
+n_prep_workers: 4
+max_era5_delta_h: 3.5
+overwrite_cache: false
+
+# ── I/O ──────────────────────────────────────────────────────────────────────
+output_dir: /home/maitreje/dsw/data/models/surrogate_v2_devine_A_V1_warmup
+cache_dir: /scratch/maitreje/dsw/phase_H_prime_smoke_cache
+device: cuda

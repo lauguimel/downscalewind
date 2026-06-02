@@ -1,0 +1,83 @@
+#!/bin/bash -l
+#PBS -N eval_loso_H1d
+#PBS -l select=1:ncpus=8:mem=32GB:ngpus=1:gpu_id=A100
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -m n
+
+cd "$PBS_O_WORKDIR"
+
+BASE="$HOME/dsw"
+CFG="$BASE/configs/training/devine_style_full_M_H1.yaml"
+ANN="$BASE/data/models/surrogate_v2_devine_M_H1_jja/best.pt"
+OUT="$BASE/data/validation/phase_H_prime_loso"
+OBS="$BASE/data/raw/obs_unified_noaa_isd_prod.zarr"
+CACHE="/scratch/maitreje/dsw/phase_H_prime_M_H1_jja_cache"
+
+mkdir -p "$OUT"
+[ -f "$CFG" ] || { echo "MISSING CFG:$CFG"; exit 1; }
+[ -f "$ANN" ] || { echo "MISSING ANN:$ANN"; exit 1; }
+[ -f "$BASE/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt" ] || \
+    { echo "MISSING surrogate best.pt"; exit 1; }
+[ -f "$BASE/data/inference/noaa_jja2023_v2.parquet" ] || { echo "MISSING JJA parquet"; exit 1; }
+[ -d "$OBS" ] || { echo "MISSING OBS:$OBS"; exit 1; }
+[ -d "$CACHE" ] || { echo "BLOCKED: missing grid.zarr cache $CACHE; do not rematerialise"; exit 2; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+export OMP_NUM_THREADS=2
+export MKL_NUM_THREADS=2
+export OPENBLAS_NUM_THREADS=2
+
+cd "$BASE"
+echo "=== M_H'1d LOSO dry-run CPU ==="
+python -u services/module2b-surrogate/eval_devine_loso.py \
+  --config "$CFG" \
+  --ann-checkpoint "$ANN" \
+  --out-dir "$OUT" \
+  --obs-store "$OBS" \
+  --device cpu \
+  --dry-run \
+  --limit-batches 1 \
+  --max-pairings 4 \
+  --batch-size 2 \
+  --num-workers 0 \
+  --n-prep-workers 1 2>&1 | tee "$OUT/dryrun.log"
+RC_DRY=${PIPESTATUS[0]}
+echo "RC_DRY=$RC_DRY"
+[ "$RC_DRY" -eq 0 ] || exit "$RC_DRY"
+
+echo "=== M_H'1d LOSO full CUDA evaluation ==="
+nvidia-smi -L
+python -u services/module2b-surrogate/eval_devine_loso.py \
+  --config "$CFG" \
+  --ann-checkpoint "$ANN" \
+  --out-dir "$OUT" \
+  --obs-store "$OBS" \
+  --device cuda 2>&1 | tee "$OUT/eval_devine_loso.log"
+RC_EVAL=${PIPESTATUS[0]}
+echo "RC_EVAL=$RC_EVAL"
+[ "$RC_EVAL" -eq 0 ] || exit "$RC_EVAL"
+
+python - <<'PY'
+# Exit-criterion check aligned with the direction-fix schema (M_H'1e):
+# the eval now writes loso_summary_dir.json with val/train -> mae_dir_deg.
+import json, pandas as pd
+base="data/validation/phase_H_prime_loso"
+s=json.load(open(f"{base}/loso_summary_dir.json"))
+v=s["val"]
+md=v["mae_dir_deg"]
+print("val n_pairings", v["n_pairings"])
+print("val mae_dir corrected/raw/era5",
+      md["corrected"], md["raw"], md["era5"])
+print("val bias_dir corrected/raw/era5",
+      v["bias_dir_deg"]["corrected"], v["bias_dir_deg"]["raw"], v["bias_dir_deg"]["era5"])
+# sanity: corrected should not be wildly worse than raw (aggregate, vs OBS)
+assert md["corrected"] <= md["raw"] + 5.0, ("direction regressed", md)
+print("EXIT CRITERION PASS")
+PY

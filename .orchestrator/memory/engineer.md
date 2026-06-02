@@ -1,5 +1,60 @@
 # Engineer memory — DownscaleWind OF / canary work
 
+## qstat -x "Time Use" = CPU time, PAS wall time (2026-05-27, M_H+ diagnostic)
+
+Le champ "Time Use" affiché par `qstat -x <jobid>` est le **CPU time**
+(somme `resources_used.cput`), pas le wall time. Pour un job CPU-light
+(I/O bound : CDS API, scp, etc.), le CPU time peut être ridiculement
+court (24-46s) alors que le wall time réel est plusieurs heures.
+
+**Anti-pattern observé 2026-05-27** : 3 jobs ERA5 chained (21982386/95/96)
+affichaient `Time Use 24-46s` dans qstat -x → diagnostic prématuré "jobs
+ont crashed". En réalité, wall réel = 1h51 + 3h11 + 2h52 ; tous Exit 0.
+
+How to apply : pour tout diagnostic de PBS job terminé, lire `qstat -f
+<jobid>` ou le PBS o-file qui contient `resources_used.walltime`. Ne JAMAIS
+conclure échec sur le "Time Use" seul.
+
+
+
+## CDS 2026 cost-limit : ERA5 hourly bulk = max ~7 days/request (2026-05-26, M_H+)
+
+CDS API 2026 a une cost-limit stricte sur les requêtes ERA5. Empiriquement,
+un bbox Europe (~16°×20°) × 4 variables × 10 pressure levels × hourly
+saute en `403 "Your request is too large"` au-delà de **~7 jours par
+requête**. 16 jours = trop. 30 jours = systématique fail.
+
+Mitigation appliquée par M_H+ dans `services/data-ingestion/ingest_era5_europe_hourly.py` :
+- Nouveau flag `--max-days-per-req 7` (décompose une saison en chunks ≤7j)
+- Flag `--no-z` (ne pas demander geopotential z si non nécessaire) pour
+  réduire le payload
+
+How to apply : tout nouvel ingest ERA5 hourly Europe doit chunker en
+sub-requêtes ≤7 jours. Pour des saisons multi-mois (MAM/JJA/SON), enchainer
+les jobs PBS via `qsub -W depend=afterok:<jobid>` pour respecter le
+sequential rate-limit CDS.
+
+## Copernicus DSM 30m AWS S3 endpoint (2026-05-26, M_H+ Axe 1)
+
+Source DEM 30m gratuite pour tiles 1°×1° couvrant le globe :
+```
+https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_<TILE>_DEM/Copernicus_DSM_COG_10_<TILE>_DEM.tif
+```
+
+Où `<TILE>` suit la convention `N<lat>_00_E<lon>_00` (ex : `N40_00_W008_00`,
+`S05_00_E140_00`). Accès anonyme (pas d'auth).
+
+Taille typique : ~40 MB inland, ~1 MB côtier (tile mostly sea masked).
+**Filtrer min-size 50 KB**, pas 1 MB — sinon perte de tiles côtières
+utiles (Lisbon, Faro, Malaga, A Coruña confirmées valides à <5 MB).
+
+How to apply : `services/data-ingestion/ingest_dem_copernicus.py`
+(M_H+ deliverable) implémente le download avec retry+skip_existing. Le
+helper `_resolve_dem_path` dans `services/module2b-surrogate/utils/inference_input.py`
+auto-detect les tiles depuis (lat, lon) selon ce naming pattern.
+
+
+
 ## OBS append_obs_data MUST be vectorized (2026-05-25, NOAA prod root cause)
 
 The ORIGINAL bottleneck on NOAA prod (~11 min/station, 60+ h ETA) was
@@ -75,13 +130,12 @@ Variables surface canoniques pour surrogate v2 (alias CDS) :
 **Ne PAS oublier `2m_dewpoint_temperature` (d2m)** sinon
 `build_era5_baseline_tensor(mode='surface')` crash au runtime.
 
-Pressure levels canoniques (dataset v2) :
+Pressure levels canoniques (dataset v2, VÉRIFIÉ 2026-05-26 sur grid.zarr Aqua `ct_d_fire_0056_case_ts014`) :
 ```
-[1000, 925, 850, 700, 500, 400, 300, 250, 200, 150]
+[1000, 925, 850, 700, 600, 500, 400, 300, 250, 200]
 ```
 
-Différent de l'ancien `era5_europe.zarr` (qui avait 600 au lieu de 150).
-Si on re-ingère le legacy, harmoniser.
+**Correction 2026-05-26 (M_H+)** : la version précédente disait `[..., 200, 150]` SANS 600 — c'était faux. Le vrai dataset v2 inclut `600 hPa` et ne va PAS jusqu'à 150 hPa. Vérifier sur `z['input/era5_pressure_levels'][:]` avant tout ingest ERA5 nouveau.
 
 How to apply : pour M_G7 production massive, utiliser
 `data/raw/era5_europe_hourly_*.zarr` (à créer en re-running

@@ -1,5 +1,100 @@
 # Department memory — DownscaleWind
 
+## Config M_H1 era5_store = JJA-2023 → override pour tout eval 2017 IOP (2026-06-02, M_H'1c)
+
+`devine_style_full_M_H1.yaml` a `era5_store: era5_europe_hourly_jja2023.zarr`. Tout eval sur un
+AUTRE période (Perdigão IOP 2017) DOIT créer une config override pointant le bon store —
+ici `era5_europe_spring2017_v2.zarr` (couvre 2017-05→06, d2m présent, ⚠️ Δt=360min/6h →
+predictions constantes par blocs 6h, OK pour test SPATIAL au même timestamp, PAS pour
+variabilité temporelle). L'Engineer Codex ne peut PAS voir ça (pas d'accès Aqua) → c'est au
+Department de repérer le mismatch période↔store et de repointer le YAML + PBS.
+
+How to apply : avant tout eval cross-période, vérifier que `era5_store` du YAML couvre bien
+les timestamps cibles (`zarr coords/time` min/max). Mismatch silencieux = audit sur mauvaises
+données ERA5.
+
+## perdigao_obs.zarr schema + scp (2026-06-02, M_H'1c)
+
+`perdigao_obs.zarr` : arrays `(time,site,height)=(2208,48,14)`, 10m exact à un h_idx donné,
+~2400 fichiers chunk minuscules. scp -r lent (plusieurs min) mais fiable — vérifier via
+`find -type f | wc -l` remote vs local. Local 12 MB ; était ABSENT d'Aqua avant M_H'1c.
+
+## Codex sandbox n'a PAS de SSH Aqua → le Department fait le qsub (2026-06-02, M_H'1d″/1e)
+
+L'Engineer Codex (run-engineer.sh) tourne dans un sandbox sans résolution DNS Aqua
+(`Could not resolve hostname aqua.qut.edu.au`). Donc tout brief impliquant scp/qsub/ssh Aqua
+doit séparer : (1) Engineer = écrit le CODE + dry-run CPU local + py_compile ; (2) Department
+(qui a SSH) = scp vers Aqua + qsub + capture job ID + vérif cache. Ne pas demander à
+l'Engineer de soumettre — il échouera silencieusement et rapportera "BLOCKED on Aqua".
+
+## Dériver TOUTES les métriques du même obs apparié (2026-06-02, bug direction M_H'1d″)
+
+`eval_devine_loso.py` calculait la VITESSE depuis `speed_obs` (déjà apparié dans le parquet)
+mais la DIRECTION via un 2e appariement séparé (`_attach_obs_direction`, nearest-time obs-store)
++ ERA5 depuis les arrays forward → **+33° d'erreur fantôme quasi-constant sur TOUTES les
+directions** (ERA5 affiché 74° au lieu du vrai 34°). Fix : dériver pred ET obs ET era5 de
+la MÊME table appariée (parquet), une seule fonction `_dir_from_uv` partout (toute constante
+de convention s'annule).
+
+How to apply : pour tout eval multi-métrique, un SEUL appariement obs→pairing partagé par
+toutes les métriques. Un 2e join "nearest-time" introduit un désalignement temporel qui gonfle
+le signal. Red flag diagnostique : si une quantité SANS modèle (ERA5 brut vs obs) change de
+valeur entre deux méthodes de calcul, c'est l'appariement qui est faux, pas le modèle.
+
+## obs_uv_dir_check ≈ 0 ne valide PAS l'appariement (2026-06-02)
+
+Un check `wind_dir_store == _dir_from_uv(u_store, v_store)` (mae 3e-6) prouve seulement la
+cohérence INTERNE du store, pas que les bonnes lignes obs ont été appariées aux pairings.
+Ne jamais conclure "métrique correcte" depuis ce check. Valider l'appariement = comparer une
+quantité sans modèle (ERA5 vs obs) à une référence indépendante.
+
+## SE ≠ std value : calcul rigoureux pour trancher noise vs signal (2026-05-29, Dept B M_H'1 audit)
+
+Lors d'un epoch-to-epoch comparison MAE entre deux iterations training, ne PAS confondre :
+- `MAE_std` = std de la distribution des erreurs absolues per-pairing (typiquement ~0.7 m/s pour wind speed)
+- `SE on MAE_mean` = `MAE_std / √N` (variance d'estimation de la MAE moyenne)
+
+Pour smoke v3 : val_ds = 6000 pairings, MAE_std ≈ 0.7 → **SE = 0.009 m/s** (pas 0.025 comme l'estimation rapide).
+Le jump epoch 0→1 de 0.081 m/s correspond à **z=9σ**, pas 3.2σ.
+
+Boss avait estimé 3.2σ et conclu "peut-être noise". Real signal était **massif et indubitable**.
+
+How to apply : pour tout debate noise vs signal sur metric MAE/RMSE inter-epoch, calculer SE correct (std/√N) avant de conclure. Si N grand (5k+) et metric noise std connu (~0.5-1.0 wind speed), un Δ de 0.02 m/s est déjà 3σ.
+
+## DEVINE τ=0.6/0.4 est empirique, pas théorique (2026-05-29, Dept B M_H'1 audit)
+
+Le Toumelin et al. 2024 NPG utilise `τ=0.6` quand `obs≤pred` et `τ=0.4` quand `obs>pred`. La valeur choisie est **calibrée empiriquement pour AROME × Alpes**, pas théorique.
+
+Dujardin & Lehning 2022 NPG sur même type de problème (downscaling wind mountain) utilise `τ=0.3 + ε=4.3 m/s` après "numerous trials" pour atteindre une prédiction sans biais. **DEVINE τ n'est pas une référence universelle.**
+
+How to apply : pour un nouveau projet (NWP × climate × terrain) qui adopte DEVINE-style asymmetric loss, re-tuner τ via smoke court est légitime (et probablement nécessaire). 0.55/0.45 ou 0.5/0.5 sont des starting points valides.
+
+## Dry-run 1-batch CPU avant qsub Aqua (2026-05-28, M_H'0 lesson)
+
+L'Engineer M_H'0 a livré 5 fichiers train_v2_devine_style.py / dataset_v2_obs_centered.py
+/ model wiring sans dry-run de validation. Résultat : **3 bugs en cascade**, chacun
+détecté seulement par un qsub PBS Aqua, soit 3 cycles × 5-15 min wall :
+
+1. `terrain_in_channels=2` hardcodé alors que checkpoint surrogate v2 base attend 4
+2. Dataset `terrain_2d` ne produit que 2 channels (terrain + z0), pas les 4 attendus (slopes manquants)
+3. `batch_size=16` → CUDA OOM sur A100 40GB (le M_H1 baseline tournait avec batch_size=4)
+
+Chacun de ces 3 bugs aurait été détecté par un **dry-run 1-batch CPU** en ~30s :
+```python
+# pseudocode dry-run avant qsub :
+ds = build_dataset(cfg)
+batch = next(iter(ds))
+print(batch['terrain'].shape)  # should match checkpoint contract
+surrogate = build_frozen_surrogate(cfg)
+pred = surrogate(*batch)  # catches channel mismatch + early OOM (if any)
+print('dry-run OK, ready to qsub')
+```
+
+How to apply : tout futur Engineer brief pour mission ML training sur HPC doit imposer
+un **dry-run CPU 1-batch avant qsub Aqua**, et l'inclure comme étape obligatoire dans
+les validation commands. Économise des heures de cycle PBS sur des bugs détectables
+en 30s.
+
 ## Diagnostic perf : profiler les patterns I/O, pas que les chunks (2026-05-25)
 
 Quand un pipeline Zarr est anormalement lent (NOAA prod : 31 MB/h, ETA

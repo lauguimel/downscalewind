@@ -1,0 +1,43 @@
+# DEVINE-style smoke RIGOUREUX (Phase H' M_H'0_v2)
+# 200 stations × winter2223 ~25k pairings, 15 epochs, 1 A100/H100 walltime 6h.
+# Purpose: trancher l'ambiguïté du smoke v1 (train descend, val oscille).
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+pairings_parquet: /home/maitreje/dsw/data/inference/noaa_winter2223.parquet
+era5_store: /home/maitreje/dsw/data/raw/era5_europe_winter2223.zarr
+dem: /home/maitreje/dsw/data/raw/srtm_tiles/
+worldcover: /home/maitreje/dsw/data/raw/worldcover_esa/   # M_H+ Axe 4 deliverable: heterogeneous z0_eff
+
+# ── Frozen surrogate v2 ──────────────────────────────────────────────────────
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt
+surrogate_preset: base
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+target_agl_levels: agl_0_100_24
+n_pressure_levels: 10
+
+# ── Splits ───────────────────────────────────────────────────────────────────
+val_frac: 0.20
+seed: 42
+exclude_substrings: ["perdigao"]
+max_stations: 200             # rigour: 4x previous
+max_train_pairings: 25000     # rigour: 6x previous (catch overfit signature)
+max_val_pairings: 6000        # rigour: 6x previous (reduce variance to ±0.025)
+
+# ── ANN architecture (DEVINE Table 2 ANN_speed) ──────────────────────────────
+topo_dim: 8
+hidden_units: [50, 10]
+dropout: 0.25
+
+# ── Training ─────────────────────────────────────────────────────────────────
+epochs: 15                    # rigour: 3x previous
+batch_size: 4
+lr: 0.001
+num_workers: 2
+n_prep_workers: 4
+max_era5_delta_h: 3.5
+overwrite_cache: true         # cache from smoke v1/v2 has z0=0.05 baked in, must re-materialise with real WC
+
+# ── I/O ──────────────────────────────────────────────────────────────────────
+output_dir: /home/maitreje/dsw/data/models/surrogate_v2_devine_smoke_v2
+cache_dir: /scratch/maitreje/dsw/phase_H_prime_smoke_cache
+device: cuda
