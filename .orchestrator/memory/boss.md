@@ -304,6 +304,151 @@ era5_europe_spring2017_v2.zarr Δt=6h). H100 22195325 tué (redondant). JJA cach
 
 **Décision next** : M_H'1b multi-season (le shift Perdigão justifie l'enrichissement saisonnier).
 
+## M_H'1f soumis 2026-06-02 — features physiques stabilité (gate test JJA)
+
+Job retrain 22197196.aqua (H100, 14h walltime, Q). Code GREEN, cache 60971 intact.
+
+**12-dim topo_features** : 8 existants + [8] grad_T_850_surf_n, [9] grad_T_500_850_n,
+[10] RH_surface_n, [11] q_surface_n. Dérivés AT READ TIME du grid.zarr (era5_3d/T centre
+`[1,1,:]`, axe niveau = era5_pressure_levels hPa ; RH/q via Magnus-Tetens sur t2m,d2m).
+Normalisés par constantes physiques PHYS_FEATURE_NORM ((-8,6),(-20,8),(60,25),(0.008,0.005)).
+⚠️ grid.zarr n'a PAS de `sp` surface → q_surface utilise p_ref=1013.25 hPa documenté.
+Rétrocompat : défaut topo_dim=8 + enable_phys_features=False → chemin M_H'1a byte-identique.
+`enable_phys_features` câblé dans les 4 call sites ObsCenteredDataset.
+
+⚠️ **PIÈGE re-éval Perdigão (à faire APRÈS retrain)** : éditer `eval_perdigao_M_H1c.yaml` →
+`topo_dim:12` + `enable_phys_features:true` AVANT de lancer audit_devine_perdigao.py avec le
+nouveau best.pt, sinon crash 8-dim features vs 12-dim ANN. Le chiffre clef = MAE centre Perdigão
+vs 2.27 (baisse = hypothèse validée → GO plan conditionnel ci-dessous).
+
+⚠️ **Piège PBS** : les trainings PBS ont un eval post-train caché (`eval_devine_style.py`) qui
+construit AUSSI dataset+ANN → tout changement topo_dim doit l'inclure (sinon train GREEN puis
+crash eval). Déjà géré pour M_H'1f.
+
+## M_H'1f retrain TERMINÉ 2026-06-02 — NOAA préservé, Perdigão en cours
+
+Job 22197196 (H100, exit 0, 4h54, 8 epochs). best.pt = ep5. Eval auto post-train sur val-43 :
+- corr **mae 1.213** rmse 1.619 bias -0.124 | raw mae 1.812 → **Δmae -0.599** (vs M_H'1a -0.589)
+- → les 4 features physiques (topo_dim 12) PRÉSERVENT et améliorent marginalement le NOAA
+  (1.213 < M_H'1a 1.223). Convergence ep5 best, ep6-7 plateau. NOAA OK confirmé.
+
+**Re-éval Perdigão M_H'1f VERDICT 2026-06-02** (job 22199665 H100 exit 0, 2min ; A100 22199633 tué) :
+
+| | M_H'1a 8-dim | M_H'1f 12-dim phys | raw |
+|---|---|---|---|
+| MAE centre | 2.27 | **2.15** | 1.37 |
+| bias centre | +1.92 | +1.71 | +0.58 |
+| pct_smooth | 100% | 100% | — |
+
+**Hypothèse features physiques = MARGINALEMENT validée, INSUFFISANTE** : features stabilité
+(grad_T, RH, q) réduisent la sur-correction de seulement −5% (2.27→2.15), bias +1.92→+1.71.
+La correction reste LARGEMENT pire que raw (1.37). Direction du bon sens mais effet trop faible.
+
+**Conclusion = le plafond est l'ÉTAGE B (surrogate frozen)** : il n'a jamais vu de terrain
+raide (Pop B exclue RANS), sous-estime structurellement les crêtes Perdigão. Donner 4 scalaires
+de contexte à un MLP ~10k ne compense pas. La voie "descripteurs scalaires" PLAFONNE empiriquement.
+
+**→ Next = STL-ENCODER ANN** (plan user) : donner le terrain complet 180×180 à l'ANN via encodeur
+CNN pour qu'il apprenne une correction POSITION-dépendante compensant le biais de crête du
+surrogate. M_H'1f prouve que c'est le bon levier (le scalaire ne suffit pas). Combiné aux obs
+montagne (calibration crête) + 4 saisons. M_H'1b 4-saisons reste utile pour la couverture
+régimes mais ne réglera PAS Perdigão seul — c'est le STL-encoder qui est le levier Perdigão.
+
+NOAA M_H'1f préservé (val 1.213 ≤ 1.223). Cache 60971 intact.
+
+## M_H'1g lancé 2026-06-03 — STL-encodeur (gate Perdigão) + ssrd/tcc en parallèle
+
+M_H'1f a tranché : features SCALAIRES insuffisantes sur Perdigão (2.27→2.15). Décision user =
+version complète STL-encodeur + radiation/nuages + régime. CAPE confirmé ABSENT de GEE
+(CDS-only) → remplacé par ssrd+tcc (présents dans GEE ECMWF/ERA5_HOURLY) = proxies forçage
+diurne. grad_T_500_850 (M_H'1f) sert déjà de proxy instabilité. 2 Departments PARALLÈLES :
+
+**M_H'1g-stl** (levier principal) : encodeur CNN terrain 180×180 dans ANNCorrection.
+- Archi : 4 conv stride-2 (4→16→32→64→64) GroupNorm+SELU → avgpool → Linear→latent 48d,
+  concaténé [era5_flat 408, topo 12]. **92.6k params** (vs 26k legacy), bande anti-overfit OK.
+  Flag `use_terrain_encoder` (défaut False → rétrocompat strict, vérifié sur vrai M_H'1f ckpt).
+- Config devine_style_M_H1g.yaml (clone M_H1f + use_terrain_encoder:true, terrain_latent_dim:48,
+  output surrogate_v2_devine_M_H1g_stl). Job retrain **22207705** (Q, H100, walltime 16h).
+- Re-éval Perdigão = job séparé post-retrain via eval_perdigao_M_H1g.pbs (config eval clone la
+  shape ANN du TRAIN, pas le défaut M_H1c topo_dim=8). Chiffre clef = MAE centre vs 2.27/1.37.
+- Verdict attendu : baisse nette Perdigão = encodeur EST le levier → ajouter ssrd/tcc + obs
+  montagne + 4 saisons ; effet faible = étage B surrogate = vrai mur → Phase I / surrogate v3.
+
+**M_H'1g-ingest** (parallèle) : ssrd+tcc GEE → store annexe era5_radcloud_jja2023.zarr +
+helper radcloud_at (topo_dim 12→14 au tour suivant). Script `ingest_era5_radcloud_gee.py` livré,
+download LOCAL en cours (PID-based, PAS un job Aqua → hpc-watch ne le voit pas, poll manuel via
+`ls data/raw/_cache_radcloud | wc -l` ; log /tmp/radcloud_full.log).
+⚠️ RYTHME LENT : ~48 h-fichiers/30min → ~20-25h pour 2208 h (JJA). GEE point-par-heure inefficace.
+Tourne en parallèle, ne bloque PAS le STL-encodeur (le vrai levier). Si encodeur répare Perdigão
+seul → ssrd/tcc optionnel (pourrait être arrêté). Caveat à revoir : batcher le download GEE
+(getRegion multi-temps) plutôt que point-par-heure si on relance.
+
+NOAA M_H'1f = 1.213 (référence à ne pas dégrader). Cache 60971 intact.
+
+## M_H'1g STL-encodeur VERDICT 2026-06-03 — N'A PAS battu 2.15, le mur EST l'étage B
+
+Job retrain 22207705 (exit 0, 4h54, best ep6) + re-éval Perdigão 22209205 (exit 0). NOAA
+préservé (corr mae **1.227**, bias -0.007, no overfit malgré encodeur CNN 92.6k params).
+
+**Perdigão centre MAE — TROIS leviers ANN testés, tous plafonnent** :
+| modèle | Perdigão centre MAE | bias |
+|---|---|---|
+| raw (cible) | 1.37 | +0.58 |
+| M_H'1a (descripteurs 8) | 2.27 | +1.92 |
+| M_H'1f (features physiques 12) | 2.15 | +1.71 |
+| **M_H'1g (encodeur terrain 180×180)** | **2.32** | +1.95 |
+
+L'encodeur CNN du relief complet N'AIDE PAS (2.32, marginalement pire que scalaire). Propagation
+100% lisse partout. → **AUCUNE info donnée à l'ANN ne répare Perdigão.**
+
+**CONCLUSION DÉFINITIVE = le mur est l'ÉTAGE B (surrogate v2 frozen)**, pas l'étage A (ANN).
+Le surrogate sous-estime structurellement les crêtes car il n'a JAMAIS vu de terrain raide
+(Pop B pentes >25° exclue training, RANS k-ε diverge). L'ANN ne peut pas faire produire au
+surrogate un écoulement de crête qu'il ne sait pas calculer, quelle que soit l'entrée. Résultat
+scientifique NET : voie "correction via ANN" éliminée empiriquement (3 leviers convergents).
+
+**→ Pour réparer Perdigão (terrain alpin/microrelief), il FAUT un surrogate v3** entraîné sur
+terrain raide : re-simuler ~50 cas Pop B avec solveur non-divergent (Zephyr.jl LBM GPU ou OF LES),
+= Phase I conditionnelle du mandate. Hors cadre Phase H' (surrogate frozen).
+
+**MAIS — M_H'1a reste pleinement valide pour SON domaine** : été plaine/colline EU (NOAA-like),
+−32.5% MAE bat ERA5, direction améliorée, propagation lisse. Livrable paper/déploiement fire
+weather plaine. Perdigão = caveat OOD honnête (terrain raide hors-scope v2). ssrd/tcc store prêt
+(era5_radcloud_jja2023.zarr) mais inutilisé vu ce verdict.
+
+## PLAN CONDITIONNEL post-M_H'1f (CADUC — voir verdict M_H'1g ci-dessus : encodeur n'a pas marché)
+
+Si M_H'1f (features physiques scalaires, test JJA) réduit la sur-correction Perdigão → la
+version finale de l'ANN combine TROIS leviers, tous DANS le cadre Phase H' (surrogate reste
+FROZEN — PAS de surrogate v3) :
+
+1. **STL complet en entrée de l'ANN** (idée user, clarifiée) : passer le champ terrain complet
+   180×180 (déjà dans grid.zarr `terrain_2d 4×180×180`, ZÉRO nouveau data) à l'ANN via un
+   ENCODEUR CNN, au lieu des 8-12 descripteurs scalaires (mean_topo/std_topo/z0_eff).
+   - **Pourquoi puissant** : via le backprop end-to-end à travers le surrogate frozen, l'ANN
+     peut apprendre à COMPENSER le biais structurel du surrogate sur terrain raide (Pop B
+     exclue → surrogate sous-estime les crêtes). Il pré-amplifie l'ERA5 là où le relief est
+     raide. = réparer l'étage B (limite surrogate) VIA l'étage A (ANN), sans re-train surrogate.
+   - Descripteurs scalaires mean/std deviennent redondants (l'encodeur les extrait) ; features
+     physiques stabilité (gradient T, RH, q) RESTENT (pas dans le terrain).
+2. **Sources DEVINE = obs montagne** (réseau type Alpes/Pyrénées) : nécessaires pour CALIBRER
+   la compensation crête — sans exemples de terrain raide, l'ANN ne peut pas apprendre à
+   compenser. = SEUL nouveau data du plan.
+3. **4 saisons** (winter+MAM+JJA+SON) : couverture régimes.
+
+**Les 3 sont indissociables** : STL sans obs montagne = capacité sans exemples ; obs montagne
+sans STL = exemples sans perception fine. 
+
+**Caveats** :
+- L'ANN n'est plus "small" : encodeur CNN 180×180 → ~100k-1M params (vs ~10k MLP). S'éloigne du
+  DEVINE tiny front-end → RISQUE OVERFITTING (mêmes données, +capacité). Surveiller gap train↔val.
+- Reste FROZEN-compatible : on ne touche pas au surrogate. Architecture ANN seule change.
+
+**Gate** : ne rien lancer de ce plan tant que M_H'1f n'a pas montré que les features physiques
+aident sur Perdigão. Si M_H'1f NO-GO (features ne suffisent pas) → re-discuter : soit aller
+direct au STL-encodeur (plus de capacité), soit accepter que l'étage B (surrogate terrain-raide)
+soit le vrai plafond → Phase I / surrogate v3 (Zephyr.jl / LES).
+
 ## M_H'1a JJA TERMINÉ GREEN 2026-06-01 — Phase H' DEVINE-style validée à production-scale
 
 Job 22135584.aqua, walltime 11h15, exit 0, 8 epochs complets sur 12061 train + 3015 val pairings JJA 2023 (~214 stations FR/ES/PT held-out random val 20%).

@@ -11,8 +11,8 @@ Returns per __getitem__:
     terrain_2d      (2, 180, 180)        terrain_norm + z0_broadcast_norm
     era5_flat       (408,)               full ERA5 flat vector
     geo             (2, 180, 180, 24)    z_norm + agl_norm at AGL 0-100 m 24 levels
-    topo_features   (8,)                 mean_topo, std_topo, z0_eff, lat_norm,
-                                          hour_sin, hour_cos, month_sin, month_cos
+    topo_features   (8,) or (12,)        base topo vector, optionally with physical
+                                          stability features appended
     speed_obs       scalar (float32)     in m/s
     k_obs           scalar (int64)       index of nearest AGL level to height_obs
     meta            dict                 station_id, timestamp_iso, source
@@ -45,8 +45,128 @@ logger = logging.getLogger(__name__)
 NI, NJ = 180, 180
 I_CENTER, J_CENTER = NI // 2, NJ // 2  # (90, 90)
 
+PHYS_FEATURE_NORM = {
+    "grad_T_850_surf": {"mean": -8.0, "std": 6.0},    # K, lapse surface->850 hPa
+    "grad_T_500_850": {"mean": -20.0, "std": 8.0},    # K, 500-850 thickness lapse
+    "RH_surface": {"mean": 60.0, "std": 25.0},         # %
+    "q_surface": {"mean": 0.008, "std": 0.005},        # kg/kg
+}
+P_REF_SURFACE_HPA = 1013.25
+
 
 # ─── Topo features (8 components) ────────────────────────────────────────────
+
+
+def _normalise_phys_feature(name: str, raw_value: float | None) -> np.float32:
+    stats = PHYS_FEATURE_NORM[name]
+    mean = float(stats["mean"])
+    std = max(float(stats["std"]), 1e-12)
+    if raw_value is None or not np.isfinite(raw_value):
+        return np.float32(0.0)
+    value = (float(raw_value) - mean) / std
+    return np.float32(value if np.isfinite(value) else 0.0)
+
+
+def _read_zarr_array(g, key: str) -> np.ndarray | None:
+    try:
+        return np.asarray(g[key][:], dtype=np.float32)
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError):
+        return None
+
+
+def _centre_profile(g, key: str) -> np.ndarray | None:
+    arr = _read_zarr_array(g, key)
+    if arr is None or arr.ndim != 3 or arr.shape[0] <= 1 or arr.shape[1] <= 1:
+        return None
+    prof = np.asarray(arr[1, 1, :], dtype=np.float32).reshape(-1)
+    return prof if prof.size > 0 and np.all(np.isfinite(prof)) else None
+
+
+def _centre_scalar(g, key: str) -> float | None:
+    arr = _read_zarr_array(g, key)
+    if arr is None or arr.ndim != 2 or arr.shape[0] <= 1 or arr.shape[1] <= 1:
+        return None
+    value = float(arr[1, 1])
+    return value if np.isfinite(value) else None
+
+
+def _magnus_tetens_es_hpa(t_celsius: float | None) -> float | None:
+    if t_celsius is None or not np.isfinite(t_celsius):
+        return None
+    denom = 243.12 + float(t_celsius)
+    if abs(denom) < 1e-12:
+        return None
+    exponent = 17.62 * float(t_celsius) / denom
+    e_hpa = 6.112 * math.exp(max(min(exponent, 80.0), -80.0))
+    return e_hpa if np.isfinite(e_hpa) and e_hpa >= 0.0 else None
+
+
+def compute_phys_features(g, norm: dict) -> np.ndarray:
+    """Build the 4-dim normalised physical stability feature vector.
+
+    Reads centre values from an already-open grid.zarr group and computes raw:
+        [0] gradient_T_850_surf = T_centre[idx_850] - t2m_centre (K)
+        [1] gradient_T_500_850  = T_centre[idx_500] - T_centre[idx_850] (K)
+        [2] RH_surface          = 100 * es(d2m_C) / es(t2m_C), clipped to [0, 100] (%)
+        [3] q_surface           = 0.622 * es(d2m_C) / (p_ref - 0.378 * es(d2m_C)) (kg/kg)
+
+    `es` is Magnus-Tetens saturation vapour pressure in hPa:
+        6.112 * exp(17.62 * T_celsius / (243.12 + T_celsius)).
+
+    `q_surface` uses fixed p_ref = 1013.25 hPa because grid.zarr has no surface
+    pressure (`sp`) array. Values are normalised with PHYS_FEATURE_NORM. Missing
+    or invalid source arrays yield the affected feature's normalised mean (0.0).
+    The returned order is:
+        grad_T_850_surf_n, grad_T_500_850_n, RH_surface_n, q_surface_n.
+    """
+    _ = norm  # Kept for parity with other dataset feature builders.
+    levels = _read_zarr_array(g, "input/era5_pressure_levels")
+    t_prof = _centre_profile(g, "input/era5_3d/T")
+    t2m = _centre_scalar(g, "input/era5_surface/t2m")
+    d2m = _centre_scalar(g, "input/era5_surface/d2m")
+
+    grad_850_surf: float | None = None
+    grad_500_850: float | None = None
+    if levels is not None and t_prof is not None:
+        levels = np.asarray(levels, dtype=np.float32).reshape(-1)
+        n = min(levels.size, t_prof.size)
+        if n > 0:
+            levels = levels[:n]
+            t_prof = t_prof[:n]
+            idx_850 = int(np.argmin(np.abs(levels - 850.0)))
+            idx_500 = int(np.argmin(np.abs(levels - 500.0)))
+            t_850 = float(t_prof[idx_850])
+            t_500 = float(t_prof[idx_500])
+            if t2m is not None:
+                grad_850_surf = t_850 - t2m
+            grad_500_850 = t_500 - t_850
+
+    t2m_c = None if t2m is None else t2m - 273.15
+    d2m_c = None if d2m is None else d2m - 273.15
+    es_t2m = _magnus_tetens_es_hpa(t2m_c)
+    es_d2m = _magnus_tetens_es_hpa(d2m_c)
+
+    rh_surface: float | None = None
+    if es_t2m is not None and es_d2m is not None and es_t2m > 0.0:
+        rh_surface = float(np.clip(100.0 * es_d2m / es_t2m, 0.0, 100.0))
+
+    q_surface: float | None = None
+    if es_d2m is not None:
+        denom = P_REF_SURFACE_HPA - 0.378 * es_d2m
+        if denom > 1e-12:
+            q_surface = max(0.0, 0.622 * es_d2m / denom)
+
+    out = np.array(
+        [
+            _normalise_phys_feature("grad_T_850_surf", grad_850_surf),
+            _normalise_phys_feature("grad_T_500_850", grad_500_850),
+            _normalise_phys_feature("RH_surface", rh_surface),
+            _normalise_phys_feature("q_surface", q_surface),
+        ],
+        dtype=np.float32,
+    )
+    out[~np.isfinite(out)] = 0.0
+    return out
 
 
 def compute_topo_features(
@@ -56,10 +176,11 @@ def compute_topo_features(
     timestamp_iso: str,
     norm: dict,
     patch_half: int = 15,
+    phys_features: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Build the 8-dim topo feature vector for one pairing.
+    """Build the topo feature vector for one pairing.
 
-    Components (all roughly O(1) after normalisation):
+    Base 8 components (all roughly O(1) after normalisation):
         [0] mean_topo_local      mean elevation in 30×30 voxels around centre (m), scaled
         [1] std_topo_local       std of elevation in same patch (m), scaled
         [2] z0_eff_norm          z0_eff already normalised by z0_scale
@@ -68,6 +189,13 @@ def compute_topo_features(
         [5] hour_cos             cos(2π·hour/24)
         [6] month_sin            sin(2π·month/12)
         [7] month_cos            cos(2π·month/12)
+
+    If `phys_features` is provided, it must contain 4 already-normalised values
+    appended after the base 8 in this exact 12-dim order:
+        [8]  grad_T_850_surf_n
+        [9]  grad_T_500_850_n
+        [10] RH_surface_n
+        [11] q_surface_n
 
     No `distance_to_coast`: omitted as the M_H'0 brief allows engineer call —
     we keep the feature vector tight and physically meaningful for smoke. It
@@ -89,7 +217,7 @@ def compute_topo_features(
     hour = dt.hour
     month = dt.month
 
-    return np.array(
+    base = np.array(
         [
             mean_topo / max(norm.get("terrain_scale", 500.0), 1.0),
             std_topo / max(norm.get("terrain_scale", 500.0), 1.0),
@@ -102,6 +230,13 @@ def compute_topo_features(
         ],
         dtype=np.float32,
     )
+    if phys_features is None:
+        return base
+    phys = np.asarray(phys_features, dtype=np.float32).reshape(-1)
+    if phys.size != 4:
+        raise ValueError(f"phys_features must have length 4, got {phys.size}")
+    phys = np.where(np.isfinite(phys), phys, np.float32(0.0)).astype(np.float32)
+    return np.concatenate([base, phys]).astype(np.float32)
 
 
 # ─── Grid.zarr → normalised tensors (same as WindV2DatasetViT) ───────────────
@@ -215,8 +350,10 @@ class ObsCenteredDataset(Dataset):
         n_workers: int = 4,
         overwrite_cache: bool = False,
         require_cached: bool = False,
+        enable_phys_features: bool = False,
     ) -> None:
         self.norm = {**DEFAULT_NORM, **(norm or {})}
+        self.enable_phys_features = bool(enable_phys_features)
         self.target_agl_levels = parse_agl_levels(target_agl_levels)
         if self.target_agl_levels is None:
             raise ValueError("target_agl_levels must resolve to a non-None array")
@@ -366,9 +503,16 @@ class ObsCenteredDataset(Dataset):
         # Reload terrain_raw for topo_features (cheap, same zarr)
         g = zarr.open_group(str(p.grid_zarr_path), mode="r")
         terrain_raw = np.asarray(g["input/terrain"][:], dtype=np.float32)
-        topo = compute_topo_features(
-            terrain_raw, z0_eff_raw, lat_raw, p.timestamp_iso, self.norm,
-        )
+        if self.enable_phys_features:
+            phys = compute_phys_features(g, self.norm)
+            topo = compute_topo_features(
+                terrain_raw, z0_eff_raw, lat_raw, p.timestamp_iso, self.norm,
+                phys_features=phys,
+            )
+        else:
+            topo = compute_topo_features(
+                terrain_raw, z0_eff_raw, lat_raw, p.timestamp_iso, self.norm,
+            )
 
         return (
             torch.from_numpy(terrain_2d),

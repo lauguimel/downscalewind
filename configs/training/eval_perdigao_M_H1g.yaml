@@ -1,0 +1,45 @@
+# M_H'1c — Perdigão IOP intra-patch propagation audit config.
+# Clone of devine_style_full_M_H1.yaml with era5_store pointed at the
+# 2017 IOP store (NOT the JJA 2023 training store) and a DEDICATED cache.
+# Used ONLY by audit_devine_perdigao.py via configs/hpc/eval_perdigao.pbs.
+# Perdigão is the project's IMMUTABLE test set → READ-ONLY, never trained on.
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+# pairings_parquet is unused by the audit script (it builds Perdigão pairings
+# directly from perdigao_obs.zarr); kept for schema parity / introspection.
+pairings_parquet: /home/maitreje/dsw/data/inference/noaa_jja2023_v2.parquet
+era5_store: /home/maitreje/dsw/data/raw/era5_europe_spring2017_v2.zarr   # IOP 2017, Δt=6h, d2m present
+dem: /home/maitreje/dsw/data/raw/srtm_tiles/
+worldcover: /home/maitreje/dsw/data/raw/worldcover_esa/
+
+# ── Frozen surrogate v2 ──────────────────────────────────────────────────────
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt
+surrogate_preset: base
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+target_agl_levels: agl_0_100_24
+n_pressure_levels: 10
+geo_channels: 2
+
+# ── ANN architecture (must match M_H'1a checkpoint) ──────────────────────────
+topo_dim: 12
+enable_phys_features: true
+hidden_units: [50, 10]
+dropout: 0.25
+use_terrain_encoder: true
+terrain_latent_dim: 48
+terrain_in_channels: 4
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+seed: 42
+batch_size: 8
+num_workers: 2
+n_prep_workers: 8
+max_era5_delta_h: 3.5
+overwrite_cache: false
+device: cuda
+
+# ── I/O ──────────────────────────────────────────────────────────────────────
+# output_dir only used to default the ANN checkpoint path when --ann-checkpoint
+# is omitted; the PBS passes --ann-checkpoint explicitly.
+output_dir: /home/maitreje/dsw/data/models/surrogate_v2_devine_M_H1_jja
+cache_dir: /scratch/maitreje/dsw/phase_H_prime_perdigao_cache

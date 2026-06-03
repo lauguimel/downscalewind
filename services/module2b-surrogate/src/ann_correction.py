@@ -35,6 +35,8 @@ class ANNCorrection(nn.Module):
                                        + 4 surf × 3×3 + 10 plev + lat + z0)
         topo_features: (B, F)      — local topo + season + diurnal features
                                       (default F=8, see dataset_v2_obs_centered.py)
+        terrain: (B, C, 180, 180)  — optional full terrain tensor, used only
+                                      when use_terrain_encoder=True
 
     Output:
         era5_corrected: (B, era5_dim) = era5_flat + delta
@@ -47,11 +49,38 @@ class ANNCorrection(nn.Module):
         hidden_units: tuple[int, int] = (50, 10),
         dropout: float = 0.25,
         zero_init_output: bool = True,
+        use_terrain_encoder: bool = False,
+        terrain_latent_dim: int = 48,
+        terrain_in_channels: int = 4,
     ) -> None:
         super().__init__()
         self.era5_dim = era5_dim
         self.topo_dim = topo_dim
+        self.use_terrain_encoder = use_terrain_encoder
+        self.terrain_latent_dim = terrain_latent_dim
+        self.terrain_in_channels = terrain_in_channels
+
         in_dim = era5_dim + topo_dim
+        if use_terrain_encoder:
+            self.terrain_encoder = nn.Sequential(
+                nn.Conv2d(terrain_in_channels, 16, kernel_size=3, stride=2, padding=1),
+                nn.GroupNorm(4, 16),
+                nn.SELU(),
+                nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+                nn.GroupNorm(8, 32),
+                nn.SELU(),
+                nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+                nn.GroupNorm(8, 64),
+                nn.SELU(),
+                nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=1),
+                nn.GroupNorm(8, 64),
+                nn.SELU(),
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Linear(64, terrain_latent_dim),
+                nn.SELU(),
+            )
+            in_dim += terrain_latent_dim
 
         layers: list[nn.Module] = []
         prev = in_dim
@@ -66,7 +95,15 @@ class ANNCorrection(nn.Module):
         self._init_weights(zero_init_output=zero_init_output)
 
     def _init_weights(self, zero_init_output: bool) -> None:
-        for m in self.mlp:
+        if self.use_terrain_encoder:
+            for m in self.terrain_encoder.modules():
+                if isinstance(m, (nn.Conv2d, nn.Linear)):
+                    nn.init.xavier_uniform_(m.weight)
+                    nn.init.zeros_(m.bias)
+                elif isinstance(m, nn.GroupNorm):
+                    nn.init.ones_(m.weight)
+                    nn.init.zeros_(m.bias)
+        for m in self.mlp.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 nn.init.zeros_(m.bias)
@@ -79,6 +116,7 @@ class ANNCorrection(nn.Module):
         self,
         era5_flat: torch.Tensor,
         topo_features: torch.Tensor,
+        terrain: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if era5_flat.dim() != 2 or topo_features.dim() != 2:
             raise ValueError(
@@ -93,7 +131,28 @@ class ANNCorrection(nn.Module):
             raise ValueError(
                 f"topo_features last dim {topo_features.shape[-1]} != {self.topo_dim}"
             )
-        x = torch.cat([era5_flat, topo_features], dim=-1)
+        parts = [era5_flat, topo_features]
+        if self.use_terrain_encoder:
+            if terrain is None:
+                raise ValueError("terrain is required when use_terrain_encoder=True")
+            if terrain.dim() != 4:
+                raise ValueError(
+                    f"Expected terrain shape (B, C, 180, 180), got {terrain.shape}"
+                )
+            if terrain.shape[0] != era5_flat.shape[0]:
+                raise ValueError(
+                    f"terrain batch {terrain.shape[0]} != era5 batch {era5_flat.shape[0]}"
+                )
+            if terrain.shape[1] != self.terrain_in_channels:
+                raise ValueError(
+                    f"terrain channels {terrain.shape[1]} != {self.terrain_in_channels}"
+                )
+            if terrain.shape[-2:] != (180, 180):
+                raise ValueError(
+                    f"terrain spatial shape {terrain.shape[-2:]} != (180, 180)"
+                )
+            parts.append(self.terrain_encoder(terrain))
+        x = torch.cat(parts, dim=-1)
         delta = self.mlp(x)
         return era5_flat + delta  # residual skip connection
 

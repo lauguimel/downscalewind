@@ -64,6 +64,77 @@ def build_agl_levels(
 
 # ─── DEM (Copernicus GLO-30) crop + resample ────────────────────────────────
 
+def _resolve_dem_path(dem: Path, lat: float, lon: float) -> Path:
+    """Resolve DEM path: pass-through for single file, or pick the Copernicus
+    DSM tile matching (lat, lon) when `dem` is a directory of tiles.
+
+    Tile naming convention: `Copernicus_DSM_COG_10_N<NN>_00_<E|W><EEE>_00_DEM.tif`
+    where N<NN> is floor(lat), and longitude uses E for >=0, W for <0 with
+    abs(floor(lon)). Tiles can be the raw .tif files (the dir is searched).
+    """
+    p = Path(dem)
+    if p.is_file():
+        return p
+    if not p.is_dir():
+        raise FileNotFoundError(f"DEM not found: {dem}")
+    lat_dir = "N" if lat >= 0 else "S"
+    lat_idx = int(math.floor(lat)) if lat >= 0 else int(math.floor(-lat))
+    lon_dir = "E" if lon >= 0 else "W"
+    lon_idx = int(math.floor(lon)) if lon >= 0 else int(math.floor(-lon))
+    name = f"Copernicus_DSM_COG_10_{lat_dir}{lat_idx:02d}_00_{lon_dir}{lon_idx:03d}_00_DEM.tif"
+    candidate = p / name
+    if candidate.is_file():
+        return candidate
+    candidate_nested = p / "srtm_tiles" / name
+    if candidate_nested.is_file():
+        return candidate_nested
+    raise FileNotFoundError(
+        f"No Copernicus DSM tile for (lat={lat:.2f}, lon={lon:.2f}); "
+        f"expected {name} under {p}"
+    )
+
+
+def _resolve_wc_path(wc: Path, lat: float, lon: float) -> Path:
+    """Resolve ESA WorldCover path: pass-through for single file, or pick the
+    3°×3° tile matching (lat, lon) when `wc` is a directory of WC tiles.
+
+    Tile naming convention (ESA WC v200):
+        ESA_WorldCover_10m_2021_v200_<LAT><LON>_Map.tif
+    where <LAT> = N<NN>|S<NN> and <LON> = E<EEE>|W<EEE> are the
+    LOWER-LEFT corner snapped to multiples of 3°. Example: (lat=38.77,
+    lon=-9.13) → N36W012 (covers lat ∈ [36, 39), lon ∈ [-12, -9)).
+
+    Snapping rule (matches ingest_worldcover_esa.enumerate_tiles):
+        lat_ll = floor(lat / 3) * 3
+        lon_ll = floor(lon / 3) * 3
+    Both formulas use Python's `math.floor` semantics so negative values
+    round towards -∞ (e.g. lon=-9.13 → lon_ll = floor(-3.04) * 3 = -12).
+    """
+    p = Path(wc)
+    if p.is_file():
+        return p
+    if not p.is_dir():
+        raise FileNotFoundError(f"WorldCover path not found: {wc}")
+    lat_ll = int(math.floor(lat / 3.0) * 3)
+    lon_ll = int(math.floor(lon / 3.0) * 3)
+    lat_dir = "N" if lat_ll >= 0 else "S"
+    lat_idx = lat_ll if lat_ll >= 0 else -lat_ll
+    lon_dir = "E" if lon_ll >= 0 else "W"
+    lon_idx = lon_ll if lon_ll >= 0 else -lon_ll
+    name = f"ESA_WorldCover_10m_2021_v200_{lat_dir}{lat_idx:02d}{lon_dir}{lon_idx:03d}_Map.tif"
+    candidate = p / name
+    if candidate.is_file():
+        return candidate
+    # Allow a nested `worldcover_esa/` subdirectory (mirrors srtm_tiles/ layout).
+    candidate_nested = p / "worldcover_esa" / name
+    if candidate_nested.is_file():
+        return candidate_nested
+    raise FileNotFoundError(
+        f"No ESA WorldCover tile for (lat={lat:.2f}, lon={lon:.2f}); "
+        f"expected {name} under {p}"
+    )
+
+
 def extract_terrain_from_dem(
     dem_tif: Path, lat: float, lon: float,
     half_extent_m: float = HALF_EXTENT_M, ni: int = NI, nj: int = NJ,
@@ -74,7 +145,11 @@ def extract_terrain_from_dem(
     Convention: i = E-W (lon-aligned), j = N-S (lat-aligned). Matches
     export_to_grid_zarr_v2 (x increases with longitude eastward, y with latitude
     northward).
+
+    `dem_tif` accepts a single GeoTIFF/VRT or a directory of Copernicus DSM
+    tiles (the matching 1°×1° tile is auto-selected per (lat, lon)).
     """
+    dem_tif = _resolve_dem_path(Path(dem_tif), lat, lon)
     import rasterio
     from rasterio.warp import Resampling, calculate_default_transform, reproject
     from pyproj import Transformer
@@ -128,16 +203,27 @@ def compute_z0_eff_from_wc(
     wc_tif: Path, lat: float, lon: float,
     patch_radius_m: float = 3000.0,
 ) -> tuple[float, dict[int, int]]:
-    """Geometric mean of z0 over a circular patch around the site.
+    """Geometric mean of z0 over a square patch around the site.
+
+    `wc_tif` accepts a single GeoTIFF or a directory of ESA WorldCover tiles
+    (the matching 3°×3° tile is auto-selected per (lat, lon) by
+    `_resolve_wc_path`).
 
     Returns (z0_eff [m], class_counts).
     """
     import rasterio
     from rasterio.transform import rowcol
 
-    if not Path(wc_tif).exists():
-        logger.warning("WC raster missing: %s — falling back to z0_eff=0.05", wc_tif)
-        return 0.05, {}
+    wc_path = Path(wc_tif)
+    if not wc_path.exists():
+        logger.warning("WC raster missing: %s — falling back to z0_eff=%.4f",
+                       wc_tif, WC_Z0_DEFAULT)
+        return WC_Z0_DEFAULT, {}
+    try:
+        wc_tif = _resolve_wc_path(wc_path, lat, lon)
+    except FileNotFoundError as exc:
+        logger.warning("%s — falling back to z0_eff=%.4f", exc, WC_Z0_DEFAULT)
+        return WC_Z0_DEFAULT, {}
 
     # Convert metric patch radius to degrees (≈ flat-earth)
     dlat = patch_radius_m / 111_000.0
@@ -339,3 +425,44 @@ def write_input_grid_zarr(
         "source": "extract_v2_input_at_coords",
     })
     return out_path
+
+
+def radcloud_at(
+    lat: float,
+    lon: float,
+    timestamp_iso: str,
+    store: Path | str,
+    *,
+    max_delta_seconds: float = 3 * 3600 + 1,
+) -> tuple[float, float]:
+    """Return (ssrd_Jm2, tcc) at the nearest grid cell + nearest time.
+
+    ssrd is J/m2 accumulated over the preceding hour; divide by 3600 for W/m2.
+    tcc is dimensionless [0,1]. NaN source values are returned as 0.0.
+    Raises ValueError if the nearest time is farther than max_delta_seconds.
+    """
+    import zarr
+
+    g = zarr.open_group(str(store), mode="r")
+    times = np.asarray(g["coords/time"][:], dtype=np.int64)
+    target_ns = np.datetime64(timestamp_iso).astype("datetime64[ns]").astype(np.int64)
+    idx = int(np.argmin(np.abs(times - target_ns)))
+    delta = abs(int(times[idx]) - int(target_ns)) / 1e9
+    if delta > max_delta_seconds:
+        raise ValueError(
+            f"radcloud store nearest time {delta/3600:.1f} h away from "
+            f"{timestamp_iso} (max allowed {max_delta_seconds/3600:.1f} h)"
+        )
+
+    lats = np.asarray(g["coords/lat"][:], dtype=np.float32)
+    lons = np.asarray(g["coords/lon"][:], dtype=np.float32)
+    i = int(np.argmin(np.abs(lats - lat)))
+    j = int(np.argmin(np.abs(lons - lon)))
+
+    ssrd = float(g["ssrd"][idx, i, j])
+    tcc = float(g["tcc"][idx, i, j])
+    if not np.isfinite(ssrd):
+        ssrd = 0.0
+    if not np.isfinite(tcc):
+        tcc = 0.0
+    return ssrd, tcc

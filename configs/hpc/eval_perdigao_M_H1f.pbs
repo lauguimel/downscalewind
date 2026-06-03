@@ -1,0 +1,80 @@
+#!/bin/bash -l
+#PBS -N eval_perd_h1f
+#PBS -l select=1:ncpus=8:mem=32GB:ngpus=1:gpu_id=A100
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -m n
+
+cd "$PBS_O_WORKDIR"
+
+BASE="$HOME/dsw"
+# M_H'1f re-eval: phys-feature ANN (topo_dim 12) on Perdigão IOP 2017.
+CFG="$BASE/configs/training/eval_perdigao_M_H1c.yaml"
+ANN="$BASE/data/models/surrogate_v2_devine_M_H1f_physfeat/best.pt"
+SURR="$BASE/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt"
+OBS_ZARR="$BASE/data/raw/perdigao_obs.zarr"
+OUT="$BASE/data/validation/phase_H_prime_perdigao_M_H1f"
+CACHE="/scratch/maitreje/dsw/phase_H_prime_perdigao_cache"
+
+mkdir -p "$OUT"
+mkdir -p "$CACHE"
+[ -f "$CFG" ] || { echo "MISSING CFG:$CFG"; exit 1; }
+[ -f "$ANN" ] || { echo "MISSING ANN:$ANN"; exit 1; }
+[ -f "$SURR" ] || { echo "MISSING surrogate best.pt"; exit 1; }
+[ -d "$OBS_ZARR" ] || { echo "MISSING OBS_ZARR:$OBS_ZARR"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+export OMP_NUM_THREADS=2
+export MKL_NUM_THREADS=2
+export OPENBLAS_NUM_THREADS=2
+
+cd "$BASE"
+echo "=== M_H'1f Perdigao re-eval (phys-features) dry-run CPU ==="
+python -u services/validation/audit_devine_perdigao.py \
+  --config "$CFG" \
+  --ann-checkpoint "$ANN" \
+  --obs-zarr "$OBS_ZARR" \
+  --cache-dir "$CACHE" \
+  --out-dir "$OUT" \
+  --device cpu \
+  --dry-run \
+  --max-stations 1 \
+  --time-subsample 1 \
+  --batch-size 1 \
+  --num-workers 0 \
+  --n-prep-workers 1 2>&1 | tee "$OUT/eval_perdigao_dryrun.log"
+RC_DRY=${PIPESTATUS[0]}
+echo "RC_DRY=$RC_DRY"
+[ "$RC_DRY" -eq 0 ] || exit "$RC_DRY"
+
+echo "=== M_H'1f Perdigao re-eval full CUDA evaluation ==="
+nvidia-smi -L
+python -u services/validation/audit_devine_perdigao.py \
+  --config "$CFG" \
+  --ann-checkpoint "$ANN" \
+  --obs-zarr "$OBS_ZARR" \
+  --cache-dir "$CACHE" \
+  --out-dir "$OUT" \
+  --time-subsample 8 \
+  --device cuda 2>&1 | tee "$OUT/eval_perdigao.log"
+RC_EVAL=${PIPESTATUS[0]}
+echo "RC_EVAL=$RC_EVAL"
+[ "$RC_EVAL" -eq 0 ] || exit "$RC_EVAL"
+
+python - <<'PY'
+import json
+import pandas as pd
+base = "data/validation/phase_H_prime_perdigao_M_H1f"
+df = pd.read_csv(f"{base}/perdigao_propagation.csv")
+s = json.load(open(f"{base}/perdigao_summary.json"))
+print("centre_mae corrected", s["centre_mae"]["corrected"],
+      "raw", s["centre_mae"]["raw"],
+      "| pct_smooth", s["propagation"]["pct_smooth"])
+print("EXIT CRITERION PASS", len(df), "rows")
+PY

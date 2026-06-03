@@ -231,7 +231,7 @@ def _step(
     k_obs = k_obs.to(device, non_blocking=True)
 
     if use_ann:
-        era5_corrected = ann(era5, topo)
+        era5_corrected = ann(era5, topo, terrain=terrain)
     else:
         era5_corrected = era5
 
@@ -310,6 +310,7 @@ def main():
         seed=int(cfg.get("seed", 42)),
         n_workers=int(cfg.get("n_prep_workers", 4)),
         overwrite_cache=bool(cfg.get("overwrite_cache", False)),
+        enable_phys_features=bool(cfg.get("enable_phys_features", False)),
     )
     train_ds = ObsCenteredDataset(
         pairings,
@@ -354,6 +355,9 @@ def main():
         hidden_units=tuple(cfg.get("hidden_units", [50, 10])),
         dropout=float(cfg.get("dropout", 0.25)),
         zero_init_output=True,
+        use_terrain_encoder=bool(cfg.get("use_terrain_encoder", False)),
+        terrain_latent_dim=int(cfg.get("terrain_latent_dim", 48)),
+        terrain_in_channels=int(cfg.get("terrain_in_channels", 4)),
     ).to(device)
     n_ann = sum(p.numel() for p in ann.parameters())
     logger.info("ANN params: %d (%.1f k)", n_ann, n_ann / 1e3)

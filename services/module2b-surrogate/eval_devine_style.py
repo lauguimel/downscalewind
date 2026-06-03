@@ -72,7 +72,7 @@ def _eval_loader(
             topo = topo.to(device, non_blocking=True)
             speed_obs = speed_obs.to(device, non_blocking=True)
             k_obs = k_obs.to(device, non_blocking=True)
-            era5_in = ann(era5, topo) if use_ann else era5
+            era5_in = ann(era5, topo, terrain=terrain) if use_ann else era5
             pred = surrogate(terrain, era5_in, geo)
             u_res, v_res = _denorm_uv_at_center(pred, norm, k_obs)
             u10_b, v10_b = _era5_baseline_uv_at_center(era5_in, norm, era5_layout)
@@ -142,6 +142,7 @@ def main():
         max_era5_delta_h=float(cfg.get("max_era5_delta_h", 3.5)),
         seed=int(cfg.get("seed", 42)),
         n_workers=int(cfg.get("n_prep_workers", 4)),
+        enable_phys_features=bool(cfg.get("enable_phys_features", False)),
     )
     bs = int(cfg.get("batch_size", 8))
     num_workers = int(cfg.get("num_workers", 2))
@@ -166,6 +167,9 @@ def main():
         hidden_units=tuple(cfg.get("hidden_units", [50, 10])),
         dropout=float(cfg.get("dropout", 0.25)),
         zero_init_output=True,
+        use_terrain_encoder=bool(cfg.get("use_terrain_encoder", False)),
+        terrain_latent_dim=int(cfg.get("terrain_latent_dim", 48)),
+        terrain_in_channels=int(cfg.get("terrain_in_channels", 4)),
     ).to(device)
     ck = torch.load(str(args.ann_checkpoint), map_location=device, weights_only=False)
     ann.load_state_dict(ck["model"])

@@ -211,6 +211,7 @@ def _build_dataset(cfg: dict, norm: dict, station_ids: list[str], *, pairings_pa
         n_workers=n_prep_workers,
         overwrite_cache=False,
         require_cached=True,
+        enable_phys_features=bool(cfg.get("enable_phys_features", False)),
     )
 
 
@@ -221,6 +222,9 @@ def _load_ann(cfg: dict, checkpoint: Path, era5_dim: int, device: str) -> ANNCor
         hidden_units=tuple(cfg.get("hidden_units", [50, 10])),
         dropout=float(cfg.get("dropout", 0.25)),
         zero_init_output=True,
+        use_terrain_encoder=bool(cfg.get("use_terrain_encoder", False)),
+        terrain_latent_dim=int(cfg.get("terrain_latent_dim", 48)),
+        terrain_in_channels=int(cfg.get("terrain_in_channels", 4)),
     ).to(device)
     ck = torch.load(str(checkpoint), map_location=device, weights_only=False)
     ann.load_state_dict(ck["model"])
@@ -247,7 +251,7 @@ def _forward_rows(ann: torch.nn.Module, surrogate: torch.nn.Module, loader: Data
             speed_obs = speed_obs.to(device, non_blocking=True)
             k_obs = k_obs.to(device, non_blocking=True)
 
-            era5_corr = ann(era5, topo)
+            era5_corr = ann(era5, topo, terrain=terrain)
             pred_corr = surrogate(terrain, era5_corr, geo)
             u_res_c, v_res_c = _denorm_uv_at_center(pred_corr, norm, k_obs)
             u10_c, v10_c = _era5_baseline_uv_at_center(era5_corr, norm, era5_layout)
