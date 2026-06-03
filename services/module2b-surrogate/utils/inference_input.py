@@ -191,6 +191,55 @@ def extract_terrain_from_dem(
     return terrain
 
 
+def terrain_slope_deg(
+    terrain: np.ndarray,
+    dx_m: float = DX,
+    window_m: float = 1000.0,
+) -> float:
+    """Mean terrain slope (degrees) over a central window of the DEM patch.
+
+    `terrain` is the (NI, NJ) patch from `extract_terrain_from_dem` (cell size
+    `dx_m` ≈ 33.3 m). Slope per cell = arctan(|∇z|) where the gradient magnitude
+    is `sqrt((dz/dx)^2 + (dz/dy)^2)` from `np.gradient` at `dx_m` spacing.
+    Aggregated to ONE scalar = mean slope over a central ~`window_m` window
+    (default 1 km), which isolates the on-site steepness from domain edges.
+
+    Returns NaN if the patch is empty or all-NaN.
+    """
+    terrain = np.asarray(terrain, dtype=np.float64)
+    if terrain.ndim != 2 or terrain.size == 0 or not np.isfinite(terrain).any():
+        return float("nan")
+    gy, gx = np.gradient(terrain, dx_m)
+    slope = np.degrees(np.arctan(np.hypot(gx, gy)))
+
+    ni, nj = terrain.shape
+    half = max(1, int(round(0.5 * window_m / dx_m)))
+    ci, cj = ni // 2, nj // 2
+    i0, i1 = max(0, ci - half), min(ni, ci + half)
+    j0, j1 = max(0, cj - half), min(nj, cj + half)
+    central = slope[i0:i1, j0:j1]
+    central = central[np.isfinite(central)]
+    if central.size == 0:
+        return float("nan")
+    return float(np.mean(central))
+
+
+def slope_at_dem(
+    dem: Path,
+    lat: float,
+    lon: float,
+    *,
+    window_m: float = 1000.0,
+) -> float:
+    """Convenience: read the DEM patch at (lat, lon) and return mean slope (deg).
+
+    `dem` may be a single GeoTIFF or a directory of Copernicus DSM tiles
+    (auto-resolved per coordinate by `extract_terrain_from_dem`).
+    """
+    terrain = extract_terrain_from_dem(Path(dem), lat, lon)
+    return terrain_slope_deg(terrain, dx_m=DX, window_m=window_m)
+
+
 def build_native_z(terrain: np.ndarray) -> np.ndarray:
     """Build coords/z (NI, NJ, NK) = terrain[i,j] + agl_levels[k]."""
     agl = build_agl_levels()

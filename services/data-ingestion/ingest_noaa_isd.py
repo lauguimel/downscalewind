@@ -16,9 +16,11 @@ from shared.logging_config import get_logger
 from shared.obs_io import DATA_VARS, append_obs_data, create_obs_store, read_obs
 from utils.isd_parser import (
     NoaaDownloadError,
+    fetch_isd_global_hourly_year,
     fetch_isd_history,
     fetch_isd_lite_year,
     filter_stations,
+    parse_isd_global_hourly_csv,
     parse_isd_lite_gz,
 )
 
@@ -26,6 +28,11 @@ log = get_logger("ingest_noaa_isd")
 
 SOURCE = "noaa_isd"
 HEIGHTS = np.array([10.0], dtype=np.float32)
+# Default country set: original FR/ES/PT plus the Alps (CH/AT/IT) for
+# steep-terrain obs densification (mission M_I1). Pyrenees are already in FR/ES.
+DEFAULT_COUNTRIES = "FR,ES,PT,CH,AT,IT"
+# ISO codes accepted in the unified OBS schema (NOAA CTRY mapped to ISO upstream).
+SUPPORTED_ISO = ("FR", "ES", "PT", "CH", "AT", "IT")
 SMOKE_PER_COUNTRY = 3
 SMOKE_MAX_STATIONS = 9
 PREFERRED_SMOKE = {
@@ -37,15 +44,38 @@ PREFERRED_SMOKE = {
 
 @click.command()
 @click.option("--out", "out_path", required=True, type=click.Path(path_type=Path))
-@click.option("--countries", required=True, help="Comma-separated ISO country codes: FR,ES,PT")
+@click.option(
+    "--countries",
+    default=DEFAULT_COUNTRIES,
+    show_default=True,
+    help="Comma-separated ISO country codes (FR,ES,PT,CH,AT,IT). "
+    "Defaults to the 6-country set (FR/ES/PT plus the Alps CH/AT/IT).",
+)
 @click.option("--start", required=True, help="Start month YYYY-MM")
 @click.option("--end", required=True, help="End month YYYY-MM, inclusive")
 @click.option("--smoke", is_flag=True, help="Cap to about 8 active stations distributed by country")
 @click.option("--cache-dir", default="tmp/noaa_cache", type=click.Path(path_type=Path))
-def main(out_path: Path, countries: str, start: str, end: str, smoke: bool, cache_dir: Path) -> None:
+@click.option(
+    "--bbox",
+    default=None,
+    help="Optional geographic filter 'S,W,N,E' in degrees applied after the "
+    "country filter. Use to bound the Alps (e.g. '43,5,49,17') and drop "
+    "dirty inventory rows (NOAA CTRY=AU also tags some Australian stations).",
+)
+@click.option(
+    "--source",
+    default="ncei",
+    type=click.Choice(["ncei", "aws"]),
+    show_default=True,
+    help="Observation source: 'ncei' = ISD-Lite via ncei.noaa.gov/pub/data; "
+    "'aws' = Global-Hourly CSV via the noaa-global-hourly-pds S3 mirror "
+    "(use when NCEI pub/data is down).",
+)
+def main(out_path: Path, countries: str, start: str, end: str, smoke: bool, cache_dir: Path, bbox: str | None, source: str) -> None:
     start_dt, end_exclusive = _month_window(start, end)
     end_inclusive = end_exclusive - pd.Timedelta(nanoseconds=1)
     country_order = _parse_countries(countries)
+    bbox_bounds = _parse_bbox(bbox)
     time_index = pd.date_range(start_dt, end_exclusive, freq="h", inclusive="left")
     if len(time_index) == 0:
         raise click.ClickException("Requested period has no hourly timestamps")
@@ -58,6 +88,10 @@ def main(out_path: Path, countries: str, start: str, end: str, smoke: bool, cach
     stations = filter_stations(history, country_order, start_dt, end_inclusive)
     if stations.empty:
         raise click.ClickException("No active NOAA ISD stations matched the selected countries and period")
+    if bbox_bounds is not None:
+        stations = _apply_bbox(stations, bbox_bounds)
+        if stations.empty:
+            raise click.ClickException(f"No stations remain after bbox filter {bbox_bounds}")
     if smoke:
         stations = _select_smoke_stations(stations, country_order)
 
@@ -67,7 +101,7 @@ def main(out_path: Path, countries: str, start: str, end: str, smoke: bool, cach
         f"end={end_inclusive:%Y-%m-%d} smoke={smoke} candidates={len(stations)}"
     )
 
-    usable_stations, frames, caveats = _load_station_frames(stations, start_dt, end_exclusive, cache_dir)
+    usable_stations, frames, caveats = _load_station_frames(stations, start_dt, end_exclusive, cache_dir, source)
     if usable_stations.empty:
         raise click.ClickException("No selected NOAA ISD station yielded usable wind observations")
 
@@ -77,20 +111,54 @@ def main(out_path: Path, countries: str, start: str, end: str, smoke: bool, cach
 
 
 def _parse_countries(countries: str) -> list[str]:
-    aliases = {"FR": "FR", "ES": "ES", "PT": "PT", "SP": "ES", "PO": "PT"}
+    # Accept both ISO and NOAA CTRY aliases; normalize to ISO. SZ=CH (Swiss),
+    # AU=AT (Austria), IT=IT (Italy) added for the Alps (mission M_I1).
+    aliases = {
+        "FR": "FR", "ES": "ES", "PT": "PT", "SP": "ES", "PO": "PT",
+        "CH": "CH", "SZ": "CH", "AT": "AT", "AU": "AT", "IT": "IT",
+    }
     parsed: list[str] = []
     for raw in countries.split(","):
         code = raw.strip().upper()
         if not code:
             continue
         if code not in aliases:
-            raise click.ClickException(f"Unsupported country code {raw!r}; expected FR, ES, PT")
+            raise click.ClickException(
+                f"Unsupported country code {raw!r}; expected one of {', '.join(SUPPORTED_ISO)}"
+            )
         iso = aliases[code]
         if iso not in parsed:
             parsed.append(iso)
     if not parsed:
-        raise click.ClickException("--countries must include at least one of FR, ES, PT")
+        raise click.ClickException(f"--countries must include at least one of {', '.join(SUPPORTED_ISO)}")
     return parsed
+
+
+def _parse_bbox(bbox: str | None) -> tuple[float, float, float, float] | None:
+    if bbox is None:
+        return None
+    parts = [p.strip() for p in str(bbox).split(",")]
+    if len(parts) != 4:
+        raise click.ClickException("--bbox must be 'S,W,N,E' (4 comma-separated degrees)")
+    try:
+        south, west, north, east = (float(p) for p in parts)
+    except ValueError as exc:
+        raise click.ClickException("--bbox values must be numeric") from exc
+    if south >= north or west >= east:
+        raise click.ClickException("--bbox requires S<N and W<E")
+    return south, west, north, east
+
+
+def _apply_bbox(stations: pd.DataFrame, bounds: tuple[float, float, float, float]) -> pd.DataFrame:
+    south, west, north, east = bounds
+    lat = pd.to_numeric(stations["lat"], errors="coerce")
+    lon = pd.to_numeric(stations["lon"], errors="coerce")
+    elev = pd.to_numeric(stations["elev"], errors="coerce")
+    mask = (lat >= south) & (lat <= north) & (lon >= west) & (lon <= east)
+    # Drop the NOAA missing-elevation sentinel (-999.9) — useless for the
+    # DEM/slope step and a marker of low-quality inventory rows.
+    mask &= elev > -500.0
+    return stations.loc[mask].reset_index(drop=True)
 
 
 def _month_window(start: str, end: str) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -113,7 +181,8 @@ def _add_month(ts: pd.Timestamp) -> pd.Timestamp:
 def _echo_country_probe(history: pd.DataFrame) -> None:
     first_codes = [code for code in history.get("CTRY", pd.Series(dtype=str)).astype(str).str.strip().head(20) if code]
     target_counts = history.get("CTRY", pd.Series(dtype=str)).astype(str).str.strip().value_counts()
-    counts = {code: int(target_counts.get(code, 0)) for code in ("FR", "SP", "PO")}
+    # NOAA CTRY codes for the 6-country default set (FR/ES/PT/CH/AT/IT).
+    counts = {code: int(target_counts.get(code, 0)) for code in ("FR", "SP", "PO", "SZ", "AU", "IT")}
     click.echo(f"NOAA isd-history CTRY probe: first20={first_codes[:10]} target_counts={counts}")
 
 
@@ -156,7 +225,10 @@ def _load_station_frames(
     start_dt: pd.Timestamp,
     end_exclusive: pd.Timestamp,
     cache_dir: Path,
+    source: str = "ncei",
 ) -> tuple[pd.DataFrame, list[pd.DataFrame], Counter[str]]:
+    fetch_year = fetch_isd_global_hourly_year if source == "aws" else fetch_isd_lite_year
+    parse_file = parse_isd_global_hourly_csv if source == "aws" else parse_isd_lite_gz
     usable_rows: list[dict] = []
     usable_frames: list[pd.DataFrame] = []
     caveats: Counter[str] = Counter()
@@ -164,9 +236,17 @@ def _load_station_frames(
         parts: list[pd.DataFrame] = []
         for year in _years_covered(start_dt, end_exclusive):
             try:
-                path = fetch_isd_lite_year(str(station["usaf"]), str(station["wban"]), year, cache_dir)
+                path = fetch_year(str(station["usaf"]), str(station["wban"]), year, cache_dir)
             except NoaaDownloadError as exc:
-                raise click.ClickException(str(exc)) from exc
+                # Treat a persistent network error on one station-year like a
+                # missing file: log + skip + caveat. A single flaky NOAA
+                # endpoint must not abort a 200+ station run (mission M_I1).
+                caveats["download_failures"] += 1
+                log.warning(
+                    "NOAA ISD-Lite download failed; skipping station-year",
+                    extra={"station_id": station["station_id"], "year": year, "error": str(exc)},
+                )
+                continue
             if path is None:
                 caveats["missing_station_year_files"] += 1
                 log.warning(
@@ -175,7 +255,7 @@ def _load_station_frames(
                 )
                 continue
             try:
-                parsed = parse_isd_lite_gz(path)
+                parsed = parse_file(path)
             except Exception as exc:
                 caveats["parse_failures"] += 1
                 log.warning(
@@ -280,7 +360,7 @@ def _validate_output(out_path: Path, requested_countries: list[str], *, smoke: b
         raise click.ClickException(f"Validation failed: only {rows} rows")
     if smoke and stations < 5:
         raise click.ClickException(f"Validation failed: only {stations} stations ingested in smoke")
-    if not set(countries).issubset({"FR", "ES", "PT"}):
+    if not set(countries).issubset(set(SUPPORTED_ISO)):
         raise click.ClickException(f"Validation failed: unexpected country codes {countries}")
     missing_requested = sorted(set(requested_countries).difference(countries))
     if smoke and missing_requested:
@@ -307,7 +387,7 @@ def _print_report(
     smoke: bool,
 ) -> None:
     abs_path = out_path.resolve()
-    by_country = ", ".join(f"{code}={report['by_country'].get(code, 0)}" for code in ("FR", "ES", "PT"))
+    by_country = ", ".join(f"{code}={report['by_country'].get(code, 0)}" for code in SUPPORTED_ISO)
     caveat_text = ", ".join(f"{key}={value}" for key, value in sorted(caveats.items()) if value) or "none"
     click.echo("Verdict GREEN")
     click.echo(f"Stations ingested: {report['stations']} ({by_country})")
