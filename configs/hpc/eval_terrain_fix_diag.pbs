@@ -1,0 +1,135 @@
+#!/bin/bash -l
+#PBS -N eval_terrfix_diag
+#PBS -l select=1:ncpus=16:mem=48GB:ngpus=1:gpu_id=A100
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -m n
+
+# DIAGNOSTIC re-eval of the CURRENT M_I5 encoder model on CORRECTED terrain.
+# After the inference_input.py lon<0 fix:
+#   (1) re-materialise the 23 held-out VAL lon<0 grid.zarr (overwrite) into the
+#       combined cache, per-season ERA5 routing;
+#   (2) wipe the Perdigão cache so the audit rebuilds it with corrected terrain;
+#   (3) re-run the Perdigão IOP audit (centre-pixel MAE, by wind class);
+#   (4) re-score the full 106-station held-out val + report the lon<0 subset.
+# Does NOT touch the 99 TRAIN lon<0 stations (that is for a later re-train).
+
+cd "$PBS_O_WORKDIR"
+BASE="$HOME/dsw"
+
+PARQUET="$BASE/data/inference/combined_steep_plain_v2.parquet"
+STN_FILE="$BASE/tmp/val_lon_neg_stations.txt"
+ERA5_ROOT="$BASE/data/raw"
+DEM="$BASE/data/raw/srtm_tiles/"
+WC="$BASE/data/raw/worldcover_esa/"
+COMBINED_CACHE="/scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache"
+PERD_CACHE="/scratch/maitreje/dsw/phase_H_prime_perdigao_cache"
+
+SURR="$BASE/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt"
+ANN="$BASE/data/models/surrogate_v2_devine_M_I5_encoder/best.pt"
+OBS_ZARR="$BASE/data/raw/perdigao_obs.zarr"
+
+CFG_PERD="$BASE/configs/training/eval_perdigao_M_I3_encoder.yaml"
+CFG_VAL="$BASE/configs/training/devine_style_M_I5_encoder.yaml"
+
+OUT_PERD="$BASE/data/validation/terrain_fix_perdigao_M_I5"
+OUT_VAL="$BASE/data/validation/terrain_fix_val_M_I5"
+
+mkdir -p "$OUT_PERD" "$OUT_VAL"
+for f in "$SURR" "$ANN" "$CFG_PERD" "$CFG_VAL" "$STN_FILE"; do
+    [ -e "$f" ] || { echo "MISSING: $f"; exit 1; }
+done
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
+cd "$BASE"
+nvidia-smi -L
+
+echo "================ STEP 1: re-materialise 23 VAL lon<0 grid.zarr ================"
+python -u services/module2b-surrogate/rematerialise_lon_neg_diag.py \
+  --combined-parquet "$PARQUET" --stations-file "$STN_FILE" \
+  --era5-root "$ERA5_ROOT" --dem "$DEM" --worldcover "$WC" \
+  --cache-dir "$COMBINED_CACHE" --n-workers 16 2>&1 | tee "$OUT_VAL/recache_lon_neg.log"
+echo "RC_RECACHE=${PIPESTATUS[0]}"
+
+echo "================ STEP 1b: VERIFY a re-cached lon<0 terrain is now real ========"
+python - <<'PY'
+import glob, zarr, numpy as np
+ds = sorted(glob.glob("/scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache/isd_080010_99999_*/grid.zarr"))[:3]
+for d in ds:
+    t = np.asarray(zarr.open_group(d, mode="r")["input/terrain"][:])
+    print(f"{d.split('/')[-2]:40s} min={t.min():.1f} max={t.max():.1f} mean={t.mean():.1f} std={t.std():.1f}")
+PY
+
+echo "================ STEP 2: wipe Perdigão cache (force corrected rebuild) ========="
+rm -rf "$PERD_CACHE"
+mkdir -p "$PERD_CACHE"
+
+echo "================ STEP 3: Perdigão IOP audit on TRUE terrain ===================="
+python -u services/validation/audit_devine_perdigao.py \
+  --config "$CFG_PERD" --ann-checkpoint "$ANN" --obs-zarr "$OBS_ZARR" \
+  --cache-dir "$PERD_CACHE" --out-dir "$OUT_PERD" \
+  --time-subsample 8 --device cuda 2>&1 | tee "$OUT_PERD/eval_perdigao.log"
+echo "RC_PERD=${PIPESTATUS[0]}"
+
+echo "================ STEP 4: held-out 106-station val re-score ====================="
+python -u services/module2b-surrogate/eval_devine_style.py \
+  --config "$CFG_VAL" --ann-checkpoint "$ANN" --out-dir "$OUT_VAL" \
+  2>&1 | tee "$OUT_VAL/eval_val.log"
+echo "RC_VAL=${PIPESTATUS[0]}"
+
+echo "================ STEP 5: summaries (Perdigão wind-class + val lon<0 subset) ===="
+python - <<'PY'
+import json, os
+import numpy as np, pandas as pd
+
+# ---- Perdigão: overall + by wind class (obs speed bins) ----
+ps = os.path.join("data/validation/terrain_fix_perdigao_M_I5", "perdigao_summary.json")
+pc = os.path.join("data/validation/terrain_fix_perdigao_M_I5", "perdigao_propagation.csv")
+if os.path.exists(ps):
+    s = json.load(open(ps)); cm = s["centre_mae"]
+    print(f"[PERDIGAO] centre_mae corr={cm['corrected']:.4f} raw={cm['raw']:.4f} "
+          f"bias_corr={cm['bias_corrected']:+.4f} bias_raw={cm['bias_raw']:+.4f} "
+          f"n_pair={cm['n_pairings']} n_sta={cm['n_stations']}")
+if os.path.exists(pc):
+    d = pd.read_csv(pc)
+    o = d["speed_obs"].to_numpy(); c = d["speed_corr_centre"].to_numpy(); r = d["speed_raw_centre"].to_numpy()
+    bins = [(0,3,"<3"),(3,6,"3-6"),(6,99,">6")]
+    print("[PERDIGAO by wind class]  class   n   MAE_corr  MAE_raw  bias_corr")
+    for lo,hi,lab in bins:
+        m = (o>=lo)&(o<hi)
+        if m.sum()==0: continue
+        print(f"   obs {lab:>4s}  n={m.sum():4d}  corr={np.abs(c[m]-o[m]).mean():.4f}  "
+              f"raw={np.abs(r[m]-o[m]).mean():.4f}  bias_corr={(c[m]-o[m]).mean():+.4f}")
+
+# ---- Held-out val: overall + lon<0 subset ----
+vsum = os.path.join("data/validation/terrain_fix_val_M_I5", "eval_summary.json")
+vpq  = os.path.join("data/validation/terrain_fix_val_M_I5", "eval_pairings.parquet")
+if os.path.exists(vsum):
+    v = json.load(open(vsum))
+    print(f"[VAL all] corr MAE={v['corr']['mae']:.4f} rmse={v['corr']['rmse']:.4f} "
+          f"bias={v['corr']['bias']:+.4f} | raw MAE={v['raw']['mae']:.4f} | n={v['n_val_pairings']}")
+if os.path.exists(vpq):
+    ep = pd.read_parquet(vpq)
+    # join station lon from combined parquet
+    cp = pd.read_parquet("data/inference/combined_steep_plain_v2.parquet",
+                         columns=["station_id","lon"]).groupby("station_id")["lon"].first()
+    ep["lon"] = ep["station_id"].map(cp)
+    for lab, mask in [("ALL", np.ones(len(ep),bool)),
+                      ("lon<0", (ep["lon"]<0).to_numpy()),
+                      ("lon>=0", (ep["lon"]>=0).to_numpy())]:
+        sub = ep[mask]
+        if len(sub)==0: continue
+        ae_c = np.abs(sub["speed_pred_corr"]-sub["speed_obs"])
+        ae_r = np.abs(sub["speed_pred_raw"]-sub["speed_obs"])
+        print(f"[VAL {lab:>6s}] n={len(sub):6d} sta={sub['station_id'].nunique():3d} "
+              f"MAE_corr={ae_c.mean():.4f} MAE_raw={ae_r.mean():.4f} "
+              f"bias_corr={(sub['speed_pred_corr']-sub['speed_obs']).mean():+.4f}")
+PY
+
+echo "DONE"

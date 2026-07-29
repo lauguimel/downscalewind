@@ -77,10 +77,17 @@ def _resolve_dem_path(dem: Path, lat: float, lon: float) -> Path:
         return p
     if not p.is_dir():
         raise FileNotFoundError(f"DEM not found: {dem}")
+    # Copernicus DSM tiles are named by their LOWER-LEFT (SW) corner: the tile
+    # with lon_ll=L covers [L, L+1). The correct index is therefore
+    # abs(floor(lon)) for BOTH hemispheres (E/W prefix carries the sign):
+    #   lon= 7.73 → floor= 7  → E007 ✓ ; lon=-7.73 → floor=-8 → abs=8 → W008 ✓ ;
+    #   lon=-8.0  → floor=-8  → abs=8 → W008 ✓ .
+    # The previous `floor(-lon)` form returned W007 for lon=-7.73 (data lives in
+    # W008) → the box fell outside the tile → rasterio filled a flat-ZERO patch.
     lat_dir = "N" if lat >= 0 else "S"
-    lat_idx = int(math.floor(lat)) if lat >= 0 else int(math.floor(-lat))
+    lat_idx = abs(int(math.floor(lat)))
     lon_dir = "E" if lon >= 0 else "W"
-    lon_idx = int(math.floor(lon)) if lon >= 0 else int(math.floor(-lon))
+    lon_idx = abs(int(math.floor(lon)))
     name = f"Copernicus_DSM_COG_10_{lat_dir}{lat_idx:02d}_00_{lon_dir}{lon_idx:03d}_00_DEM.tif"
     candidate = p / name
     if candidate.is_file():
@@ -92,6 +99,76 @@ def _resolve_dem_path(dem: Path, lat: float, lon: float) -> Path:
         f"No Copernicus DSM tile for (lat={lat:.2f}, lon={lon:.2f}); "
         f"expected {name} under {p}"
     )
+
+
+def _cop_dsm_tile_name(lat_ll: int, lon_ll: int) -> str:
+    """Copernicus DSM tile filename for the tile whose SW corner is (lat_ll, lon_ll)."""
+    lat_dir = "N" if lat_ll >= 0 else "S"
+    lon_dir = "E" if lon_ll >= 0 else "W"
+    return (f"Copernicus_DSM_COG_10_{lat_dir}{abs(lat_ll):02d}_00_"
+            f"{lon_dir}{abs(lon_ll):03d}_00_DEM.tif")
+
+
+def _resolve_dem_for_window(
+    dem: Path, lat: float, lon: float, half_extent_m: float,
+) -> tuple[Path, bool]:
+    """Resolve a DEM path covering the FULL metric window at (lat, lon).
+
+    When the requested box straddles a 1° tile boundary (≈ a few % of stations),
+    a single-tile resolver fills the off-tile pixels with 0 (flat-zero artefact).
+    This builds a `rasterio.merge` mosaic of every covered tile into a temp
+    GeoTIFF so the downstream reproject sees real data on every pixel. Returns
+    (path, is_temp): the caller MUST unlink the temp file when is_temp is True.
+
+    Falls back to the single-file `_resolve_dem_path` when `dem` is already a
+    file, or when only one tile is needed (no temp file created).
+    """
+    p = Path(dem)
+    if p.is_file():
+        return p, False
+    if not p.is_dir():
+        raise FileNotFoundError(f"DEM not found: {dem}")
+    # Window half-span in degrees (flat-earth, generous on lon via cos(lat)).
+    dlat = half_extent_m / 111_000.0
+    dlon = half_extent_m / (111_000.0 * max(0.1, math.cos(math.radians(lat))))
+    lat_lls = sorted({int(math.floor(lat - dlat)), int(math.floor(lat + dlat))})
+    lon_lls = sorted({int(math.floor(lon - dlon)), int(math.floor(lon + dlon))})
+
+    def _find_tile(la: int, lo: int) -> Path | None:
+        name = _cop_dsm_tile_name(la, lo)
+        for cand in (p / name, p / "srtm_tiles" / name):
+            if cand.is_file():
+                return cand
+        return None
+
+    tiles: list[Path] = []
+    for la in lat_lls:
+        for lo in lon_lls:
+            t = _find_tile(la, lo)
+            if t is not None:
+                tiles.append(t)
+    if len(tiles) <= 1:
+        # Single tile (or none found) → defer to the canonical resolver, which
+        # raises a precise FileNotFoundError if the centre tile is missing.
+        return _resolve_dem_path(p, lat, lon), False
+    # Straddles a tile edge → mosaic the covered tiles (rasterio.merge, no extra
+    # deps) into a temp GeoTIFF so every pixel of the box has real data.
+    import tempfile
+    import rasterio
+    from rasterio.merge import merge as rio_merge
+    srcs = [rasterio.open(t) for t in tiles]
+    try:
+        mosaic, out_transform = rio_merge(srcs)
+        meta = srcs[0].meta.copy()
+        meta.update(height=mosaic.shape[1], width=mosaic.shape[2],
+                    transform=out_transform, count=mosaic.shape[0])
+        tif_path = Path(tempfile.mkstemp(prefix="dsw_dem_", suffix=".tif")[1])
+        with rasterio.open(tif_path, "w", **meta) as dst:
+            dst.write(mosaic)
+    finally:
+        for s in srcs:
+            s.close()
+    return tif_path, True
 
 
 def _resolve_wc_path(wc: Path, lat: float, lon: float) -> Path:
@@ -149,42 +226,45 @@ def extract_terrain_from_dem(
     `dem_tif` accepts a single GeoTIFF/VRT or a directory of Copernicus DSM
     tiles (the matching 1°×1° tile is auto-selected per (lat, lon)).
     """
-    dem_tif = _resolve_dem_path(Path(dem_tif), lat, lon)
+    # Window-aware resolver: mosaics straddling 1° tiles so edge stations get
+    # real data on every pixel (not a flat-zero off-tile fill).
+    dem_tif, _is_temp = _resolve_dem_for_window(Path(dem_tif), lat, lon, half_extent_m)
     import rasterio
     from rasterio.warp import Resampling, calculate_default_transform, reproject
     from pyproj import Transformer
 
-    # Local metric frame: pick UTM zone for the site, project box corners,
-    # then sample the DEM via reproject to (NI, NJ) regular grid.
-    utm_zone = int(math.floor((lon + 180) / 6) % 60 + 1)
-    epsg_utm = 32600 + utm_zone if lat >= 0 else 32700 + utm_zone
-    transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg_utm}", always_xy=True)
-    x0, y0 = transformer.transform(lon, lat)
-    dst_x = np.linspace(x0 - half_extent_m, x0 + half_extent_m, ni + 1)
-    dst_y = np.linspace(y0 - half_extent_m, y0 + half_extent_m, nj + 1)
-    # Cell centres (length NI, NJ)
-    cx = 0.5 * (dst_x[:-1] + dst_x[1:])
-    cy = 0.5 * (dst_y[:-1] + dst_y[1:])
+    try:
+        # Local metric frame: pick UTM zone for the site, project box corners,
+        # then sample the DEM via reproject to (NI, NJ) regular grid.
+        utm_zone = int(math.floor((lon + 180) / 6) % 60 + 1)
+        epsg_utm = 32600 + utm_zone if lat >= 0 else 32700 + utm_zone
+        transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg_utm}", always_xy=True)
+        x0, y0 = transformer.transform(lon, lat)
+        dst_x = np.linspace(x0 - half_extent_m, x0 + half_extent_m, ni + 1)
+        dst_y = np.linspace(y0 - half_extent_m, y0 + half_extent_m, nj + 1)
 
-    # Build a destination affine grid: pixel (col, row) = (i, NJ-1-j) so that
-    # row 0 is north, mirroring rasterio convention. We then flip back to (i,j)
-    # convention used by OF.
-    from rasterio.transform import Affine
-    dst_transform = Affine.translation(dst_x[0], dst_y[-1]) * Affine.scale(
-        (dst_x[-1] - dst_x[0]) / ni, -(dst_y[-1] - dst_y[0]) / nj
-    )
-    dst = np.empty((nj, ni), dtype=np.float32)
-
-    with rasterio.open(dem_tif) as src:
-        reproject(
-            source=rasterio.band(src, 1),
-            destination=dst,
-            src_transform=src.transform,
-            src_crs=src.crs,
-            dst_transform=dst_transform,
-            dst_crs=f"EPSG:{epsg_utm}",
-            resampling=Resampling.bilinear,
+        # Build a destination affine grid: pixel (col, row) = (i, NJ-1-j) so that
+        # row 0 is north, mirroring rasterio convention. We then flip back to (i,j)
+        # convention used by OF.
+        from rasterio.transform import Affine
+        dst_transform = Affine.translation(dst_x[0], dst_y[-1]) * Affine.scale(
+            (dst_x[-1] - dst_x[0]) / ni, -(dst_y[-1] - dst_y[0]) / nj
         )
+        dst = np.empty((nj, ni), dtype=np.float32)
+
+        with rasterio.open(dem_tif) as src:
+            reproject(
+                source=rasterio.band(src, 1),
+                destination=dst,
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=dst_transform,
+                dst_crs=f"EPSG:{epsg_utm}",
+                resampling=Resampling.bilinear,
+            )
+    finally:
+        if _is_temp:
+            Path(dem_tif).unlink(missing_ok=True)
     # `dst[row=0]` is northernmost, OF convention has y increasing northward
     # ⇒ flip the row axis so that `terrain[i, j]` with j=0 → south.
     terrain = np.flipud(dst).T.astype(np.float32)  # (ni, nj)
