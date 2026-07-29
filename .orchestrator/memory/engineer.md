@@ -1,5 +1,39 @@
 # Engineer memory — DownscaleWind OF / canary work
 
+## NOAA source AWS quand NCEI down + slope helper (2026-06-03, M_I1)
+
+NCEI `ncei.noaa.gov/pub/data` peut être DOWN (panne serveur : curl HTTP 000 alors qu'internet OK).
+Fallback livré : `--source aws` dans `ingest_noaa_isd.py` → miroir AWS
+`noaa-global-hourly-pds.s3.amazonaws.com/{year}/{usaf}{wban}.csv` (CSV global-hourly, PAS ISD-Lite fixe).
+Parser `parse_isd_global_hourly_csv` (isd_parser.py) : `WND=dir,q,type,speed(0.1 m/s),q` (dir 999 / speed 9999
+= missing) ; `TMP`/`DEW=±tttt(0.1°C),q` (+9999 missing) ; floor horaire + groupby mean (parité ISD-Lite).
+Plus fiable que NCEI → préférer AWS par défaut pour toute future ingestion ISD.
+⚠️ `_download_to_cache` : cap wall-clock 30s/fichier OBLIGATOIRE (stream=True ne borne que l'inter-octets,
+pas le corps → un trickle hang des heures sinon). timeout=(10,20).
+`slope_at_dem(dem, lat, lon, window_m=1000)` (inference_input.py:227) = pente moyenne (deg), accepte un
+GeoTIFF unique OU un dir de tuiles Copernicus DSM. Perdigão ridge ≈ 17° (sanity).
+
+## NOAA ISD = seule source obs vivante ; filtre pays hardcodé 3 spots (2026-06-03, M_I0)
+
+Pour étendre les obs au-delà de FR/ES/PT (ex : Alpes CH/AT/IT + Pyrénées), modifier 3 endroits
+(le reste de `filter_stations` est générique CTRY+dates, pas de bbox) :
+- `ingest_noaa_isd.py:80` `_parse_countries` aliases
+- `isd_parser.py:19-20` `NOAA_COUNTRY_TO_ISO` / `ISO_OR_NOAA_TO_NOAA`
+- `ingest_noaa_isd.py:283` validation `subset({"FR","ES","PT"})`
+Codes NOAA CTRY : Suisse=`SZ`, Autriche=`AU`, Italie=`IT`. L'inventaire `isd-history.csv`
+(téléchargé en cache, colonnes LAT/LON/ELEV(M)) = liste candidate à screener.
+SYNOP-MF (`ingest_synop_meteofr.py`) + OGIMET (`ingest_ogimet.py`, hardcodé 12 stations PT) = MORTS.
+AEMET (`ingest_aemet_es.py`) = code-OK mais besoin `AEMET_API_KEY`, ES-only, liveness non vérifiée.
+
+## Aucun helper de PENTE — ~10 LOC depuis le patch DEM (2026-06-03, M_I0)
+
+`inference_input.extract_terrain_from_dem(dem_dir, lat, lon)` retourne déjà le patch terrain
+180×180 (résolution 33.3 m) mais calcule SEULEMENT z0_eff + élévation, PAS la pente. Le chemin
+batch (`extract_v2_input_at_coords`) n'applique AUCUN filtre (itère toutes les stations en aveugle).
+Slope = `np.gradient(terrain, 33.3)` → magnitude, ~10 LOC. ⚠️ altitude ≠ pente : filtrer par PENTE
+pour cibler le régime crête (le surrogate échoue sur l'accélération de crête, pas sur l'altitude).
+DEM nouvelles régions Alpes/Pyrénées : `ingest_dem_copernicus.py --bbox` (AWS S3 anonyme, tout bbox).
+
 ## qstat -x "Time Use" = CPU time, PAS wall time (2026-05-27, M_H+ diagnostic)
 
 Le champ "Time Use" affiché par `qstat -x <jobid>` est le **CPU time**

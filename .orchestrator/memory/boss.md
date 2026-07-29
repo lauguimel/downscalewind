@@ -1,5 +1,110 @@
 # Boss memory — DownscaleWind orchestrator
 
+## ✅ VERDICT diagnostic terrain-fix 2026-06-12 — bug RÉEL mais IMPACT MARGINAL, chiffres TIENNENT
+
+Job 22309966 exit 0 (walltime 2h41, A100). Fix L83 `abs(floor(lon))` appliqué. Modèle M_I5 régime (best.pt ep2)
+ré-évalué sur terrain CORRIGÉ ; 23 val lon<0 + Perdigão re-matérialisés.
+- **Held-out val 106 stn (109685 pairings)** : corr MAE **1.4619** (vs zéro-terrain 1.464 = INCHANGÉ), bias +0.002,
+  raw 1.9111. → **le 1.46 TIENT**, le bug n'a PAS déplacé le headline.
+  - VAL lon<0 (23 stn, 15938 pair) : corr **1.3828** vs raw 1.8751 → correction marche TRÈS bien sur l'ouest aussi
+    (zéro-terrain ≈1.396 → corrigé 1.383 = −0.013, marginal).
+  - VAL lon>=0 (83 stn) : corr 1.4754 (inchangé, jamais buggé).
+- **Pourquoi marginal** : stations lon<0 = pop PLAIN (Ibérie peu accidentée) → terrain-zéro ≈ terrain-plat-réel.
+  Le bug remplaçait du plat par du plat. Perdigão (vrai relief 105-536m) = seule exception mais régime calme domine.
+- **Perdigão centre (376 pair, 47 stn) sur VRAI terrain** : corr **2.30** (vs zéro ~2.19 = ~pareil) raw **1.31** (vs 1.37),
+  bias +2.12. Par vent : <3 (n311=83%) corr 2.50/raw 1.30/bias+2.48 ; 3-6 (n60) corr 1.25≈raw 1.26 ; >6 (n5) corr 2.32<raw 2.70.
+  → **le "mur Perdigão" n'était PAS un artefact terrain** : c'est la SUR-CORRECTION VENT FAIBLE (IOP 83% <3 m/s, brut
+  déjà bon). **Narratif M_I4/M_I5 CONFIRMÉ, PAS confondu.** Vrai terrain ne sauve pas Perdigão (n'avait pas à : résidu = régime calme).
+- **Steep-54 held-out M_I5 régime (job 22306888 exit 0, walltime 1h12, valide lon>0)** : HIGH-WIND >6 m/s (n10848)
+  raw MAE 4.733 → corr **3.018 (−36%)**, bias −4.67→−2.57 ; >7 (n9735) raw 4.87→corr 3.10. → gain MASSIF vent fort
+  CONSERVÉ par le régime (≈ M_I3 3.02), narratif régime confirmé hors Perdigão. `data/validation/phase_H_prime_M_I5c_steep54_windstrat`.
+- **DÉCISION** : re-train complet NON justifié (impact <0.01 held-out, ~0.1 Perdigão). Fix L83 gardé. Option papier =
+  re-générer dataset propre "par principe" (hygiène) mais gain scientifique nul. → REPRENDRE benchmark FuXi sur base saine
+  (1.46 tient, 100m prêt). Décision user re-train-vs-avancer EN ATTENTE.
+- ⚠️ Corrige le verdict "AFFECTED/INVALIDÉ" ci-dessous : bug réel (terrain zéro lon<0) mais SANS conséquence matérielle sur les conclusions.
+- ✅ **PIPELINE CFD NOT-AFFECTED (prouvé empiriquement 2026-06-12)** : le dataset CFD qui a entraîné le surrogate v2
+  utilise un code DIFFÉRENT et CORRECT — `run_multisite_campaign.py` `_open_srtm_tiles`(L114)/`extract_stl`(L154) :
+  nommage `abs(lon)` (signe = lettre E/W, pas `floor(-lon)`) + **MOSAÏQUE de toutes les tuiles bbox** (merge L146),
+  pas de floor-1-tuile → bords couverts. Vérif empirique terrain frozen `training_v2/*/grid.zarr` : **ct_d_fire_0106
+  (lon −7.77 = MÊME régime W007/W008 que le bug Perdigão) relief RÉEL 185-500m std 69** ; ct_c_morpho_0075 (−2.97)
+  533-1168m ; ct_g_paragliding_0100 (−5.39) 216-557m ; ct_f_wind_0132 (−9.76 côtier IE) −78/−39m réel ; contrôle
+  Alpes (+11.47) 1491-2713m. AUCUN plat-zéro. → **SURROGATE V2 SAIN** (entraîné sur vrai terrain partout). Bug confiné
+  au helper inférence M_G6 (post-freeze 2026-05-22). PAS de re-gen CFD ni re-train surrogate. coords/z = vrais centres mailles OF.
+
+## 🔴 BUG terrain `_resolve_dem_path` (lon<0) = CONFIRMÉ AFFECTED 2026-06-11 (preuve empirique)
+
+Trouvé via l'adaptateur FuXi (D2), tracé par investigation dédiée. **VERDICT : AFFECTED, haute confiance, PROUVÉ
+empiriquement** (re-run helper + lecture caches disque, pas inféré).
+- **Bug** : `services/module2b-surrogate/utils/inference_input.py:83` :
+  `lon_idx = int(math.floor(lon)) if lon >= 0 else int(math.floor(-lon))`. Pour lon<0 devrait être `abs(floor(lon))`.
+  East lon → OK. Integer west lon → OK par coïncidence. **Non-integer west lon → MAUVAISE tuile (1 à l'est)** :
+  −7.73→W007 (devrait W008), −9.13→W009 (devrait W010). Tuile nommée par coin SO → la box tombe hors tuile →
+  rasterio remplit le patch 180×180 de **0** (terrain plat zéro).
+- **4 artefacts** (tous via build_one→extract_terrain_from_dem→_resolve_dem_path, dir `srtm_tiles/`) :
+  - steep parquet : **NON** affecté (279 steep stns lon 6.8–18.35°E) ; 122 stns lon<0 sont en pop **plain** → OUI ces lignes.
+  - cache M_I3 grid.zarr : **OUI** (terrain lu = 0.0 pour 7 stns Ibérie/PT : min=max=mean=std=0).
+  - **held-out 1.46** : **OUI** — 23/106 val (21.7%) lon<0, entraînées+scorées terrain zéro → **1.46 INVALIDÉ pour ce ~22%**.
+  - **Perdigão raw 1.37** : **OUI** — cache perdigao terrain=0.0 à lon −7.726 → **1.37 INVALIDÉ comme claim terrain**
+    (DEM plat). ⇒ **TOUT le narratif Perdigão est CONFONDU** : M_H'1c/1f/1g (2.27/2.15/2.32), M_I4 "outlier sur-corrigé",
+    M_I4 re-cadré "artefact vent faible", M_I5 régime Perdigão — TOUS calculés sur terrain ZÉRO. À REFAIRE.
+- **Preuve empirique A/B** (re-run helper sur Aqua) : Perdigão prod(W007)=0/0/0 vs correct(W008)=105/536/286m ;
+  Iberia W3.5=0 vs 541/666m ; contrôle 7.7°E identique. Zéros identiques lus dans les caches disque M_I3+Perdigão.
+- **Exposition** : 122/529 stns (23.1%) lon<0 ; train 99/423 (23.4%), val 23/106 (21.7%) ; 107k/605k pairings (17.7%), TOUTES en plain.
+- ✅ **NON affecté = steep-54 held-out (−18/−22%)** = LE résultat clé (correction généralise au raide) → INTACT (tout lon>0).
+- **À RÉGÉNÉRER** : fix L83 (`abs(floor(lon))`) + mosaic bords (comme adaptateur FuXi déjà) ; re-matérialiser caches
+  lon<0 (plain + Perdigão, ~107k) ; re-éval modèle ACTUEL (diagnostic ampleur) ; puis re-train M_I3/M_I5 si impact
+  notable + re-évals + audit Perdigão.
+- **Action 2026-06-11** : job éval Perdigão M_I5 **22306889 TUÉ** (tournait sur terrain zéro). steep-54 22306888 gardé (valide).
+- **FuXi benchmark = en aval du fix** (comparer FuXi-bon-terrain vs nous-bon-terrain). Décision user remédiation EN ATTENTE.
+
+## FuXi-CFD head-to-head benchmark = FAISABLE (recon 2026-06-11)
+
+User veut inférer le MODÈLE FuXi-CFD sur NOS cas + scorer vs MÊMES obs (benchmark obs-vs-obs honnête,
+le seul like-for-like). Recon GO-WITH-CAVEATS :
+- **Identité** : "Reconstructing fine-scale 3D wind fields with terrain-informed machine learning",
+  Lin Chensen et al., Fudan AI Innovation Institute, *Nature Communications* 17:3713 (2026-03-09),
+  open access PMC13103448 / nature.com/articles/s41467-026-70562-5. DISTINCT du modèle météo global FuXi.
+  = concurrent DIRECT, même tâche → benchmark le plus pertinent.
+- **Poids PUBLICS** : ONNX 964 MB HF `linchensen/FuXi-CFD-model` (`model/fuxicfd_model.onnx` + `normalization/`
+  + `inference_example/infer.py`). Dataset HF `linchensen/FuXi-CFD-dataset` 253 GB. Zenodo DOI
+  10.5281/zenodo.18770845. **Licence CC BY-NC 4.0** (papier OK, PAS commercial → flag track startup).
+- **I/O CORRIGÉ (repro DONE 2026-06-11)** : entrée (1,4,300,300), ordre canaux **[u_100m, v_100m, dem, roughness]**
+  (vent EN PREMIER — la recon avait inversé). u/v 100m sur 9×9 → zoom bilinéaire scipy ×33 vers 300×300 (pas de
+  physique). dem/z0 en MÈTRES sur 301×301 @30m (z0 matche WorldCover). Standardiser par groupe via `scaler_input.npy`.
+  Sortie **(1,27,4,300,300)** = (level,var,y,x), vars [u,v,w,k] ; de-norm `pred*std+mean` via `scaler_output.npy`
+  (27,4). **10m = niveau index 0** (PAS 1 ; off-by-one corrigé). speed = hypot(u[0,150,150], v[0,150,150]). ONNX <1s CPU.
+- **REPRO leur exemple = GREEN** : poids `data/models/fuxicfd_official/` (onnx ~848MB), tourne sur leur inputs.npz
+  fourni → reproduit leur outputs.npz (u/v MAE ~0.10, w/k ~0.04) = on maîtrise le pipeline. Contrat exact dans
+  `scratch/fuxicfd_io_notes.md`. ⚠️ hf_xet stalle sur le gros fichier → `HF_HUB_DISABLE_XET=1`.
+- **Domaine train = SE Chine** complexe, validé 3 tours EU (OPE/Torfhaus/Ispra, terrain DOUX). Nos Alps/Apennins
+  = OOD plus dur → test équitable mais à flagger (eux Chine "à l'extérieur", nous EU "à domicile"). Neutraliser
+  le reproche = aussi comparer sur LEURS sites valid EU.
+- **Aqua /scratch/maitreje/fuxicfd/** = NOS UNet (pas les poids officiels) → télécharger 964 MB HF séparément.
+- **Adaptateur = M** : par station, terrain 300×300 30m (SRTM+WC déjà là) + vent 100m 9×9 depuis ERA5 → ONNX
+  → niveau-1 pixel central. **Risque #1 = entrée 100m** : ERA5 a u100/v100 NATIFS (re-ingest CDS = fidèle)
+  vs dériver log-law (contestable). **Risque #2** OOD steep. **Risque #3** reproduire leur inference_example
+  AVANT de croire aux chiffres (conventions/normalisation).
+- **Décision user 2026-06-11** : entrée 100m = **ERA5 u100/v100 NATIFS** (ré-ingest CDS, fidèle) + **TOUT sur HPC Aqua**.
+- **Plan en cours** : (a) repro GREEN ✅ ; (b) D1 ingestion ERA5 100m = **GREEN**, 5 jobs CDS chaînés : perdigao2017
+  **22307411** (R, ~30min) → mam/jja/son/winter **22307412/13/14/15** (afterany, ~10-12h) → stores `era5_100m_*.zarr`
+  sous `~/dsw/data/raw/`. Code dual-mode `ingest_era5_europe_hourly.py --surface-only --surface-vars` (NON commité)
+  + PBS `configs/hpc/ingest_era5_100m.pbs`. u100/v100 = single-level léger (~95KB/7j). **DONE 2026-06-11 : 5 jobs
+  exit 0, 5 stores `era5_100m_{perdigao2017,mam2023,jja2023,son2023,winter2223}.zarr` présents** (bien + rapide que
+  ~10-12h, single-level léger) → 100m PRÊT pour scoring FuXi, plus un goulot ;
+  (c) D2 adaptateur `fuxicfd_infer_at_stations.py` = **GREEN** (smoke 22308191 exit 0, 10/10 Perdigão, FuXi 10m
+  sane mean 1.73 [0.55-4.21] — 100m=PROXY, pas un vrai score ; poids `~/dsw/data/models/fuxicfd_official/` +
+  onnxruntime 1.26 dans fuxicfd ; split val 106 stn reproduit via `watertight_station_split` seed=42 sur
+  `combined_steep_plain_v2.parquet` ; ⚠️ bug terrain lon<0 → entrée dédiée en haut ; ~20s/pairing CPU → array job
+  pour le full) ; (d) scoring full held-out val
+  (106 stn dont 54 steep) + Perdigão → tableau MAE FuXi vs nous (1.46) vs ERA5 vs MÊMES obs [run 22316789 TUÉ walltime 4h01 : FuXi ONNX sur
+  **CPUExecutionProvider** (onnxruntime CPU-only dans fuxicfd, pas GPU) ~7.8s/pairing → 1616/3607 (45%) ; terrain
+  caching OK (stations_cached↑) ; PAS de checkpoint → partiels perdus ; spam pthread_setaffinity (threads non bridés).
+  Relancé avec checkpointing + threads bridés + échantillon réduit]. **2026-06-15 : édits perf FAITS localement
+  (thread cap dans `FuxiRunner.__init__` de fuxicfd_infer_at_stations.py + checkpoint/200 + resume dans
+  score_fuxi_vs_ours.py + PBS NPS12/PNPS10/walltime8h/OMP8 ; py_compile OK ; onnxruntime-gpu écarté = CUDA13 incompat).
+  PENDING scp+qsub — Aqua DOWN (SSH Connection refused, 2e panne de la semaine) → surveillance retour Aqua armée** ; (e) comparer
+  aussi sur leurs sites valid EU (OPE/Torfhaus/Ispra) pour neutraliser le reproche OOD.
+
 ## Site-selection lesson (2026-05-15)
 
 **Before** picking a canary site, always filter sites.csv by
@@ -415,6 +520,297 @@ terrain raide : re-simuler ~50 cas Pop B avec solveur non-divergent (Zephyr.jl L
 −32.5% MAE bat ERA5, direction améliorée, propagation lisse. Livrable paper/déploiement fire
 weather plaine. Perdigão = caveat OOD honnête (terrain raide hors-scope v2). ssrd/tcc store prêt
 (era5_radcloud_jja2023.zarr) mais inutilisé vu ce verdict.
+
+## RE-SCOPE 2026-06-03 (user) — verdict M_H'1g PRÉMATURÉ, ouvrir M_H'1h ablation terrain raide
+
+**Push-back user décisif** : M_H'1g a testé l'encodeur terrain ENTRAÎNÉ SUR NOAA JJA PLAINE.
+L'encodeur a la capacité d'une correction position-dépendante, mais le backprop n'a jamais vu de
+station de CRÊTE avec obs → aucun signal pour apprendre la compensation. Conclure « mur = étage B »
+depuis M_H'1g = *capacité sans exemples*. Les 3 leviers du plan conditionnel sont indissociables et
+seul M_H'1f (features phys) a été partiellement fait (JJA only). **La vraie expérience manquante** =
+features physiques + **4 saisons** + **data DEVINE (obs montagne RAIDE)**, jamais combinés.
+
+**Décisions user 2026-06-03** :
+1. Source obs montagne = **ingérer SYNOP/AEMET alpin+pyrénéen filtré par PENTE** (pas juste altitude).
+   Caveat : altitude ≠ pente. Les 68 stations >500m existantes sont SYNOP NOAA (vallée/plateau,
+   ES meseta plate). Le surrogate échoue sur l'accélération de CRÊTE → besoin d'obs haute-pente.
+   ⚠️ ingest_synop_meteofr (M_G2) + ingest_ogimet (M_G4) étaient RED 2026-05-21 → vérifier source vivante.
+2. Archi = **ablation M_H'1f scalaire (topo_dim 12) VS M_H'1g encodeur** sur même dataset combiné.
+   Tranche définitivement scalaire vs position-dépendant QUAND l'ANN a enfin des exemples de crête.
+
+**Gate avant briefs ingestion/training** : investigation M_I0 (read-only) = source obs raide vivante
++ N réaliste stations nouvelles + filtrage par pente (DEM 186 tiles Copernicus + SRTM) + état données
+4 saisons Aqua (re-inference 22066177/78/79 du 2026-05-27 complétée ? caches grid.zarr mam/son ?).
+
+**Si M_H'1h (obs montagne + 4 saisons) répare Perdigão** → voie ANN RÉHABILITÉE, étage B PAS le mur.
+**Si plafonne encore AVEC obs crête** → ALORS seulement le verdict « mur = surrogate frozen » tient,
+et Phase I (surrogate v3 terrain raide) devient justifiée. Obs montagne = pré-requis pour conclure.
+
+## M_I1 DONE GREEN 2026-06-03 — obs montagne raide ingérées (NCEI down → miroir AWS)
+
+- **Blocage résolu** : NCEI `ncei.noaa.gov/pub/data` était DOWN (curl HTTP 000, internet OK ; 0 station
+  alpine en cache). Bascule sur miroir AWS `noaa-global-hourly-pds` (user GO). Parser
+  `parse_isd_global_hourly_csv` + `fetch_isd_global_hourly_year` + flag `--source aws` ajoutés
+  (isd_parser.py / ingest_noaa_isd.py). Aussi cap wall-clock 30s/fichier (stream=True ne borne pas le hang).
+- **205 stations alpines** (AT 146, IT 57, CH 2 — NOAA a peu de CH), 2022-2023, 17520h × 205, 99.3% vent
+  valide. Store `data/raw/obs_unified_steep.zarr` = 362 prod + 205 = **567 stations** + champ `stations/slope`.
+- **Pente (helper slope_at_dem validé)** : Alps médiane 6.4°, max **37.96°** ; **55 >15°**, 79 >10°, 112 >5°.
+  Sanity Perdigão ridge **17.0°** / vallée 13.4° → les Alps raides COUVRENT le régime Perdigão (~17°).
+  Le régime crête est ENFIN échantillonné (vs training JJA-plaine plat) = prémisse du re-scope satisfaite.
+- ⚠️ slope = NaN pour les 362 prod (remplir sur Aqua depuis grid.zarr terrain en M_I2/M_I3). Store/CSV LOCAUX
+  → à pousser sur Aqua. Code M_I1 PAS encore commité (filtre +CH/AT/IT, source AWS, slope helper, build).
+- **Next = M_I2** : pairings 4 saisons des 205 nouvelles stations (inférence v2) + grid.zarr MAM/SON, sur Aqua.
+
+## M_I2a smoke GREEN 2026-06-03 — surrogate SOUS-PRÉDIT la crête (signal confirmé) ; gap ERA5 grille Est
+
+- Smoke job 22220282 exit 0 (CPU, GPU monopolisé par sweep 8h) : 10 pairings Alps, speed_pred ∈[0.82,1.76]
+  physique, DEM+WC résolus à 3488 m (Cervin, lat 45.93/lon 7.70). Contrat v2 OK (terrain_ch=4, era5_dim=408,
+  nz=24, Δt=0). **Surrogate sous-prédit le vent de crête : pred 1-1.8 vs obs 5 m/s** = EXACTEMENT le signal
+  que la correction DEVINE doit corriger. Biais crête confirmé empiriquement sur vraie station raide (pas que Perdigão).
+- Prérequis Aqua comblés Aqua-side (S3 anonyme, PAS de scp lourd) : DEM 38 tuiles + WC 9 tuiles. Poussé :
+  `~/dsw/data/raw/obs_unified_alps.zarr` (205 stations slope-finie, 33 MB) + smoke store. PBS `infer_alps_v2{,_smoke}.pbs` prêts.
+- ⚠️ **GAP BLOQUANT 4-saisons** : ERA5 hourly mam/jja/son 2023 = grille lon **-10→10E SEULEMENT** →
+  **178/205 stations Alpes (Est : AT + IT-Est, lon>10E) HORS grille** pour 3 saisons. Seul `winter2223` (6h)
+  couvre l'Est (→26.8E). Full 4-saisons des 205 ⇒ ré-ingérer mam/jja/son ERA5 grille étendue ~18E
+  (`ingest_era5_europe_hourly.py`, CDS ≤7j/req ; ref M_H+ : ~2-3h wall/saison). Sinon mam/jja/son = 27 stations Ouest only.
+- Plan prod (NON soumis) : 4 jobs ~7.3h total (winter 205 ~5.2h ; jja/mam/son 27→205 après ré-ingest).
+  Throughput 3.93 pairings/s. Sortie `alps_<season>_v2.parquet` ~12 MB / ~103k rows.
+- **DÉCISION user EN ATTENTE** : (A) ré-ingest ERA5 Est puis 4-saisons complet ; (B) winter-205 now +
+  mam/jja/son Ouest-27 only ; (C) winter-205 now EN PARALLÈLE du ré-ingest ERA5, puis les 3 autres saisons.
+
+## DEVINE 2024 obs reference + RE-SCOPE dry-Med (2026-06-04, user)
+
+**DEVINE (Le Toumelin 2024 NPG 31:75) — recherche** : obs = 273 AWS ALPES (214 MeteoSwiss + 54 Météo-France
++ 5 GLACIOCLIM), PROPRIÉTAIRES (repo = code seul, pas d'obs réutilisables). Train ANN sur 218, test 55
+held-out par échantillonnage stratifié 6 descripteurs topo (élévation, TPI500, **PENTE**, Laplacien, x/y).
+Vent speed+dir 10m horaire. CNN = 7279 ARPS topo gaussiennes synthétiques 30m.
+**CLEF** : testé hors Alpes sur 18 Corse + 21 Pyrénées → correction NN+DEVINE **DÉGRADE** (Table 4) ;
+seul DEVINE-seul transfère. **Correction Alps-specific** = MÊME OOD que notre M_H'1a JJA-plaine→Perdigão.
+→ VALIDE la stratégie multi-région (Alps humide + Med sèche). Notre pente = même levier que leur TPI/slope.
+
+**User 2026-06-04 : élargir aux régimes SECS d'été (fire weather), pas que l'Autriche humide.** Inventaire
+NOAA ISD montagne Med (lat34-46, elev>600m, actif post-2020) :
+- **Espagne 58 >600m / 20 >1500m** (Sierra Nevada, Ibérique) — **DÉJÀ dans prod ES → déjà dans les 264k
+  pairings 4-saisons !** Manque juste = calculer la PENTE des stations prod (NaN) pour flagger les raides.
+- **Italie 35 >600m** : Alpes-nord ingérées (M_I1, bbox lat43-49) mais **Apennins sud (lat<43) PAS ingérés**.
+- Turquie 54, Atlas Algérie/Maroc 44 (secs, max 2710m) — possibles mais lon→44 / lat→30 = grille ERA5 énorme.
+- **Grèce ISD INUTILISABLE** : 53 stations, 0 >800m (airports). À oublier malgré la demande user.
+→ Cœur fire dry-summer exploitable = Ibérie (déjà appariée) + Apennins IT-sud (nouveau) + S-France. ERA5
+re-ingest mam/jja/son grille étendue. Espagne dry-summer ≈ GRATUIT (déjà dans 264k). Scope géo à confirmer user.
+
+## Scope EU-Med fixé + Aqua DOWN 2026-06-04 — ERA5 re-ingest bloqué (PBS prêt)
+
+- **User a fixé périmètre = cœur EU-Med** (Ibérie + Apennins + Alpes + S-France). Grille ERA5 lon −10→20, lat 35→49.
+  Pas de Turquie/Atlas/Balkans (coût grille + couverture). Grèce inexploitable (ISD).
+- **M_I2b ERA5 re-ingest** : PBS `configs/hpc/ingest_era5_multiseason_med.pbs` ÉCRIT (grille étendue, stores
+  `_med`, ne clobber pas les originaux). MAIS **Aqua DOWN** : SSH "Connection refused" port 22 (Aqua était UP
+  plus tôt aujourd'hui — M_I0/M_I2a/smoke 22220282 → panne/maintenance login node QUT transitoire ; internet OK).
+  → **qsub le PBS med dès qu'Aqua revient.** 2e panne externe du jour (après NOAA NCEI).
+- **BLOQUE par Aqua** : M_I2b (submit ERA5), M_I2d (pairings), M_I3 (training). Tout le compute Aqua.
+- **Progrès Aqua-indépendant FAIT** : Apennins ingérés (77 stations IT-sud, NOAA AWS). DEM Apennins 59 tuiles.
+  `build_obs_steep.py` GÉNÉRALISÉ (merge prod + liste de blocs raides). Store `obs_unified_steep.zarr` rebuild
+  = **644 stations** (362 prod + 205 Alpes + 77 Apennins), slope des 282 new : 71 >15°, 101 >10°, max 38°
+  (Apennins médiane 1.75° = bcp côtiers/plats, 16 >15° dry-Med). CSV 644 rows.
+- **Pente stations prod FR/ES/PT (NaN)** : à faire SUR AQUA depuis grid.zarr (terrain déjà extrait), PAS de
+  gros fetch DEM local. Flag les dry-Med Espagne raides déjà dans les 264k pairings.
+- **Au retour d'Aqua, priorités** : (1) qsub `ingest_era5_multiseason_med.pbs` (ERA5 grille étendue, chemin
+  critique CDS) ; (2) pente prod depuis grid.zarr ; (3) push obs_unified_steep.zarr (644) ; (4) pairings
+  Alpes+Apennins ×4 saisons (M_I2d) ; (5) M_I3 training ablation. Monitor Aqua-recovery posé 2026-06-04.
+
+## M_I2b ERA5 re-ingest SOUMIS 2026-06-04 — Aqua revenu (user "connected")
+
+- Aqua de retour (aquarius02). PBS `ingest_era5_multiseason_med.pbs` poussé + soumis. **3 jobs chaînés afterok** :
+  **22224136** mam2023 (Q) → **22224138** jja2023 (H) → **22224139** son2023 (H). Grille `35,-10,49,20`
+  (lon −10→20, lat 35→49), sorties `era5_europe_hourly_{mam,jja,son}2023_med.zarr` (n'écrasent PAS les
+  originaux). `--no-z --max-days-per-req 7`, walltime 10h/job, ~10-12h total. CDS creds OK.
+- Watcher qstat sur 22224139 (dernier de la chaîne) armé → me réveille à la fin.
+- **Au retour de la chaîne** : vérifier les 3 stores `_med` écrits, PUIS M_I2d pairings Alpes+Apennins (282
+  new) ×{mam,jja,son} sur les stores `_med` + winter2223 (déjà OK). Winter pairings peuvent tourner AVANT
+  (store winter prêt). Aussi : push `obs_unified_steep.zarr` (644) sur Aqua + pente prod via grid.zarr.
+
+## M_I2b ERA5 re-ingest = GREEN 2026-06-04 — 3 stores _med écrits, grille étendue confirmée
+
+Chaîne 22224136/38/39 exit 0, ~1h45/saison (~3.5h total, vs 10h walltime). Stores
+`era5_europe_hourly_{mam,jja,son}2023_med.zarr` 1.6 Go chacun. Vérif jja_med : lon −10→20, lat 35→49,
+2208 ts, pressure{q,t,u,v}+surface{u10,v10,t2m,d2m}. ⚠️ LEÇON : ne PAS conclure "échec rapide" sur un job
+sorti vite de la queue — lire Exit_status (qstat -x) + vérifier outputs. Le watcher a vécu 3.5h, pas qq min.
+Donnée ERA5 4-saisons EU-Med PRÊTE. → M_I2d lançable (pairings 282 new Alps+Apennins, mam/jja/son sur _med, winter sur winter2223).
+
+## M_I2d pairings SOUMIS 2026-06-04 — 4 jobs parallèles, smoke Apennins GREEN
+
+- 282-new obs store `data/raw/obs_unified_steep_new.zarr` (82 MB, AT146+IT134+CH2) poussé Aqua. DEM/WC
+  Apennins fetchés Aqua (58 DEM + 9 WC, S3, dirs `srtm_tiles/` + `worldcover_esa/`). Smoke 22224844 exit 0 :
+  Apennins sud (41.7,15.95) DEM résolu (terrain 75→876 m), 12/12 pairings, surrogate UNDER-prédit crête
+  (pred 0.67-1.02 vs obs 1.55-3.10) — signal cohérent M_I2a.
+- **4 jobs PROD (Q, parallèle, `infer_steep_v2.pbs`)** : jja **22225925**, mam **22225926**, son **22225927**,
+  winter **22225928**. ERA5 routing : `_med` (mam/jja/son), `winter2223` (DJF). Sorties
+  `~/dsw/data/inference/steep_{season}_v2.parquet`, ~50-60k rows/saison. Walltime ≤12h, qq h attendu.
+- Watcher armé sur les 4. **Au retour** : merger steep_*_v2.parquet (~200k) + 264k prod → dataset M_I3.
+  Reste : pente prod FR/ES/PT (grid.zarr) pour flagger Espagne dry-Med dans le merge.
+- ⚠️ DEM prod Aqua = `~/dsw/data/raw/srtm_tiles/`, WC = `worldcover_esa/` (PAS copernicus_dsm_*).
+
+## Steep pairings GREEN 2026-06-04/05 — raw surrogate NO-GO confirmé À L'ÉCHELLE (le gap à fermer)
+
+4 jobs 22225925/26/27/28 exit 0. `steep_{season}_v2.parquet` = **344 615 pairings** (jja 68362/274stn,
+mam 74290/269, son 72634/272, winter 129329/276). Cols : station_id,timestamp,lat,lon,elev,u/v/speed_obs,
+u/v/w_pred,speed_pred,*_era5_baseline,era5_time_delta_minutes.
+- **surrogate brut vs obs : MAE 1.982 bias −1.447** ; ERA5 vs obs MAE 1.777 bias −0.970 → surrogate brut
+  PIRE qu'ERA5 sur terrain raide (attendu).
+- **vent fort >6 m/s (n=67730) : surrogate MAE 4.46 bias −4.36** → sous-prédit ≈⅔ les crêtes. Même
+  compression que Perdigão, à l'échelle sur 282 stations EU-Med raides. = LE gap que la correction doit fermer.
+- **M_I3 = train ablation AVEC ces exemples de crête** (vs M_H'1a plaine→dégradait Perdigão). Watcher leçon :
+  fausse-sortie sur blip réseau local "Can't assign requested address" (PAS Aqua, PAS port exhaustion) — re-tester.
+- M_I3 prep lancé : besoin = grid.zarr cache training pour steep×4saisons (vérifier si existe/à matérialiser),
+  merge steep 344k + prod 264k ≈ 609k, split watertight (hold-out steep + Perdigão), ablation scalaire vs encodeur.
+
+## M_I3a prep GREEN 2026-06-05 — cache à construire (1.45TB/~4h), smoke ENCODEUR prometteur
+
+- **Cache gate** : M_I2d inference rmtree ses grids (`infer_at_stations.py:525`, pas `--keep-grids`) → AUCUN
+  cache steep réutilisable. Matérialiser 604,869 grid.zarr ≈ **1.45 TB** (~2.4MB/grid, scratch 272TB OK), **~3-4h**
+  array 4 nœuds, PAR SAISON (store correct, `*_med` lon→20E + winter Δt6h) puis `overwrite_cache=false` (cache-hit).
+  Convention `{station_id}_{ts_tag}/grid.zarr` identique materialise↔loader → consommé verbatim.
+- **Combined** `combined_steep_plain_v2.parquet` = 604,869 pairings / 529 stations (279 steep + 250 plain, overlap 0).
+  Split watertight seed=42 : train **423 stn/489,376** ; val **106/115,493** dont **54 stations steep held-out/64,262**.
+  Perdigão = éval spatiale séparée (jamais dans le set).
+- **Smoke GREEN 2 arms** (job 22229533, 6 stn JJA, 2 ep, exit 0) : scalar val_mae 1.683→1.608 (Δ−0.162) ;
+  **encoder 1.623→1.517 (Δ−0.253)** → l'ENCODEUR fait MIEUX avec exemples de crête (le levier M_H'1g qui
+  plafonnait en plaine paye dès qu'il a du raide). RAW steep 1.770 bias −0.866. Aucun crash, surrogate frozen 29M OK.
+- **Plan prod (À CONFIRMER user)** : cache (~4h, 4 nœuds) PUIS 2 trainings // scalar (H100 ~24h) + encoder (H100 ~30h).
+  ⚠️ 8 ep × 489k peut dépasser walltime → ~6 ep (M_H'1a convergeait ep5), best.pt/epoch = reprise OK.
+- Fichiers : `configs/training/devine_style_M_I3_{scalar,encoder}{,_smoke}.yaml`, `configs/hpc/devine_style_M_I3_{smoke,materialise_cache,scalar,encoder}.pbs`, `services/module2b-surrogate/{build_combined_steep_plain_parquet,materialise_combined_cache}.py`.
+
+## M_I3 PRODUCTION lancé 2026-06-06 (user GO : cache + 2 bras, 6 ep)
+
+- epochs 8→**6** dans les 2 configs Aqua (M_H'1a convergeait ep5). **Cache array soumis : 22231418[]** (Q,
+  -J 0-3, 16cpus, 12h walltime, ~4h attendu, 1.45TB).
+- ⚠️ PBS Aqua REJETTE `depend=afterokarray:...[]` ("illegal -W value") → pas de chaînage auto. **Méthode :
+  watcher robuste sur 22231418 (tolère rc=255 ssh-blip, exit seulement si rc=1 = ssh-ok+job-absent) → au retour
+  je soumets `devine_style_M_I3_scalar.pbs` + `_encoder.pbs` (H100, walltime 24h/30h, best.pt/epoch).**
+- LEÇON watcher : la v1 (`! ssh ...`) sortait faux sur blip réseau ; la v2 teste rc==1 explicitement.
+- VERDICT attendu (au retour des 2 trainings) : val_mae held-out 54 stations steep + Perdigão centre vs raw
+  (Perdigão raw 1.37 ; M_H'1a/f/g plafonnaient 2.27/2.15/2.32). Smoke encoder déjà Δ−0.25 prometteur.
+
+## M_I3 cache GREEN + 2 trainings soumis 2026-06-06
+
+- Cache array 22231418[] : **4/4 tâches Exit 0**, ~4h runtime (watcher a vécu 3.5-4h). Cache 605k grid.zarr
+  construit (smoke avait validé la consommation cache-hit). find count en bg (bmpbh8cca, confirmation à venir).
+- **2 trainings soumis (gpu_batch, Q)** : scalaire **22231497** (96GB, 24h), encodeur **22231498** (96GB, 30h).
+  6 epochs, best.pt/epoch (reprise OK). Cache lu dès epoch 1 → cache vide = crash rapide (pas 20h gâchées).
+- Watcher robuste sur les 2 (grep 2223149, rc==1, cap 50h) → me réveille quand LES DEUX finissent.
+- **AU RETOUR = VERDICT** : (1) qstat -x Exit_status des 2 ; (2) val_mae held-out 54 stations steep + Δ vs raw
+  steep 1.770 ; (3) re-éval Perdigão centre (audit_devine_perdigao) avec les 2 best.pt vs raw 1.37 / M_H'1a-f-g.
+  Si Perdigão baisse nettement sous 2.15 → voie ANN réhabilitée par exemples de crête. Sinon → mur = surrogate.
+
+## M_I3 trainings TERMINÉS 2026-06-08 — held-out −22% GREEN, encodeur gagne (verdict Perdigão en cours)
+
+- Les 2 jobs tués au walltime (Exit −29 : scalaire 24h, encodeur 30h) car **~5.5h/epoch** (489k pairings,
+  forward surrogate par pairing = bien plus lourd qu'estimé). best.pt/epoch a sauvé le meilleur (ep2 les deux).
+- **Held-out val (106 stn dont 54 steep)** : RAW mae 1.909 bias −1.391.
+  - scalaire (M_H'1f) best ep2 : **1.518 (Δ−0.391, −20.5%)** bias +0.157
+  - encodeur (M_H'1g) best ep2 : **1.482 (Δ−0.427, −22.4%)** bias +0.109 ← **GAGNE**
+  - Convergence ep2 puis léger overfit (ep3-4 val remonte) → 6 ep inutiles, kill sans coût.
+- **L'encodeur (qui plafonnait M_H'1g en plaine) BAT le scalaire avec exemples de crête** = hypothèse re-scope
+  validée à l'échelle. Biais −1.39→+0.1 = quasi corrigé.
+- ⚠️ best.pt : scalaire 108KB (ANN 26k), encodeur 379KB (CNN 92.6k). Logs `data/models/surrogate_v2_devine_M_I3_*/train.log`.
+- **VERDICT DÉCISIF EN COURS** : steep-54 seul + Perdigão centre (vs raw 1.37 ; M_H'1a/f/g 2.27/2.15/2.32).
+  ⚠️ config eval Perdigão DOIT matcher l'archi (scalaire topo_dim12+phys ; encodeur use_terrain_encoder) sinon crash shape.
+
+## M_I4 VERDICT 2026-06-08 — correction GÉNÉRALISE au steep (−22%), Perdigão = outlier sur-corrigé
+
+Job 22258178 exit 0, 3min27, les 2 bras (eval_perdigao_M_I4.pbs).
+| | held-out val (54 steep + 52 plain) | Perdigão centre | bias Perdigão |
+|---|---|---|---|
+| raw | 1.909 (bias −1.39) | **1.37** | +0.58 |
+| M_I3 scalaire | 1.518 (−20.5%, bias +0.16) | 2.324 | +2.11 |
+| M_I3 encodeur | **1.482 (−22.4%, bias +0.11)** | **2.193** | +1.92 |
+(rappel plaine : M_H'1a/f/g Perdigão 2.27/2.15/2.32)
+
+- **SUCCÈS cas steep général** : la correction entraînée AVEC exemples de crête généralise au terrain raide
+  held-out (−22%, biais −1.4→+0.1). **Encodeur > scalaire partout** (held-out ET Perdigão) = levier confirmé.
+  Au-delà de DEVINE (qui dégradait hors-Alpes). **Voie ANN réhabilitée pour le steep général.**
+- **Perdigão reste sur-corrigé** (2.19-2.32 > raw 1.37). CAUSE = **raw Perdigão DÉJÀ bon** (bias +0.58, le
+  surrogate NE sous-prédit PAS ce centre) → la correction (calibrée sur le biais général −1.4 m/s) SUR-corrige
+  un centre qui n'en avait pas besoin (+0.58→+1.9). **Perdigão = OUTLIER microrelief où raw est déjà juste,
+  PAS preuve que le surrogate est un mur.** Propagation 100% lisse les 2.
+- **REVISION verdict antérieur** : « mur = surrogate frozen » était TROP CATÉGORIQUE. La correction AMÉLIORE
+  le steep en général ; Perdigão est un cas spécial de sur-correction (raw déjà bon). Phase I (surrogate v3)
+  MOINS justifiée qu'on pensait — le surrogate fait correctement le steep général, l'ANN le corrige.
+- ⚠️ steep-54 ISOLÉ pas encore calculé (−22% = agrégé 54steep+52plain) → à faire pour solidifier le claim steep.
+- Livrables : `data/validation/phase_H_prime_perdigao_M_I3_{scalar,encoder}/perdigao_summary.json`.
+  best.pt encodeur = modèle retenu (1.482 held-out, biais quasi nul). Branche `feat/devine-style-correction`.
+
+## M_I4 PERDIGÃO RE-CADRÉ 2026-06-09 (skepticism user JUSTE) — sur-correction = artefact VENT FAIBLE
+
+User : « Perdigão a bcp de points/hauteurs, on ne peut pas statuer sur un seul ». Vérifié : obs = 48 mâts × **14
+hauteurs** mais SEUL 10m bien échantillonné (90% valid ; autres 2-64%), et **IOP = VENT FAIBLE** (10m mean 1.82,
+pairings obs mean 1.64). Éval `audit_devine_perdigao.py` = like-for-like CORRECT (surrogate extrait au niveau AGL
+matchant l'obs, ligne 166 ; hauteur 10m argmin). Sous-éch. étalé sur l'IOP. Pas de bug — mais slice non-représentatif.
+**Stratification par vent (encodeur, 376 pairings)** :
+| obs vent | n | MAE corr | MAE raw | bias corr | bias raw |
+|---|---|---|---|---|---|
+| <1 | 174 (46%) | 2.65 | 1.53 | +2.65 | +1.48 |
+| 1-2 | 79 | 2.25 | 1.12 | +2.25 | +0.75 |
+| 2-3 | 58 | 1.64 | 0.95 | +1.61 | +0.02 |
+| 3-5 | 52 | **1.24** | 1.33 | +0.25 | −1.24 |
+| >5 | 13 | **1.95** | 2.81 | −1.71 | −2.81 |
+- **84% des pairings Perdigão <3 m/s** = calme où raw DÉJÀ bon (MAE ~1, biais ~0) → la correction SUR-AJOUTE
+  (biais +1.6 à +2.65) → c'est ça le "2.19" agrégé.
+- **≥3 m/s (régime sous-prédit), la correction AMÉLIORE Perdigão** : 3-5 corr 1.24<raw 1.33 (biais −1.24→+0.25) ;
+  >5 corr 1.95<raw 2.81 (biais −2.81→−1.71). **La correction marche AUSSI à Perdigão, là où elle doit.**
+- **VERDICT RE-CADRÉ** : "sur-correction Perdigão" = artefact VENT FAIBLE, PAS échec terrain raide. Le plafond
+  M_H'1a/f/g 2.27/2.15/2.32 = MÊME artefact (IOP dominé par le calme, 1 hauteur). Phase I NON justifiée.
+- **RÉSIDU RÉEL = sur-correction en VENT FAIBLE** (ajoute du vent quand raw déjà bon). Fixable : loss τ-asymétrie
+  pousse à sur-corriger le calme ; gating régime / plus d'exemples calmes. Cohérent vieille note "calme sur-corrige".
+- CSV par-pairing : `data/validation/phase_H_prime_perdigao_M_I3_{enc,sca}/perdigao_propagation.csv` (cols speed_obs,
+  speed_corr_centre, speed_raw_centre). À solidifier : stratifier le steep-54 held-out par vent aussi.
+
+## M_I5 régime-aware lancé 2026-06-09 — smoke confirme (régime > symétrique), re-train soumis
+
+- Fix sur-correction calme : `loss_mode=regime` (`devine_speed_loss_regime`, train_v2_devine_style.py) =
+  pénalité over-pred ×2 en CALME (obs<3 m/s, gate sigmoid calm_width 1.5), garde τ-asym 0.6/0.4 en vent fort.
+- **Smoke 22283593 exit 0, 2 variantes (1 ep, subset)** :
+  | variante | bias LOW<3 | mae HIGH | bias HIGH |
+  | RAW | +0.16 | 2.37 | −2.07 |
+  | **régime** | **+1.10** | 1.84 | −0.91 |
+  | symétrique τ0.5 | +1.53 | 1.80 | −0.44 |
+  → **régime GAGNE** (réduit le + la sur-correction calme en gardant le gain vent-fort). Retenu prod.
+- **Re-train régime SOUMIS : 22286112** (encodeur H100 36h, 6 ep, sortie `surrogate_v2_devine_M_I5_encoder`).
+- M_I5a solidify eval 22283594 TUÉ walltime (1h trop court : load 64k grid.zarr lent) → **re-soumis 22286113 (4h)**.
+- Watcher sur l'éval steep-54 d'abord, puis sur le re-train (~33h). **AU RETOUR** : (1) steep-54 stratifié confirme
+  régime ; (2) re-train régime → re-éval Perdigão stratifiée + held-out : le LOW-bias doit chuter, le steep gain rester.
+
+## M_I5a steep-54 stratifié = CONFIRME (2026-06-10) — régime hors Perdigão validé
+
+Job 22286113 exit 0 (4h OK). M_I3 encodeur sur 54 stations crête held-out :
+- OVERALL raw MAE 1.947 bias −1.44 → **corr 1.602 (−18%) bias +0.10**.
+- <1 m/s (n1089) : raw 0.79 → corr 1.758 (sur-corrigé, raw déjà bon) ; bias +0.65→+1.76.
+- **>6 m/s (n10848) : raw MAE 4.73 → corr 3.02 (−36%) ; bias −4.67 → −2.73** = gain ÉNORME en vent fort (régime fire).
+→ **histoire régime CONFIRMÉE hors Perdigão** : aide massif vent fort (le régime critique), sur-correction calme.
+- **Re-train régime 22286112 (R, 8h/36h) ep0** : val 1.498 (Δ−0.411), bias +0.07. LOW(<3,n45584) bias +1.11 raw
+  −0.05 mae 1.283 ; HIGH(n64101) bias −0.672 raw −2.344 mae 1.651<2.640. → calme moins sur-corrigé, vent-fort gardé.
+  Watcher sur 22286112 (~33h). AU RETOUR : re-éval Perdigão+held-out stratifiés du modèle régime vs M_I3.
+
+## M_I5 régime re-train DONE 2026-06-11 — val 1.464 (≤M_I3 1.482), calme moins sur-corrigé
+
+Job 22286112 exit 0, 34h, **6 ep complets**. best **ep2 val_mae 1.464** bias +0.07. Trajectoire LOW(<3)/HIGH
+bias (full val) : ep2 LOW +0.944 mae 1.174 (raw −0.05/0.88) | HIGH −0.766 mae 1.670 (raw −2.344/2.640).
+ep4 LOW +0.896. → **LOW over-correction RÉDUITE** (vs original asym) **en gardant le gain HIGH**. Globalement
+≥ M_I3 (1.464 ≤ 1.482). best.pt = `data/models/surrogate_v2_devine_M_I5_encoder/best.pt` (ep2, encodeur arch).
+→ Verdict eval régime (Perdigão stratifié + steep-54 stratifié) vs M_I3 = EN COURS. Compare au M_I3 :
+Perdigão overall 2.19 (<1 bias +1.76, ≥3 aide) ; steep-54 overall 1.602 (<1 +1.76, >6 corr bias −2.73 mae 3.02).
+
+## ⏸️ REPRISE NOUVELLE SESSION 2026-06-11 — évals régime EN FILE Aqua
+
+Verdict eval régime soumis, **EN FILE A100** (gros array `22306411[*]` occupe les GPU) :
+- **22306889** = Perdigão stratifié (régime) → `data/validation/phase_H_prime_perdigao_M_I5_encoder/perdigao_summary.json`
+- **22306888** = steep-54 stratifié (régime) → `data/validation/phase_H_prime_M_I5c_steep54*/` (.log)
+**À LA REPRISE** : `ssh maitreje@aqua 'qstat -x -f 22306889 22306888 | grep Exit_status'`. Si done+exit0 → lire
+les 2 sorties, stratifier par vent, comparer **RÉGIME vs M_I3** (M_I3 ref : Perdigão overall 2.19 / <1 bias +1.76 /
+≥3 aide ; steep-54 overall 1.602 / <1 bias +1.76 / >6 corr bias −2.73 mae 3.02 / overall −18%). Si encore Q → re-attendre
+(re-`qsub` si tué walltime ; steep-54 = 4h walltime, Perdigão 1h). **Attendu** : régime baisse le biais calme (<3) en
+gardant le gain >6. best.pt régime = `data/models/surrogate_v2_devine_M_I5_encoder/best.pt` (ep2, val 1.464 ≤ M_I3 1.482).
+⚠️ Watchers de cette session NON persistants → re-checker manuellement. Reste après verdict : figer le modèle retenu
+(régime si confirmé, sinon M_I3 encodeur), commit M_I (loss régime + scripts), écrire le résultat. Phase I non justifiée.
 
 ## PLAN CONDITIONNEL post-M_H'1f (CADUC — voir verdict M_H'1g ci-dessus : encodeur n'a pas marché)
 

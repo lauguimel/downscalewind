@@ -1,5 +1,23 @@
 # Department memory — DownscaleWind
 
+## ERA5 hourly mam/jja/son 2023 = grille lon -10→10E SEULEMENT (2026-06-03, M_I2a)
+
+Les 3 stores `era5_europe_hourly_{mam,jja,son}2023.zarr` ne couvrent QUE lon -10→10E → coupent 87%
+des stations Alpes ORIENTALES (AT, IT-Est, lon>10E ; 178/205). `era5_europe_winter2223.zarr` va à 26.8E
+(mais Δt=6h). Tout pairing est-européen mam/jja/son exige une RÉ-INGESTION ERA5 grille étendue (~18E,
+`ingest_era5_europe_hourly.py`). ⚠️ TOUJOURS vérifier `coords/lon` min/max d'un store AVANT de pairing
+des stations hors FR/ES/PT. `infer_at_stations.load_obs_pairings` n'a aucun filtre pays/slope → le
+filtrage station se fait via un obs-store dédié (subset), pas un flag CLI.
+
+## 4 saisons pairings DÉJÀ FAITES, radcloud ABSENT (2026-06-03, M_I0)
+
+`noaa_seasons_all_v2.parquet` sur Aqua `~/dsw/data/inference/` = **264 773 rows** (MAM 69007 +
+JJA 63022 + SON 75734 + winter2223 57010). Jobs re-inference 22066177/78/79 (2026-05-27) complétés.
+ERA5 hourly 4 stores présents (`era5_europe_hourly_{mam,jja,son}2023.zarr` + `era5_europe_winter2223.zarr`).
+grid.zarr caché SEULEMENT pour JJA (`phase_H_prime_M_H1_jja_cache`, 60971 dirs) ; MAM/SON à
+matérialiser mais ERA5-hourly caches existent + parquets faits → pairings non bloqués.
+`era5_radcloud_*.zarr` (ssrd/tcc) = ABSENT partout (jamais stocké). Tout plan ssrd/tcc = ré-ingest CDS.
+
 ## Config M_H1 era5_store = JJA-2023 → override pour tout eval 2017 IOP (2026-06-02, M_H'1c)
 
 `devine_style_full_M_H1.yaml` a `era5_store: era5_europe_hourly_jja2023.zarr`. Tout eval sur un

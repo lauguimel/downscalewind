@@ -108,3 +108,4 @@ mlruns/
 
 # Fichiers NetCDF temporaires
 tmp_*.nc
+data/inference/

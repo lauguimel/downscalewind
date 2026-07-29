@@ -291,9 +291,34 @@ ERA5 vector (408) + features topo locales → ANN correction (MLP small, ~10k pa
    M_H'3 — audit final + décision Phase I
 ```
 
-## 7. Decisions taken after M_H'0 / M_H'1 (à remplir post-mission)
+## 7. Decisions taken after M_H'0 / M_H'1
 
-(vide)
+### Verdict M_H'1c/1f/1g (2026-06-02/03) — voie ANN plafonne sur Perdigão, 3 leviers convergents
+- M_H'1a descripteurs 8 → Perdigão centre 2.27 ; M_H'1f phys 12 → 2.15 ; M_H'1g encodeur 180×180 → 2.32 (raw cible 1.37).
+- NOAA val préservé partout (1.21–1.23, −32% MAE, bat ERA5). Propagation 100% lisse.
+- M_H'1a déployable pour son domaine (été plaine EU, fire weather). Perdigão = OOD terrain raide.
+
+### RE-SCOPE user 2026-06-03 — M_H'1h (verdict 1g jugé PRÉMATURÉ : l'ANN n'a jamais eu d'obs crête)
+- L'encodeur M_H'1g a la capacité d'une correction position-dépendante mais a été entraîné sur NOAA JJA
+  plaine → aucun exemple de crête → backprop sans signal. Conclure « mur = surrogate » = prématuré.
+- Décisions user : (1) obs montagne **raide** via NOAA ISD +CH/AT/IT (SYNOP-MF/OGIMET morts ; AEMET écarté,
+  pas de clé) ; (2) ablation **M_H'1f scalaire VS M_H'1g encodeur** sur dataset combiné 4 saisons + obs crête.
+- Données 4 saisons DÉJÀ faites : `noaa_seasons_all_v2.parquet` 264 773 rows (Aqua). radcloud absent (pas requis).
+- Conditionnel : si M_H'1h répare Perdigão → voie ANN réhabilitée, étage B PAS le mur. Si plafonne AVEC obs
+  crête → renforce (sans prouver) « mur = surrogate » → Phase I (surrogate v3 terrain raide) justifiée.
+
+### Programme M_H'1h
+- **M_I1** Ingestion obs raide (NOAA +SZ/AU/IT) + helper pente + DEM Alpes → `obs_unified_steep.zarr`.
+  **DONE GREEN 2026-06-03** : 567 stations (362 prod + 205 Alps AT/IT/CH), 55 Alps >15° pente (max 38°,
+  couvre Perdigão ~17°). NCEI down → bascule miroir AWS (`--source aws`). Store/code LOCAUX, pas commité.
+- **M_I2** Pairings 4 saisons obs montagne (inférence v2). Smoke GREEN 2026-06-03 (surrogate sous-prédit
+  la crête = signal confirmé). **ÉLARGI EU-Med dry-summer 2026-06-04** (user) : Ibérie (déjà dans 264k pairings)
+  + Apennins IT-sud (nouveau) + Alpes (205) + S-France. DEVINE = Alps-only + dégrade hors Alpes → valide multi-région.
+  - **M_I2b** Ré-ingest ERA5 mam/jja/son grille étendue lon −10→20 lat 35→49 (CDS Aqua). EN COURS 2026-06-04.
+  - **M_I2c** Ingest Apennins IT-sud (NOAA AWS, slope-filtré) + calcul pente stations prod FR/ES/PT (flag dry-Med raides).
+  - **M_I2d** Pairings Alpes + Apennins × 4 saisons (après M_I2b). winter2223 déjà OK (lon→26.8). Grèce inexploitable (ISD).
+- **M_I3** Training ablation M_H'1f (scalaire + pente) ET M_H'1g (encodeur), LOSO hold-out montagne + Perdigão.
+- **M_I4** Verdict Boss : voie ANN réhabilitée OU Phase I confirmée.
 
 ## 8. Pointers
 
