@@ -1,0 +1,62 @@
+#!/bin/bash -l
+#PBS -N e2_stage1_pflt
+#PBS -l select=1:ncpus=8:mem=64GB:ngpus=1:gpu_id=H100
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -m n
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+
+CAMPAIGN="/scratch/maitreje/dsw/complex_terrain_v1"
+DATA="/scratch/maitreje/dsw/training_v2"
+RESUME="$HOME/dsw/data/models/surrogate_v2_e2_stage1_smoke/best.pt"
+OUT="$HOME/dsw/data/models/surrogate_v2_e2_stage1_preflight"
+
+mkdir -p "$OUT"
+[ -d "$DATA" ] || { echo "MISSING:$DATA"; exit 1; }
+[ -f "$RESUME" ] || { echo "MISSING:$RESUME"; exit 1; }
+[ -f "$CAMPAIGN/manifests/dataset_v2_norm.yaml" ] || { echo "MISSING:dataset_v2_norm.yaml"; exit 1; }
+nvidia-smi >/dev/null || { echo "GPU missing"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:${LD_LIBRARY_PATH:-}"
+done
+
+cd "$HOME/dsw/services/module2b-surrogate"
+python -u train_v2_e2.py \
+  --data-dir "$DATA" \
+  --splits-yaml "$CAMPAIGN/manifests/dataset_v2_splits.yaml" \
+  --norm-yaml "$CAMPAIGN/manifests/dataset_v2_norm.yaml" \
+  --out-dir "$OUT" \
+  --resume "$RESUME" \
+  --epochs 1 \
+  --batch-size 4 \
+  --num-workers 4 \
+  --max-train-cases 32 \
+  --max-val-cases 16 \
+  --obs-dropout 0.5 \
+  --obs-height-m 10.0 \
+  --preset base \
+  --loss-type s4 \
+  --w-amp 0.1 \
+  --w-div 0.05 \
+  --lr 5e-5 \
+  --weight-decay 0.05 \
+  --warmup-epochs 0 \
+  --use-geo \
+  --include-slopes \
+  --use-residual \
+  --residual-baseline-mode surface \
+  --agl-weight-alpha 2.0 \
+  --agl-weight-height 50.0 \
+  --target-agl-levels agl_0_100_24 \
+  --toggle-monitor \
+  --toggle-epochs "1" \
+  --toggle-n-cases 8 \
+  --toggle-warn-epoch 1 \
+  --toggle-warn-threshold 1e-4 \
+  --device cuda

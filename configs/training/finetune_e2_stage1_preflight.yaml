@@ -1,0 +1,46 @@
+mission: M_H1_preflight
+stage: E.1
+strategy:
+  id: A
+  name: sparse_additive_token_embedding
+  rationale: Same as M_H0_smoke. Pre-flight = 32 train + 16 val cases x 1 epoch on the FULL pipeline (loss s4, geo, residual, agl weights) to confirm batch size fits H100 64GB and toggle monitor code does not crash before the 12h full run.
+paths:
+  data_dir: /scratch/maitreje/dsw/training_v2
+  splits_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_splits.yaml
+  norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+  resume: $HOME/dsw/data/models/surrogate_v2_e2_stage1_smoke/best.pt
+  out_dir: $HOME/dsw/data/models/surrogate_v2_e2_stage1_preflight
+model:
+  preset: base
+  terrain_in_channels: 4
+  geo_channels: 2
+  era5_flat_dim: 408
+  target_agl_levels: agl_0_100_24
+dataset:
+  use_geo: true
+  include_slopes: true
+  use_residual: true
+  residual_baseline_mode: surface
+  obs_dropout: 0.5
+  obs_height_m: 10.0
+  max_train_cases: 32
+  max_val_cases: 16
+training:
+  epochs: 1
+  batch_size: 4
+  num_workers: 4
+  lr: 5.0e-5
+  weight_decay: 0.05
+  warmup_epochs: 0
+  loss_type: s4
+  w_amp: 0.1
+  w_div: 0.05
+  agl_weight_alpha: 2.0
+  agl_weight_height: 50.0
+  checkpoint_every: 0
+toggle_monitor:
+  enabled: true
+  epochs: "1"
+  n_cases: 8
+  warn_epoch: 1
+  warn_threshold: 1.0e-4
