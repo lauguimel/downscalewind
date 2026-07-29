@@ -1,0 +1,77 @@
+#!/bin/bash -l
+#PBS -N ingest_era5_100m
+#PBS -l select=1:ncpus=2:mem=16GB
+#PBS -l walltime=10:00:00
+#PBS -j oe
+#PBS -m n
+
+# FuXi-CFD benchmark — ERA5 NATIVE 100 m wind (u100/v100) ingestion.
+# The FuXi-CFD model (Lin Chensen et al., Nat Commun 2026) takes a coarse 100 m
+# wind field as input. Our existing era5 stores have pressure levels + surface
+# {u10,v10,t2m,d2m} but NO 100 m. This PBS writes SEPARATE light single-level
+# stores `era5_100m_*` (never touches the existing stores).
+#
+# Variables (single-level, hourly):
+#   100m_u_component_of_wind, 100m_v_component_of_wind   -> short u100, v100
+#   (NO pressure levels -> --surface-only -> ~30x lighter than the _med stores)
+#
+# Grids:
+#   EU-Med seasons (mam/jja/son 2023 + DJF 2022-23): lat 35->49, lon -10->20
+#     (same as the era5_europe_hourly_*_med stores).
+#   Perdigao IOP (perdigao2017): Portugal box lat 39.0->40.5, lon -8.5->-6.5,
+#     May-June 2017 (matches audit_devine_perdigao).
+#
+# CDS 2026 cost-limit: single-level 100 m wind is light, but we keep
+#   --max-days-per-req 7 (proven safe). Each season is a separate qsub; override
+#   via -v SEASON=jja2023. Chain them with `qsub -W depend=afterok:<jobid>` to
+#   respect the CDS sequential rate-limit.
+
+cd $PBS_O_WORKDIR
+
+BASE="$HOME/dsw"
+
+: "${SEASON:=mam2023}"
+
+# Map SEASON -> (START, END months, BBOX). EU-Med grid for the seasonal stores,
+# narrower Portugal box for the Perdigao IOP store.
+EU_BBOX="35,-10,49,20"
+case "$SEASON" in
+    mam2023)     START=2023-03; END=2023-05; BBOX="$EU_BBOX" ;;
+    jja2023)     START=2023-06; END=2023-08; BBOX="$EU_BBOX" ;;
+    son2023)     START=2023-09; END=2023-11; BBOX="$EU_BBOX" ;;
+    winter2223)  START=2022-12; END=2023-02; BBOX="$EU_BBOX" ;;
+    perdigao2017) START=2017-05; END=2017-06; BBOX="39.0,-8.5,40.5,-6.5" ;;
+    *) echo "Unknown SEASON=$SEASON (mam2023|jja2023|son2023|winter2223|perdigao2017)"; exit 1 ;;
+esac
+
+OUTPUT="$BASE/data/raw/era5_100m_${SEASON}.zarr"
+echo "SEASON=$SEASON | START=$START | END=$END | BBOX=$BBOX | OUTPUT=$OUTPUT"
+
+if [ -d "$OUTPUT" ] && { [ -f "$OUTPUT/zarr.json" ] || [ -f "$OUTPUT/.zgroup" ]; }; then
+    echo "OUTPUT exists, refusing to overwrite. Delete first if you really mean to."
+    exit 0
+fi
+
+module load Miniconda3/24.9.2-0
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+
+# Verify cdsapi credentials before bulk
+if [ ! -f "$HOME/.cdsapirc" ]; then
+    echo "MISSING: $HOME/.cdsapirc"
+    exit 1
+fi
+python -c "import cdsapi; print('cdsapi ok')" || exit 1
+
+cd "$BASE"
+# Single-level 100 m wind only (--surface-only), hourly, EU-Med grid. The two
+# 100 m wind variables override the default {u10,v10,t2m,d2m} surface set.
+python -u services/data-ingestion/ingest_era5_europe_hourly.py \
+    --output "$OUTPUT" \
+    --start "$START" \
+    --end "$END" \
+    --bbox "$BBOX" \
+    --surface-only \
+    --surface-vars "100m_u_component_of_wind,100m_v_component_of_wind" \
+    --max-days-per-req 7 \
+    --cache-dir "/scratch/maitreje/dsw/era5_100m_cache_${SEASON}"

@@ -57,7 +57,11 @@ log = get_logger("ingest_era5_europe_hourly")
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-PRESSURE_LEVELS = [1000, 925, 850, 700, 500, 400, 300, 250, 200, 150]
+# Canonical 10 plevels for surrogate v2 (verified against
+# /scratch/maitreje/dsw/training_v2/<case>/grid.zarr input/era5_pressure_levels
+# on 2026-05-26 — engineer.md said [...,150] but the trained surrogate v2 used
+# [...,600,...,200] so we align to the actual training data).
+PRESSURE_LEVELS = [1000, 925, 850, 700, 600, 500, 400, 300, 250, 200]
 
 # dataset_v2 surrogate v2 expects {u, v, t, q} on pressure levels and
 # {t2m, d2m, u10, v10} on surface (cf. engineer.md, dataset_v2_vit.py).
@@ -82,6 +86,8 @@ CDS_TO_SHORT = {
     "specific_humidity": "q",
     "10m_u_component_of_wind": "u10",
     "10m_v_component_of_wind": "v10",
+    "100m_u_component_of_wind": "u100",
+    "100m_v_component_of_wind": "v100",
     "2m_temperature": "t2m",
     "2m_dewpoint_temperature": "d2m",
 }
@@ -175,10 +181,14 @@ def download_month(
     pressure_vars: list[str],
     surface_vars: list[str],
     days: list[str] | None = None,
+    surface_only: bool = False,
 ):
     """Download one month of ERA5 hourly for the bbox. Resumable.
 
     If `days` is None, full month; otherwise restrict to given list of '01' style.
+    If `surface_only` is True, the pressure-level request is skipped entirely
+    (returns pl_path=None) — used by the light single-level stores (e.g. 100 m
+    wind for the FuXi-CFD benchmark).
     """
     n_days = calendar.monthrange(year, month)[1]
     if days is None:
@@ -192,7 +202,9 @@ def download_month(
 
     area = [bbox["north"], bbox["west"], bbox["south"], bbox["east"]]
 
-    if _nc_is_valid(pl_path):
+    if surface_only:
+        pl_path = None
+    elif _nc_is_valid(pl_path):
         log.info(
             "  Pressure %s: skipping (valid NetCDF exists, %.0f MB)",
             tag, pl_path.stat().st_size / 1e6,
@@ -246,56 +258,83 @@ def download_month(
     return pl_path, sf_path
 
 
-def nc_to_arrays(pl_path: Path, sf_path: Path, with_z: bool = True) -> dict:
-    """Load monthly NetCDF (pressure + surface) into numpy arrays."""
+def nc_to_arrays(
+    pl_path: Path | None,
+    sf_path: Path,
+    with_z: bool = True,
+    surface_only: bool = False,
+    surface_short_names: list[str] | None = None,
+) -> dict:
+    """Load monthly NetCDF (pressure + surface) into numpy arrays.
+
+    When `surface_only` is True, only the surface NetCDF is read and the
+    coords/time come from the surface dataset. `surface_short_names` selects
+    which surface variables to extract (defaults to {u10,v10,t2m,d2m}); only
+    those present in the file are returned.
+    """
     import xarray as xr
 
-    pl_ds = xr.open_dataset(pl_path)
     sf_ds = xr.open_dataset(sf_path)
-
     # Force N→S lat order for consistency with shared schema.
-    if pl_ds.latitude[0] < pl_ds.latitude[-1]:
-        pl_ds = pl_ds.isel(latitude=slice(None, None, -1))
+    if sf_ds.latitude[0] < sf_ds.latitude[-1]:
         sf_ds = sf_ds.isel(latitude=slice(None, None, -1))
 
-    level_var = "pressure_level" if "pressure_level" in pl_ds.dims else "level"
-    if level_var != "level":
-        pl_ds = pl_ds.rename({level_var: "level"})
+    out: dict = {}
 
-    time_var = "valid_time" if "valid_time" in pl_ds.dims else "time"
-    times = pl_ds[time_var].values.astype("datetime64[ns]")
+    if surface_only:
+        time_var = "valid_time" if "valid_time" in sf_ds.dims else "time"
+        out["times"] = sf_ds[time_var].values.astype("datetime64[ns]")
+        out["lats"] = sf_ds.latitude.values.astype(np.float32)
+        out["lons"] = sf_ds.longitude.values.astype(np.float32)
+        out["levels"] = np.array([], dtype=np.float32)
+    else:
+        pl_ds = xr.open_dataset(pl_path)
+        if pl_ds.latitude[0] < pl_ds.latitude[-1]:
+            pl_ds = pl_ds.isel(latitude=slice(None, None, -1))
 
-    out = {
-        "times": times,
-        "lats": pl_ds.latitude.values.astype(np.float32),
-        "lons": pl_ds.longitude.values.astype(np.float32),
-        "levels": pl_ds.level.values.astype(np.float32),
-        "u": pl_ds.u.values.astype(np.float32),
-        "v": pl_ds.v.values.astype(np.float32),
-        "t": pl_ds.t.values.astype(np.float32),
-        "q": pl_ds.q.values.astype(np.float32),
-    }
-    if with_z and "z" in pl_ds.data_vars:
-        out["z"] = pl_ds.z.values.astype(np.float32)
+        level_var = "pressure_level" if "pressure_level" in pl_ds.dims else "level"
+        if level_var != "level":
+            pl_ds = pl_ds.rename({level_var: "level"})
 
-    out["u10"] = sf_ds.u10.values.astype(np.float32)
-    out["v10"] = sf_ds.v10.values.astype(np.float32)
-    out["t2m"] = sf_ds.t2m.values.astype(np.float32)
-    if "d2m" not in sf_ds.data_vars:
-        raise RuntimeError(
-            f"{sf_path.name} is missing d2m — CDS request must include "
-            "'2m_dewpoint_temperature'."
-        )
-    out["d2m"] = sf_ds.d2m.values.astype(np.float32)
+        time_var = "valid_time" if "valid_time" in pl_ds.dims else "time"
+        out["times"] = pl_ds[time_var].values.astype("datetime64[ns]")
+        out["lats"] = pl_ds.latitude.values.astype(np.float32)
+        out["lons"] = pl_ds.longitude.values.astype(np.float32)
+        out["levels"] = pl_ds.level.values.astype(np.float32)
+        out["u"] = pl_ds.u.values.astype(np.float32)
+        out["v"] = pl_ds.v.values.astype(np.float32)
+        out["t"] = pl_ds.t.values.astype(np.float32)
+        out["q"] = pl_ds.q.values.astype(np.float32)
+        if with_z and "z" in pl_ds.data_vars:
+            out["z"] = pl_ds.z.values.astype(np.float32)
+        pl_ds.close()
 
-    pl_ds.close()
+    wanted = surface_short_names or ["u10", "v10", "t2m", "d2m"]
+    out["surface_keys"] = []
+    for short in wanted:
+        if short not in sf_ds.data_vars:
+            # ERA5 100 m winds land as u100/v100; fail loud if a requested
+            # surface var is genuinely absent (bad CDS request).
+            raise RuntimeError(
+                f"{sf_path.name} is missing surface var '{short}' — check the "
+                f"CDS request variable list (got {list(sf_ds.data_vars)})."
+            )
+        out[short] = sf_ds[short].values.astype(np.float32)
+        out["surface_keys"].append(short)
+
     sf_ds.close()
     return out
 
 
 # ── Zarr writer ──────────────────────────────────────────────────────────────
 
-def write_zarr(out_path: Path, merged: dict, with_z: bool) -> None:
+def write_zarr(
+    out_path: Path,
+    merged: dict,
+    with_z: bool,
+    surface_only: bool = False,
+    surface_keys: list[str] | None = None,
+) -> None:
     """Write merged arrays to Zarr v2 store (Aqua-compatible)."""
     import zarr
 
@@ -316,26 +355,35 @@ def write_zarr(out_path: Path, merged: dict, with_z: bool) -> None:
     coords["lat"].attrs.update({"long_name": "latitude", "units": "degrees_north"})
     coords.create_array("lon", data=merged["lons"])
     coords["lon"].attrs.update({"long_name": "longitude", "units": "degrees_east"})
-    coords.create_array("level", data=merged["levels"])
-    coords["level"].attrs.update({"long_name": "pressure level", "units": "hPa"})
+    if not surface_only:
+        coords.create_array("level", data=merged["levels"])
+        coords["level"].attrs.update({"long_name": "pressure level", "units": "hPa"})
 
-    pressure = store.create_group("pressure")
-    pres_vars = ["u", "v", "t", "q"]
-    if with_z and "z" in merged:
-        pres_vars.append("z")
-    for var in pres_vars:
-        pressure.create_array(var, data=merged[var])
+    if not surface_only:
+        pressure = store.create_group("pressure")
+        pres_vars = ["u", "v", "t", "q"]
+        if with_z and "z" in merged:
+            pres_vars.append("z")
+        for var in pres_vars:
+            pressure.create_array(var, data=merged[var])
 
     surface = store.create_group("surface")
-    for var in ["u10", "v10", "t2m", "d2m"]:
+    sf_vars = surface_keys or ["u10", "v10", "t2m", "d2m"]
+    for var in sf_vars:
         surface.create_array(var, data=merged[var])
 
+    if surface_only:
+        title = "ERA5 hourly single-level — Europe bbox (100 m wind for FuXi-CFD benchmark)"
+        created = "ingest_era5_europe_hourly.py --surface-only (FuXi-CFD 100m)"
+    else:
+        title = "ERA5 hourly — Europe bbox (with d2m for surrogate v2)"
+        created = "ingest_era5_europe_hourly.py (Phase G M_G6.5)"
     store.attrs.update({
         "Conventions": "CF-1.9",
-        "title": "ERA5 hourly — Europe bbox (with d2m for surrogate v2)",
+        "title": title,
         "source": "era5_hourly",
         "cadence_hours": 1,
-        "created_by": "ingest_era5_europe_hourly.py (Phase G M_G6.5)",
+        "created_by": created,
     })
 
 
@@ -376,6 +424,20 @@ def write_zarr(out_path: Path, merged: dict, with_z: bool) -> None:
     help="Skip geopotential (z) on pressure levels (saves ~20%% data).",
 )
 @click.option(
+    "--surface-only",
+    is_flag=True,
+    default=False,
+    help="Skip pressure-level download entirely; write a light single-level "
+         "store. Use with --surface-vars to choose which surface fields.",
+)
+@click.option(
+    "--surface-vars",
+    default=None,
+    help="Comma-separated CDS single-level variable names to fetch (overrides "
+         "the default {u10,v10,t2m,d2m}). E.g. "
+         "'100m_u_component_of_wind,100m_v_component_of_wind' for FuXi-CFD.",
+)
+@click.option(
     "--cache-dir",
     type=click.Path(path_type=Path),
     default=None,
@@ -387,7 +449,15 @@ def write_zarr(out_path: Path, merged: dict, with_z: bool) -> None:
     default=False,
     help="Keep intermediate NetCDF files after Zarr write.",
 )
-def main(output, start, end, bbox, smoke, no_z, cache_dir, keep_nc):
+@click.option(
+    "--max-days-per-req",
+    type=int,
+    default=31,
+    help="Split a month into N-day chunks to stay under CDS 2026 size limit "
+         "(typical: 16 = halve a month). Default 31 = no split (legacy).",
+)
+def main(output, start, end, bbox, smoke, no_z, surface_only, surface_vars,
+         cache_dir, keep_nc, max_days_per_req):
     """Ingest ERA5 hourly for the Europe bbox, including d2m.
 
     Exit criteria (M_G6.5):
@@ -427,19 +497,57 @@ def main(output, start, end, bbox, smoke, no_z, cache_dir, keep_nc):
     if no_z:
         pressure_vars = [v for v in pressure_vars if v != "geopotential"]
 
+    # Resolve surface variable list (CDS long names) + their short names.
+    if surface_vars:
+        surface_var_list = [s.strip() for s in surface_vars.split(",") if s.strip()]
+    else:
+        surface_var_list = list(SURFACE_VARIABLES)
+    surface_short = []
+    for cds_name in surface_var_list:
+        if cds_name not in CDS_TO_SHORT:
+            raise click.BadParameter(
+                f"unknown surface variable {cds_name!r}; known: "
+                f"{sorted(CDS_TO_SHORT)}"
+            )
+        surface_short.append(CDS_TO_SHORT[cds_name])
+    log.info(
+        "Mode: %s | surface vars=%s (short=%s)",
+        "SURFACE-ONLY" if surface_only else "pressure+surface",
+        surface_var_list, surface_short,
+    )
+
     nc_files = []
     for y, m in months:
-        days = ["01"] if smoke else None  # smoke: only the first day
-        pl_path, sf_path = download_month(
-            client, y, m, bbox_d, cache,
-            pressure_vars=pressure_vars,
-            surface_vars=SURFACE_VARIABLES,
-            days=days,
-        )
-        nc_files.append((pl_path, sf_path))
+        n_days = calendar.monthrange(y, m)[1]
+        if smoke:
+            day_chunks = [["01"]]
+        elif max_days_per_req >= n_days:
+            day_chunks = [None]  # full month in one request
+        else:
+            # Split into chunks of `max_days_per_req` days (e.g. 16 → two halves
+            # for a 31-day month).
+            day_chunks = []
+            for start_d in range(1, n_days + 1, max_days_per_req):
+                end_d = min(n_days, start_d + max_days_per_req - 1)
+                day_chunks.append([f"{d:02d}" for d in range(start_d, end_d + 1)])
+        for days in day_chunks:
+            pl_path, sf_path = download_month(
+                client, y, m, bbox_d, cache,
+                pressure_vars=pressure_vars,
+                surface_vars=surface_var_list,
+                days=days,
+                surface_only=surface_only,
+            )
+            nc_files.append((pl_path, sf_path))
 
     log.info("Loading and concatenating %d month NetCDF pairs...", len(nc_files))
-    per_month = [nc_to_arrays(pl, sf, with_z=not no_z) for pl, sf in nc_files]
+    per_month = [
+        nc_to_arrays(
+            pl, sf, with_z=not no_z,
+            surface_only=surface_only, surface_short_names=surface_short,
+        )
+        for pl, sf in nc_files
+    ]
 
     merged = {
         "times": np.concatenate([d["times"] for d in per_month]),
@@ -447,9 +555,12 @@ def main(output, start, end, bbox, smoke, no_z, cache_dir, keep_nc):
         "lons": per_month[0]["lons"],
         "levels": per_month[0]["levels"],
     }
-    var_keys = ["u", "v", "t", "q", "u10", "v10", "t2m", "d2m"]
-    if (not no_z) and all("z" in d for d in per_month):
-        var_keys.append("z")
+    if surface_only:
+        var_keys = list(surface_short)
+    else:
+        var_keys = ["u", "v", "t", "q"] + list(surface_short)
+        if (not no_z) and all("z" in d for d in per_month):
+            var_keys.append("z")
     for var in var_keys:
         merged[var] = np.concatenate([d[var] for d in per_month], axis=0)
 
@@ -472,12 +583,16 @@ def main(output, start, end, bbox, smoke, no_z, cache_dir, keep_nc):
             )
 
     log.info("Writing Zarr v2 store: %s", output)
-    write_zarr(output, merged, with_z=not no_z)
+    write_zarr(
+        output, merged, with_z=not no_z,
+        surface_only=surface_only, surface_keys=surface_short,
+    )
     log.info("Zarr write done")
 
     if not keep_nc:
         for pl, sf in nc_files:
-            pl.unlink(missing_ok=True)
+            if pl is not None:
+                pl.unlink(missing_ok=True)
             sf.unlink(missing_ok=True)
         log.info("Removed intermediate NetCDF files")
 
@@ -485,7 +600,8 @@ def main(output, start, end, bbox, smoke, no_z, cache_dir, keep_nc):
     import zarr
     g = zarr.open_group(str(output), mode="r")
     log.info("Verification — coords/time shape=%s", g["coords/time"].shape)
-    log.info("Verification — pressure vars: %s", sorted(list(g["pressure"].array_keys())))
+    if not surface_only:
+        log.info("Verification — pressure vars: %s", sorted(list(g["pressure"].array_keys())))
     log.info("Verification — surface vars : %s", sorted(list(g["surface"].array_keys())))
     log.info("DONE — exit criterion met for %s", output)
 

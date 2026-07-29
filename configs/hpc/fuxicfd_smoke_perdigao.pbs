@@ -1,0 +1,45 @@
+#!/bin/bash -l
+#PBS -N fuxi_smoke
+#PBS -l select=1:ncpus=8:mem=32GB
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -m n
+
+# FuXi-CFD head-to-head SMOKE — run the official ONNX model at ~10 Perdigão
+# pairings on a COMPUTE node (login-node runs get killed). ONNX is CPU-only here.
+# Uses a clearly-labelled 100 m proxy (ERA5 u10/v10) for the smoke only; the real
+# scoring will use the native ERA5-100 m store (--uv100-source era5_native).
+
+cd $PBS_O_WORKDIR
+BASE="$HOME/dsw"
+
+: "${OBS_ZARR:=$BASE/data/raw/perdigao_obs.zarr}"
+: "${OBS_SCHEMA:=perdigao}"
+: "${ONNX:=$BASE/data/models/fuxicfd_official/fuxicfd-model/model/fuxicfd_model.onnx}"
+: "${SCALER_DIR:=$BASE/data/models/fuxicfd_official/fuxicfd-model/inference_example/normalization}"
+: "${DEM:=$BASE/data/raw/srtm_tiles}"
+: "${WORLDCOVER:=$BASE/data/raw/worldcover_esa}"
+: "${UV100_SOURCE:=era5_uv10}"
+: "${ERA5_STORE:=$BASE/data/raw/era5_europe_spring2017_v2.zarr}"
+: "${OUTPUT:=$BASE/data/inference/fuxicfd_smoke_perdigao.parquet}"
+: "${MAX_PAIRINGS:=10}"
+: "${BATCH_SIZE:=5}"
+
+[ -f "$ONNX" ] || { echo "MISSING:$ONNX"; exit 1; }
+[ -d "$ERA5_STORE" ] || { echo "MISSING:$ERA5_STORE"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+
+export OMP_NUM_THREADS=8
+export ORT_DISABLE_CPU_AFFINITY=1
+
+cd "$BASE"
+python -u services/module2b-surrogate/fuxicfd_infer_at_stations.py \
+  --obs-zarr "$OBS_ZARR" --obs-schema "$OBS_SCHEMA" \
+  --onnx "$ONNX" --scaler-dir "$SCALER_DIR" \
+  --dem "$DEM" --worldcover "$WORLDCOVER" \
+  --uv100-source "$UV100_SOURCE" --era5-store "$ERA5_STORE" \
+  --output "$OUTPUT" \
+  --smoke --max-pairings "$MAX_PAIRINGS" --batch-size "$BATCH_SIZE"
