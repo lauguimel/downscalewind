@@ -1,0 +1,93 @@
+#!/bin/bash -l
+#PBS -N infer_alps_v2
+#PBS -l select=1:ncpus=16:mem=96GB:ngpus=1
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -m n
+
+# M_I2a PRODUCTION — surrogate-v2 inference at the 205 NEW steep Alpine stations
+# (obs_unified_alps.zarr, slope-finite AT/IT/CH). One job per season; concatenate
+# the 4 parquets afterwards (mirrors the 362-prod pipeline that produced
+# noaa_seasons_all_v2.parquet).
+#
+#   qsub -v SEASON=jja2023      configs/hpc/infer_alps_v2.pbs
+#   qsub -v SEASON=mam2023      configs/hpc/infer_alps_v2.pbs
+#   qsub -v SEASON=son2023      configs/hpc/infer_alps_v2.pbs
+#   qsub -v SEASON=winter2223   configs/hpc/infer_alps_v2.pbs
+#
+# ⚠️ COVERAGE CAVEAT (M_I2a finding): the 3 hourly stores (mam/jja/son 2023) only
+# span lon -10..10 E, but 178/205 Alps stations are at lon > 10 E. For those
+# seasons, eastern-Alps stations fall on the ERA5 grid edge (clamped 3×3, wrong
+# inflow). Only winter2223 (6h, lon -10..26.8 E) truly covers the eastern Alps.
+# To pair all 205 across mam/jja/son, RE-INGEST those hourly stores with the grid
+# extended east to ~18 E first (ingest_era5_europe_hourly.py, chunk <=7 d/req).
+
+cd $PBS_O_WORKDIR
+BASE="$HOME/dsw"
+
+: "${SEASON:=jja2023}"
+: "${OBS_ZARRS:=$BASE/data/raw/obs_unified_alps.zarr}"
+: "${ERA5_STORE:=$BASE/data/raw/era5_europe_hourly_${SEASON}.zarr}"
+# winter store has a different name (no 'hourly_' prefix, it is 6h).
+if [ "$SEASON" = "winter2223" ]; then
+    ERA5_STORE="$BASE/data/raw/era5_europe_winter2223.zarr"
+fi
+: "${CHECKPOINT:=$BASE/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt}"
+: "${NORM_YAML:=/scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml}"
+: "${DEM:=$BASE/data/raw/srtm_tiles/}"
+: "${WORLDCOVER:=$BASE/data/raw/worldcover_esa/}"
+: "${OUTPUT:=$BASE/data/inference/alps_${SEASON}_v2.parquet}"
+: "${BATCH_SIZE:=32}"
+: "${N_PREP_WORKERS:=8}"
+: "${WORKDIR:=/scratch/maitreje/dsw/infer_alps_v2_workdir_${SEASON}}"
+: "${MAX_PAIRINGS:=}"
+
+[ -f "$CHECKPOINT" ] || { echo "MISSING:$CHECKPOINT"; exit 1; }
+[ -d "$ERA5_STORE" ] || { echo "MISSING:$ERA5_STORE"; exit 1; }
+[ -d "$DEM" ]        || { echo "MISSING DEM dir:$DEM"; exit 1; }
+[ -d "$OBS_ZARRS" ]  || { echo "MISSING OBS:$OBS_ZARRS"; exit 1; }
+nvidia-smi >/dev/null || { echo "GPU missing"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+export OMP_NUM_THREADS=2
+export MKL_NUM_THREADS=2
+export OPENBLAS_NUM_THREADS=2
+
+cd "$BASE"
+WORLDCOVER_FLAG=()
+if [ -n "$WORLDCOVER" ] && [ -e "$WORLDCOVER" ]; then
+    WORLDCOVER_FLAG=(--worldcover "$WORLDCOVER")
+fi
+MAX_PAIRINGS_FLAG=()
+if [ -n "$MAX_PAIRINGS" ]; then
+    MAX_PAIRINGS_FLAG=(--max-pairings "$MAX_PAIRINGS")
+fi
+
+echo "=== M_I2a infer_alps_v2 ==="
+echo "SEASON=$SEASON"
+echo "OBS_ZARRS=$OBS_ZARRS"
+echo "ERA5_STORE=$ERA5_STORE"
+echo "DEM=$DEM  WORLDCOVER=$WORLDCOVER"
+echo "OUTPUT=$OUTPUT  N_PREP_WORKERS=$N_PREP_WORKERS"
+nvidia-smi -L
+
+python -u services/module2b-surrogate/infer_at_stations.py \
+  --obs-zarrs "$OBS_ZARRS" \
+  --era5-store "$ERA5_STORE" \
+  --checkpoint "$CHECKPOINT" \
+  --norm-yaml "$NORM_YAML" \
+  --dem "$DEM" \
+  "${WORLDCOVER_FLAG[@]}" \
+  --output "$OUTPUT" \
+  --device cuda --amp \
+  --batch-size "$BATCH_SIZE" \
+  --stratify-timestamps \
+  --workdir "$WORKDIR" \
+  --n-prep-workers "$N_PREP_WORKERS" \
+  "${MAX_PAIRINGS_FLAG[@]}"

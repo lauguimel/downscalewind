@@ -1,0 +1,86 @@
+#!/bin/bash -l
+#PBS -N infer_at_stations_v2
+#PBS -l select=1:ncpus=16:mem=96GB:ngpus=1
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -m n
+
+# M_H+ Axe 3 — optimised inference at OBS stations with multiprocessing for
+# materialise_grid_zarr (CPU-bound). Targets ≥60% GPU utilization on H100 by
+# running n_prep_workers=8 in parallel while the GPU forward executes.
+#
+# Multi-season usage (one job per season concatenated via parquet append):
+#   qsub -v SEASON=mam2023,ERA5=hourly_mam2023 configs/hpc/infer_at_stations_v2.pbs
+# or override OBS/ERA5/OUTPUT directly.
+
+cd $PBS_O_WORKDIR
+
+BASE="$HOME/dsw"
+# Default: all 4 obs sources we have on Aqua (here only noaa_isd is prod-ready).
+: "${OBS_ZARRS:=$BASE/data/raw/obs_unified_noaa_isd_prod.zarr}"
+# ERA5 store: pick the hourly multi-season one if available, fall back to 6h.
+: "${ERA5_STORE:=$BASE/data/raw/era5_europe_hourly_${SEASON:-winter2223}.zarr}"
+: "${CHECKPOINT:=$BASE/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt}"
+: "${NORM_YAML:=/scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml}"
+# DEM = directory of Copernicus DSM tiles (auto-resolved per coord).
+: "${DEM:=$BASE/data/raw/srtm_tiles/}"
+: "${WORLDCOVER:=}"
+: "${OUTPUT:=$BASE/data/inference/noaa_${SEASON:-winter2223}_v2.parquet}"
+: "${BATCH_SIZE:=32}"
+# n_prep_workers controls the ProcessPoolExecutor size. 8 ≈ ncpus-2; the GPU
+# forward thread runs concurrently. Higher does not help once I/O dominates.
+: "${N_PREP_WORKERS:=8}"
+: "${WORKDIR:=/scratch/maitreje/dsw/infer_at_stations_v2_workdir_${SEASON:-winter2223}}"
+: "${MAX_PAIRINGS:=}"
+
+[ -f "$CHECKPOINT" ] || { echo "MISSING:$CHECKPOINT"; exit 1; }
+[ -d "$ERA5_STORE" ] || { echo "MISSING:$ERA5_STORE"; exit 1; }
+[ -d "$DEM" ] || { echo "MISSING DEM dir:$DEM"; exit 1; }
+nvidia-smi >/dev/null || { echo "GPU missing"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+# Avoid each worker spawning too many BLAS threads (oversubscription kills perf).
+export OMP_NUM_THREADS=2
+export MKL_NUM_THREADS=2
+export OPENBLAS_NUM_THREADS=2
+
+cd "$BASE"
+WORLDCOVER_FLAG=()
+if [ -n "$WORLDCOVER" ] && [ -e "$WORLDCOVER" ]; then
+    WORLDCOVER_FLAG=(--worldcover "$WORLDCOVER")
+fi
+
+MAX_PAIRINGS_FLAG=()
+if [ -n "$MAX_PAIRINGS" ]; then
+    MAX_PAIRINGS_FLAG=(--max-pairings "$MAX_PAIRINGS")
+fi
+
+echo "=== M_H+ infer_at_stations_v2 ==="
+echo "SEASON=${SEASON:-winter2223}"
+echo "OBS_ZARRS=$OBS_ZARRS"
+echo "ERA5_STORE=$ERA5_STORE"
+echo "DEM=$DEM"
+echo "OUTPUT=$OUTPUT"
+echo "N_PREP_WORKERS=$N_PREP_WORKERS"
+nvidia-smi -L
+
+python -u services/module2b-surrogate/infer_at_stations.py \
+  --obs-zarrs "$OBS_ZARRS" \
+  --era5-store "$ERA5_STORE" \
+  --checkpoint "$CHECKPOINT" \
+  --norm-yaml "$NORM_YAML" \
+  --dem "$DEM" \
+  "${WORLDCOVER_FLAG[@]}" \
+  --output "$OUTPUT" \
+  --device cuda --amp \
+  --batch-size "$BATCH_SIZE" \
+  --stratify-timestamps \
+  --workdir "$WORKDIR" \
+  --n-prep-workers "$N_PREP_WORKERS" \
+  "${MAX_PAIRINGS_FLAG[@]}"

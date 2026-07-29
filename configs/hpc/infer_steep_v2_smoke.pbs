@@ -1,0 +1,41 @@
+#!/bin/bash -l
+#PBS -N infer_steep_smoke
+#PBS -l select=1:ncpus=8:mem=48GB:ngpus=1
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -m n
+
+# M_I2d SMOKE — validate surrogate-v2 inference at NEW south-Italy Apennines
+# ridge stations (lat ~41, lon ~15-16 — well south of the M_I2a Alps coverage,
+# exercises the newly fetched DEM/WC tiles). 2 stations × a few JJA-2023
+# timestamps using the EXTENDED _med ERA5 store. Checks DEM/WC auto-resolve at
+# south-Italy coords + physical speed_pred paired to speed_obs.
+
+cd $PBS_O_WORKDIR
+BASE="$HOME/dsw"
+
+module load Miniconda3/24.9.2-0
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+export OMP_NUM_THREADS=2
+export MKL_NUM_THREADS=2
+
+cd "$BASE"
+
+python -u services/module2b-surrogate/infer_at_stations.py \
+  --obs-zarrs "$BASE/data/raw/obs_unified_apennines_smoke.zarr" \
+  --era5-store "$BASE/data/raw/era5_europe_hourly_jja2023_med.zarr" \
+  --checkpoint "$BASE/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt" \
+  --norm-yaml /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml \
+  --dem "$BASE/data/raw/srtm_tiles/" \
+  --worldcover "$BASE/data/raw/worldcover_esa/" \
+  --output "$BASE/data/inference/smoke_steep_apennines_jja_v2.parquet" \
+  --device cuda --amp \
+  --batch-size 8 \
+  --max-pairings 12 \
+  --workdir "/scratch/maitreje/dsw/infer_steep_smoke_workdir" \
+  --smoke --keep-grids

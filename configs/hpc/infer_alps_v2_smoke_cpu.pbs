@@ -1,0 +1,38 @@
+#!/bin/bash -l
+#PBS -N infer_alps_smoke_cpu
+#PBS -l select=1:ncpus=8:mem=32GB
+#PBS -l walltime=00:30:00
+#PBS -q cpu_inter
+#PBS -j oe
+#PBS -m n
+
+# M_I2a SMOKE (CPU) — same as infer_alps_v2_smoke but CPU-only, to bypass the
+# GPU queue when it is monopolised by a long sweep. 3 Alps ridge stations
+# (lon <= 10E) × ~28 JJA-2023 timestamps. Validates DEM/WC auto-resolve at the
+# Alps coords + physical speed_pred paired to speed_obs.
+
+cd $PBS_O_WORKDIR
+BASE="$HOME/dsw"
+
+module load Miniconda3/24.9.2-0
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
+
+cd "$BASE"
+
+python -u services/module2b-surrogate/infer_at_stations.py \
+  --obs-zarrs "$BASE/data/raw/obs_unified_alps_smoke.zarr" \
+  --era5-store "$BASE/data/raw/era5_europe_hourly_jja2023.zarr" \
+  --checkpoint "$BASE/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt" \
+  --norm-yaml /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml \
+  --dem "$BASE/data/raw/srtm_tiles/" \
+  --worldcover "$BASE/data/raw/worldcover_esa/" \
+  --output "$BASE/data/inference/smoke_alps_jja_v2.parquet" \
+  --device cpu \
+  --batch-size 8 \
+  --workdir "/scratch/maitreje/dsw/infer_alps_smoke_cpu_workdir" \
+  --n-prep-workers 4 \
+  --smoke --keep-grids

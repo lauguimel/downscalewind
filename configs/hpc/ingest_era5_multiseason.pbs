@@ -1,0 +1,68 @@
+#!/bin/bash -l
+#PBS -N ingest_era5_multiseason
+#PBS -l select=1:ncpus=2:mem=16GB
+#PBS -l walltime=08:00:00
+#PBS -j oe
+#PBS -m n
+
+# M_H+ Axe 2 — ERA5 hourly+d2m multi-season download.
+# Each season is a separate qsub (override via -v SEASON=mam2023).
+# Variables canonique surrogate v2:
+#   pressure {u, v, t, q, z} on 10 plevels [1000,925,850,700,600,500,400,300,250,200]
+#   surface  {t2m, d2m, u10, v10}
+# Cadence = hourly (24 ts/day).
+# bbox = "36,-10,52,10" (Europe FR/ES/PT including PT west coast + sud ES Andalousie + Alps).
+
+cd $PBS_O_WORKDIR
+
+BASE="$HOME/dsw"
+: "${BBOX:=36,-10,52,10}"
+: "${SEASON:=mam2023}"
+
+# Map SEASON → (START, END) months. CDS limits ~120 GB/req so 3 months per
+# request is OK at hourly cadence (bbox 16°×20° × 3 months × 24 ts/day × 10 plev
+# × 4 vars ≈ 60 GB).
+case "$SEASON" in
+    mam2023) START=2023-03; END=2023-05 ;;
+    jja2023) START=2023-06; END=2023-08 ;;
+    son2023) START=2023-09; END=2023-11 ;;
+    mam2022) START=2022-03; END=2022-05 ;;
+    # winter2223 hourly version (re-ingest with hourly cadence to fix the 6h
+    # block issue at inference time)
+    winter2223h) START=2022-11; END=2023-02 ;;
+    *) echo "Unknown SEASON=$SEASON"; exit 1 ;;
+esac
+
+OUTPUT="$BASE/data/raw/era5_europe_hourly_${SEASON}.zarr"
+echo "SEASON=$SEASON | START=$START | END=$END | OUTPUT=$OUTPUT"
+
+if [ -d "$OUTPUT" ] && [ -f "$OUTPUT/zarr.json" ]; then
+    echo "OUTPUT exists, refusing to overwrite. Delete first if you really mean to."
+    exit 0
+fi
+
+module load Miniconda3/24.9.2-0
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+
+# Verify cdsapi credentials before bulk
+if [ ! -f "$HOME/.cdsapirc" ]; then
+    echo "MISSING: $HOME/.cdsapirc"
+    exit 1
+fi
+python -c "import cdsapi; print('cdsapi ok')" || exit 1
+
+cd "$BASE"
+# CDS 2026 limit: requests > ~1 month full Europe bbox at hourly cadence
+# return "Your request is too large". Mitigations:
+#  - drop geopotential (z) which is unused by surrogate v2 surface mode  → --no-z
+#  - keep monthly batching (already in script). If still too large, switch
+#    to fortnight-by-fortnight via the `--max-days-per-req` knob (added below).
+python -u services/data-ingestion/ingest_era5_europe_hourly.py \
+    --output "$OUTPUT" \
+    --start "$START" \
+    --end "$END" \
+    --bbox "$BBOX" \
+    --no-z \
+    --max-days-per-req 7 \
+    --cache-dir "/scratch/maitreje/dsw/era5_hourly_cache_${SEASON}"

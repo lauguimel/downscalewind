@@ -80,10 +80,14 @@ def build_one(
         raise RuntimeError(f"terrain shape {terrain.shape} != ({NI},{NJ})")
 
     if worldcover is not None and Path(worldcover).exists():
+        # `compute_z0_eff_from_wc` handles both single-file and tile-directory
+        # paths via `_resolve_wc_path`. It returns z0_eff=WC_Z0_DEFAULT (0.05)
+        # only if the matching tile is missing from the directory.
         z0_eff, wc_counts = compute_z0_eff_from_wc(worldcover, lat, lon)
         logger.debug("  z0_eff=%.4f m (WC classes=%s)", z0_eff, wc_counts)
     else:
-        logger.warning("  WC tile missing — falling back to z0_eff=0.05 m")
+        logger.warning("  WC path missing (%s) — falling back to z0_eff=0.05 m",
+                       worldcover)
         z0_eff = 0.05
 
     era5 = extract_era5_at_coords(

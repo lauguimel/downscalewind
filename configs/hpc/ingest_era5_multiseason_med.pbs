@@ -1,0 +1,74 @@
+#!/bin/bash -l
+#PBS -N ingest_era5_med
+#PBS -l select=1:ncpus=2:mem=16GB
+#PBS -l walltime=10:00:00
+#PBS -j oe
+#PBS -m n
+
+# M_I2b — ERA5 hourly+d2m multi-season RE-INGEST on EU-Med-EXTENDED grid.
+# Motivation: the original era5_europe_hourly_{mam,jja,son}2023.zarr only span
+#   lon -10 -> 10E, which CUTS the eastern Alps (AT, IT-East) and most Apennines.
+# This re-ingest extends to lon -10 -> 20E, lat 35 -> 49N, covering Iberia,
+#   S-France, Italy (incl. Apennines) and the FULL Alps.
+#
+# Outputs are NEW stores with the `_med` suffix — the original 2023 stores are
+#   NEVER overwritten (264k existing OBS pairings depend on them).
+#
+# Variables (canonical surrogate v2):
+#   pressure {u, v, t, q} on 10 plevels [1000,925,850,700,600,500,400,300,250,200]
+#            (z DROPPED via --no-z to stay under CDS 2026 cost-limit)
+#   surface  {t2m, d2m, u10, v10}
+# Cadence = hourly (24 ts/day). CDS 2026 cost-limit -> --max-days-per-req 7.
+#
+# Each season is a separate qsub (override via -v SEASON=mam2023). Chain them
+# with `qsub -W depend=afterok:<jobid>` to respect the CDS sequential rate-limit.
+
+cd $PBS_O_WORKDIR
+
+BASE="$HOME/dsw"
+# EU-Med-extended grid: S=35, W=-10, N=49, E=20  (area = "N,W,S,E" handled in script).
+# bbox CLI arg is "S,W,N,E".
+: "${BBOX:=35,-10,49,20}"
+: "${SEASON:=mam2023}"
+
+# Map SEASON -> (START, END) months. With --max-days-per-req 7 each season is
+# chunked into <=7-day CDS sub-requests internally, so the season span is fine.
+case "$SEASON" in
+    mam2023) START=2023-03; END=2023-05 ;;
+    jja2023) START=2023-06; END=2023-08 ;;
+    son2023) START=2023-09; END=2023-11 ;;
+    *) echo "Unknown SEASON=$SEASON (this PBS only does mam/jja/son 2023 _med)"; exit 1 ;;
+esac
+
+# NEW store name with `_med` suffix — never the original.
+OUTPUT="$BASE/data/raw/era5_europe_hourly_${SEASON}_med.zarr"
+echo "SEASON=$SEASON | START=$START | END=$END | BBOX=$BBOX | OUTPUT=$OUTPUT"
+
+if [ -d "$OUTPUT" ] && [ -f "$OUTPUT/zarr.json" ]; then
+    echo "OUTPUT exists, refusing to overwrite. Delete first if you really mean to."
+    exit 0
+fi
+
+module load Miniconda3/24.9.2-0
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+
+# Verify cdsapi credentials before bulk
+if [ ! -f "$HOME/.cdsapirc" ]; then
+    echo "MISSING: $HOME/.cdsapirc"
+    exit 1
+fi
+python -c "import cdsapi; print('cdsapi ok')" || exit 1
+
+cd "$BASE"
+# CDS 2026 cost-limit: extended bbox (24deg x 14deg) at hourly cadence over 10
+# plevels x 4 vars must be chunked to <=7-day sub-requests. --no-z drops the
+# unused geopotential to shrink the payload further.
+python -u services/data-ingestion/ingest_era5_europe_hourly.py \
+    --output "$OUTPUT" \
+    --start "$START" \
+    --end "$END" \
+    --bbox "$BBOX" \
+    --no-z \
+    --max-days-per-req 7 \
+    --cache-dir "/scratch/maitreje/dsw/era5_hourly_cache_${SEASON}_med"

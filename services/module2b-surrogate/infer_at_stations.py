@@ -49,10 +49,12 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import shutil
 import sys
 import tempfile
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import click
@@ -235,6 +237,78 @@ def materialise_grid_zarr(
     )
 
 
+def _materialise_one_pickleable(args: dict) -> tuple[int, str | None, str | None]:
+    """Top-level worker for ProcessPoolExecutor: builds 1 grid.zarr.
+
+    Returns (row_idx, grid_zarr_str_path | None, error_str | None). Each
+    worker writes to its own output dir, so no shared-file race condition.
+    Workers MUST NOT import torch (CPU-only prep, avoid CUDA context churn).
+    """
+    try:
+        gz = materialise_grid_zarr(
+            station_id=args["station_id"],
+            lat=args["lat"], lon=args["lon"], elev=args["elev"],
+            timestamp_ns=args["timestamp_ns"],
+            era5_store=Path(args["era5_store"]),
+            dem=Path(args["dem"]),
+            worldcover=Path(args["worldcover"]) if args.get("worldcover") else None,
+            workdir=Path(args["workdir"]),
+            max_era5_delta_h=args["max_era5_delta_h"],
+        )
+        return args["row_idx"], str(gz), None
+    except Exception as exc:  # pragma: no cover — exhaustive worker safety
+        return args["row_idx"], None, f"{type(exc).__name__}: {exc}"
+
+
+def parallel_materialise(
+    df_chunk: pd.DataFrame, *, era5_store: Path, dem: Path,
+    worldcover: Path | None, workdir: Path, max_era5_delta_h: float,
+    n_workers: int,
+) -> dict[int, str]:
+    """Materialise grid.zarr for every row in `df_chunk` using a process pool.
+
+    Returns a dict {row_idx_int: grid_zarr_path_str} for successes only. Errors
+    are logged and skipped. Each worker writes to a separate grid.zarr file
+    under `workdir/<station_id>_<ts_tag>/grid.zarr` — no shared write target.
+    """
+    payloads: list[dict] = []
+    for row_idx, row in df_chunk.iterrows():
+        payloads.append({
+            "row_idx": int(row_idx),
+            "station_id": str(row["station_id"]),
+            "lat": float(row["lat"]),
+            "lon": float(row["lon"]),
+            "elev": float(row["elev"]),
+            "timestamp_ns": int(row["timestamp_ns"]),
+            "era5_store": str(era5_store),
+            "dem": str(dem),
+            "worldcover": str(worldcover) if worldcover else None,
+            "workdir": str(workdir),
+            "max_era5_delta_h": float(max_era5_delta_h),
+        })
+
+    results: dict[int, str] = {}
+    if n_workers <= 1:
+        # Serial fallback (avoid process-pool overhead on tiny batches).
+        for p in payloads:
+            row_idx, gz, err = _materialise_one_pickleable(p)
+            if err is None:
+                results[row_idx] = gz
+            else:
+                logger.warning("worker(serial) row=%d: %s", row_idx, err)
+        return results
+
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        futures = [pool.submit(_materialise_one_pickleable, p) for p in payloads]
+        for fut in as_completed(futures):
+            row_idx, gz, err = fut.result()
+            if err is None:
+                results[row_idx] = gz
+            else:
+                logger.warning("worker(parallel) row=%d: %s", row_idx, err)
+    return results
+
+
 # ─── Model build (lazy on first sample) ─────────────────────────────────────
 
 def build_surrogate(
@@ -323,7 +397,7 @@ def run_inference(
     *, df: pd.DataFrame, era5_store: Path, dem: Path, worldcover: Path | None,
     checkpoint: Path, norm_yaml: Path | None, output: Path,
     device_name: str, batch_size: int, amp: bool, max_era5_delta_h: float,
-    workdir: Path, keep_grids: bool,
+    workdir: Path, keep_grids: bool, n_prep_workers: int = 1,
 ) -> Path:
     device = torch.device(
         device_name if device_name != "auto"
@@ -352,28 +426,54 @@ def run_inference(
 
     for start in range(0, len(df), batch_size):
         chunk = df.iloc[start:start + batch_size]
-        stores = []
-        chunk_meta = []
-        for _, row in chunk.iterrows():
-            try:
-                gz = materialise_grid_zarr(
-                    station_id=str(row["station_id"]),
-                    lat=float(row["lat"]), lon=float(row["lon"]),
-                    elev=float(row["elev"]),
-                    timestamp_ns=int(row["timestamp_ns"]),
-                    era5_store=era5_store,
-                    dem=dem, worldcover=worldcover,
-                    workdir=workdir,
-                    max_era5_delta_h=max_era5_delta_h,
-                )
-                st = zarr.open_group(str(gz), mode="r")
-                stores.append(st)
-                chunk_meta.append((row, gz))
-                n_built += 1
-            except Exception as exc:
-                logger.warning("skipped %s @ %s: %s",
-                               row.get("station_id"), row.get("timestamp_ns"), exc)
-                n_skipped += 1
+        stores: list = []
+        chunk_meta: list = []
+        # Parallelise CPU-bound prep over workers. We deliberately oversubscribe
+        # vs ncpus PBS request because the prep is mostly I/O (rasterio + zarr
+        # write), not pure CPU. The GPU step that follows is single-threaded.
+        if n_prep_workers > 1:
+            gz_map = parallel_materialise(
+                chunk, era5_store=era5_store, dem=dem, worldcover=worldcover,
+                workdir=workdir, max_era5_delta_h=max_era5_delta_h,
+                n_workers=n_prep_workers,
+            )
+            # Preserve chunk order to keep stable batch indexing.
+            for row_idx, row in chunk.iterrows():
+                gz_str = gz_map.get(int(row_idx))
+                if gz_str is None:
+                    n_skipped += 1
+                    continue
+                try:
+                    gz = Path(gz_str)
+                    st = zarr.open_group(str(gz), mode="r")
+                    stores.append(st)
+                    chunk_meta.append((row, gz))
+                    n_built += 1
+                except Exception as exc:
+                    logger.warning("open_group failed %s @ %s: %s",
+                                   row.get("station_id"), row.get("timestamp_ns"), exc)
+                    n_skipped += 1
+        else:
+            for _, row in chunk.iterrows():
+                try:
+                    gz = materialise_grid_zarr(
+                        station_id=str(row["station_id"]),
+                        lat=float(row["lat"]), lon=float(row["lon"]),
+                        elev=float(row["elev"]),
+                        timestamp_ns=int(row["timestamp_ns"]),
+                        era5_store=era5_store,
+                        dem=dem, worldcover=worldcover,
+                        workdir=workdir,
+                        max_era5_delta_h=max_era5_delta_h,
+                    )
+                    st = zarr.open_group(str(gz), mode="r")
+                    stores.append(st)
+                    chunk_meta.append((row, gz))
+                    n_built += 1
+                except Exception as exc:
+                    logger.warning("skipped %s @ %s: %s",
+                                   row.get("station_id"), row.get("timestamp_ns"), exc)
+                    n_skipped += 1
 
         if not stores:
             continue
@@ -489,10 +589,14 @@ def run_inference(
               help="Where to put temporary grid.zarr (default = tmp directory)")
 @click.option("--keep-grids", is_flag=True, default=False,
               help="Do not delete per-pairing grid.zarr after forward")
+@click.option("--n-prep-workers", type=int, default=1,
+              help="Process-pool workers for materialise_grid_zarr (CPU-bound "
+                   "prep). 1 = serial (legacy). 4-8 typical for H100 PBS job.")
 @click.option("--verbose", "-v", is_flag=True, default=False)
 def cli(obs_zarrs, era5_store, checkpoint, norm_yaml, dem, worldcover, output,
         device, batch_size, amp, height_target, max_era5_delta_h, smoke,
-        max_pairings, stratify_timestamps, workdir, keep_grids, verbose):
+        max_pairings, stratify_timestamps, workdir, keep_grids,
+        n_prep_workers, verbose):
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
@@ -549,6 +653,7 @@ def cli(obs_zarrs, era5_store, checkpoint, norm_yaml, dem, worldcover, output,
         max_era5_delta_h=max_era5_delta_h,
         workdir=workdir,
         keep_grids=keep_grids or smoke,
+        n_prep_workers=n_prep_workers,
     )
 
 

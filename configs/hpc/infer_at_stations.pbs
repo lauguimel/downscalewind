@@ -35,13 +35,17 @@ for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
 done
 
 cd "$BASE"
+WORLDCOVER_FLAG=()
+if [ -n "$WORLDCOVER" ] && [ -e "$WORLDCOVER" ]; then
+    WORLDCOVER_FLAG=(--worldcover "$WORLDCOVER")
+fi
 python -u services/module2b-surrogate/infer_at_stations.py \
   --obs-zarrs "$OBS_ZARRS" \
   --era5-store "$ERA5_STORE" \
   --checkpoint "$CHECKPOINT" \
   --norm-yaml "$NORM_YAML" \
   --dem "$DEM" \
-  --worldcover "$WORLDCOVER" \
+  "${WORLDCOVER_FLAG[@]}" \
   --output "$OUTPUT" \
   --device cuda --amp \
   --batch-size "$BATCH_SIZE" \

@@ -1,0 +1,38 @@
+#!/bin/bash -l
+#PBS -N infer_v2_smoke
+#PBS -l select=1:ncpus=8:mem=48GB:ngpus=1
+#PBS -l walltime=00:30:00
+#PBS -j oe
+#PBS -m n
+
+# M_H+ Axe 3 SMOKE — validates the multiprocessing prep + DEM auto-resolve
+# pipeline on a tiny subsample (20 pairings).
+
+cd $PBS_O_WORKDIR
+BASE="$HOME/dsw"
+
+module load Miniconda3/24.9.2-0
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+export OMP_NUM_THREADS=2
+export MKL_NUM_THREADS=2
+
+cd "$BASE"
+
+python -u services/module2b-surrogate/infer_at_stations.py \
+  --obs-zarrs "$BASE/data/raw/obs_unified_noaa_isd_prod.zarr" \
+  --era5-store "$BASE/data/raw/era5_europe_winter2223.zarr" \
+  --checkpoint "$BASE/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt" \
+  --norm-yaml /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml \
+  --dem "$BASE/data/raw/srtm_tiles/" \
+  --output "$BASE/data/inference/smoke_v2_multiproc.parquet" \
+  --device cuda --amp \
+  --batch-size 8 \
+  --workdir "/scratch/maitreje/dsw/infer_v2_smoke_workdir" \
+  --max-pairings 24 \
+  --n-prep-workers 4 \
+  --smoke --keep-grids
