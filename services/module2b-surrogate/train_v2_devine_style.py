@@ -34,7 +34,11 @@ _SCRIPT = Path(__file__).resolve().parent
 if str(_SCRIPT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT))
 
-from src.ann_correction import ANNCorrection, devine_speed_loss  # noqa: E402
+from src.ann_correction import (  # noqa: E402
+    ANNCorrection,
+    devine_speed_loss,
+    devine_speed_loss_regime,
+)
 from src.dataset_v2 import DEFAULT_NORM, parse_agl_levels  # noqa: E402
 from src.dataset_v2_obs_centered import (  # noqa: E402
     ObsCenteredDataset,
@@ -221,6 +225,8 @@ def _step(
     use_ann: bool = True,
     tau_under: float = 0.6,
     tau_over: float = 0.4,
+    loss_mode: str = "devine",
+    regime_kwargs: dict | None = None,
 ) -> tuple[torch.Tensor, dict]:
     terrain, era5, geo, topo, speed_obs, k_obs, _meta = batch
     terrain = terrain.to(device, non_blocking=True)
@@ -245,14 +251,24 @@ def _step(
     v_pred = v_res + v10_b
     speed_pred = torch.sqrt(u_pred * u_pred + v_pred * v_pred + 1e-8)
 
-    loss = devine_speed_loss(speed_pred, speed_obs,
-                             tau_under=tau_under, tau_over=tau_over)
+    if loss_mode == "regime":
+        loss = devine_speed_loss_regime(
+            speed_pred, speed_obs,
+            tau_under=tau_under, tau_over=tau_over,
+            **(regime_kwargs or {}),
+        )
+    else:
+        loss = devine_speed_loss(speed_pred, speed_obs,
+                                 tau_under=tau_under, tau_over=tau_over)
     diag = {
         "loss": float(loss.detach().cpu().item()),
         "mae": float((speed_pred - speed_obs).abs().mean().detach().cpu().item()),
         "bias": float((speed_pred - speed_obs).mean().detach().cpu().item()),
         "speed_obs_mean": float(speed_obs.mean().detach().cpu().item()),
         "speed_pred_mean": float(speed_pred.mean().detach().cpu().item()),
+        # raw per-sample vectors for stratified (low/high-wind) diagnostics
+        "speed_obs_vec": speed_obs.detach().cpu(),
+        "speed_pred_vec": speed_pred.detach().cpu(),
     }
     return loss, diag
 
@@ -405,7 +421,24 @@ def main():
 
     tau_under = float(cfg.get("tau_under", 0.6))
     tau_over = float(cfg.get("tau_over", 0.4))
-    logger.info("loss tau_under=%.3f tau_over=%.3f", tau_under, tau_over)
+    loss_mode = str(cfg.get("loss_mode", "devine")).lower()
+    regime_kwargs = {}
+    if loss_mode == "regime":
+        regime_kwargs = dict(
+            calm_threshold=float(cfg.get("calm_threshold", 3.0)),
+            calm_width=float(cfg.get("calm_width", 1.5)),
+            calm_over_penalty=float(cfg.get("calm_over_penalty", 2.0)),
+            weight_floor=float(cfg.get("weight_floor", 1.0)),
+        )
+    elif loss_mode != "devine":
+        raise ValueError(f"Unknown loss_mode={loss_mode!r}")
+    # low-wind stratification threshold for val diagnostics (obs-based, m/s)
+    calm_strat_thr = float(cfg.get("calm_strat_thr",
+                                   regime_kwargs.get("calm_threshold", 3.0)))
+    logger.info("loss_mode=%s tau_under=%.3f tau_over=%.3f regime=%s strat_thr=%.2f",
+                loss_mode, tau_under, tau_over, regime_kwargs or "-", calm_strat_thr)
+    step_loss_kwargs = dict(tau_under=tau_under, tau_over=tau_over,
+                            loss_mode=loss_mode, regime_kwargs=regime_kwargs)
 
     # ── Training loop ────────────────────────────────────────────────────────
     history = []
@@ -417,8 +450,7 @@ def main():
         for batch in train_loader:
             optimizer.zero_grad(set_to_none=True)
             loss, diag = _step(ann, surrogate, batch, norm, era5_layout, device,
-                               use_ann=True,
-                               tau_under=tau_under, tau_over=tau_over)
+                               use_ann=True, **step_loss_kwargs)
             loss.backward()
             if grad_clip_norm is not None:
                 torch.nn.utils.clip_grad_norm_(ann.parameters(), grad_clip_norm)
@@ -433,29 +465,48 @@ def main():
         train_mae = agg["mae"] / max(1, agg["n"])
         train_bias = agg["bias"] / max(1, agg["n"])
 
-        # Val
+        # Val — collect per-sample (obs, corrected pred, raw pred) speeds for
+        # wind-stratified diagnostics (the M_I5b key metric is the low-wind bias).
         ann.eval()
+        obs_all, corr_all, raw_all = [], [], []
         with torch.no_grad():
-            vagg = {"loss": 0.0, "mae": 0.0, "bias": 0.0, "n": 0,
-                    "mae_raw": 0.0, "bias_raw": 0.0}
+            vagg = {"loss": 0.0, "n": 0}
             for batch in val_loader:
-                _, diag_c = _step(ann, surrogate, batch, norm, era5_layout, device,
-                                  use_ann=True,
-                                  tau_under=tau_under, tau_over=tau_over)
+                lc, diag_c = _step(ann, surrogate, batch, norm, era5_layout, device,
+                                   use_ann=True, **step_loss_kwargs)
                 _, diag_r = _step(ann, surrogate, batch, norm, era5_layout, device,
-                                  use_ann=False,
-                                  tau_under=tau_under, tau_over=tau_over)
+                                  use_ann=False, **step_loss_kwargs)
                 vagg["loss"] += diag_c["loss"]
-                vagg["mae"] += diag_c["mae"]
-                vagg["bias"] += diag_c["bias"]
-                vagg["mae_raw"] += diag_r["mae"]
-                vagg["bias_raw"] += diag_r["bias"]
                 vagg["n"] += 1
+                obs_all.append(diag_c["speed_obs_vec"])
+                corr_all.append(diag_c["speed_pred_vec"])
+                raw_all.append(diag_r["speed_pred_vec"])
+        obs = torch.cat(obs_all)
+        corr = torch.cat(corr_all)
+        raw = torch.cat(raw_all)
         val_loss = vagg["loss"] / max(1, vagg["n"])
-        val_mae = vagg["mae"] / max(1, vagg["n"])
-        val_bias = vagg["bias"] / max(1, vagg["n"])
-        val_mae_raw = vagg["mae_raw"] / max(1, vagg["n"])
-        val_bias_raw = vagg["bias_raw"] / max(1, vagg["n"])
+        val_mae = float((corr - obs).abs().mean())
+        val_bias = float((corr - obs).mean())
+        val_mae_raw = float((raw - obs).abs().mean())
+        val_bias_raw = float((raw - obs).mean())
+
+        # Wind-stratified (low = obs < calm_strat_thr; high = obs >= thr)
+        low = obs < calm_strat_thr
+        high = ~low
+        n_low = int(low.sum())
+        n_high = int(high.sum())
+
+        def _m(t, mask):
+            return float(t[mask].mean()) if int(mask.sum()) > 0 else float("nan")
+
+        low_bias_corr = _m(corr - obs, low)
+        low_bias_raw = _m(raw - obs, low)
+        low_mae_corr = _m((corr - obs).abs(), low)
+        low_mae_raw = _m((raw - obs).abs(), low)
+        high_bias_corr = _m(corr - obs, high)
+        high_bias_raw = _m(raw - obs, high)
+        high_mae_corr = _m((corr - obs).abs(), high)
+        high_mae_raw = _m((raw - obs).abs(), high)
 
         wall = time.time() - t0
         lr_end = float(optimizer.param_groups[0]["lr"])
@@ -472,6 +523,18 @@ def main():
             "val_bias_raw": val_bias_raw,
             "delta_mae": val_mae - val_mae_raw,
             "lr_end_epoch": lr_end,
+            # stratified diagnostics (M_I5b)
+            "calm_strat_thr": calm_strat_thr,
+            "n_low": n_low,
+            "n_high": n_high,
+            "low_bias_corr": low_bias_corr,
+            "low_bias_raw": low_bias_raw,
+            "low_mae_corr": low_mae_corr,
+            "low_mae_raw": low_mae_raw,
+            "high_bias_corr": high_bias_corr,
+            "high_bias_raw": high_bias_raw,
+            "high_mae_corr": high_mae_corr,
+            "high_mae_raw": high_mae_raw,
         }
         history.append(entry)
         logger.info(
@@ -479,6 +542,12 @@ def main():
             "| RAW mae=%.3f bias=%+.3f | Δmae=%+.3f",
             epoch, wall, train_loss, train_mae, val_loss, val_mae, val_bias,
             val_mae_raw, val_bias_raw, val_mae - val_mae_raw,
+        )
+        logger.info(
+            "   LOW(<%.1f, n=%d): bias corr=%+.3f raw=%+.3f | mae corr=%.3f raw=%.3f "
+            "|| HIGH(n=%d): bias corr=%+.3f raw=%+.3f | mae corr=%.3f raw=%.3f",
+            calm_strat_thr, n_low, low_bias_corr, low_bias_raw, low_mae_corr, low_mae_raw,
+            n_high, high_bias_corr, high_bias_raw, high_mae_corr, high_mae_raw,
         )
 
         # Checkpoint best (by val_mae)

@@ -1,0 +1,91 @@
+#!/bin/bash -l
+#PBS -N eval_perd_M_I4
+#PBS -l select=1:ncpus=8:mem=32GB:ngpus=1:gpu_id=A100
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -m n
+
+cd "$PBS_O_WORKDIR"
+
+BASE="$HOME/dsw"
+# M_I4 — DECISIVE Perdigão IOP re-eval of BOTH M_I3 correction arms
+# (scalar M_H'1f arch + encoder M_H'1g arch), trained WITH steep-terrain obs.
+SURR="$BASE/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt"
+OBS_ZARR="$BASE/data/raw/perdigao_obs.zarr"
+CACHE="/scratch/maitreje/dsw/phase_H_prime_perdigao_cache"
+
+CFG_SCALAR="$BASE/configs/training/eval_perdigao_M_I3_scalar.yaml"
+ANN_SCALAR="$BASE/data/models/surrogate_v2_devine_M_I3_scalar/best.pt"
+OUT_SCALAR="$BASE/data/validation/phase_H_prime_perdigao_M_I3_scalar"
+
+CFG_ENC="$BASE/configs/training/eval_perdigao_M_I3_encoder.yaml"
+ANN_ENC="$BASE/data/models/surrogate_v2_devine_M_I3_encoder/best.pt"
+OUT_ENC="$BASE/data/validation/phase_H_prime_perdigao_M_I3_encoder"
+
+mkdir -p "$OUT_SCALAR" "$OUT_ENC" "$CACHE"
+[ -f "$SURR" ] || { echo "MISSING surrogate best.pt"; exit 1; }
+[ -d "$OBS_ZARR" ] || { echo "MISSING OBS_ZARR:$OBS_ZARR"; exit 1; }
+[ -f "$CFG_SCALAR" ] || { echo "MISSING CFG_SCALAR:$CFG_SCALAR"; exit 1; }
+[ -f "$ANN_SCALAR" ] || { echo "MISSING ANN_SCALAR:$ANN_SCALAR"; exit 1; }
+[ -f "$CFG_ENC" ] || { echo "MISSING CFG_ENC:$CFG_ENC"; exit 1; }
+[ -f "$ANN_ENC" ] || { echo "MISSING ANN_ENC:$ANN_ENC"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+export OMP_NUM_THREADS=2
+export MKL_NUM_THREADS=2
+export OPENBLAS_NUM_THREADS=2
+
+cd "$BASE"
+nvidia-smi -L
+
+run_arm () {
+  local label="$1" cfg="$2" ann="$3" out="$4"
+  echo "=== M_I4 $label dry-run CPU ==="
+  python -u services/validation/audit_devine_perdigao.py \
+    --config "$cfg" --ann-checkpoint "$ann" --obs-zarr "$OBS_ZARR" \
+    --cache-dir "$CACHE" --out-dir "$out" \
+    --device cpu --dry-run --max-stations 1 --time-subsample 1 \
+    --batch-size 1 --num-workers 0 --n-prep-workers 1 2>&1 | tee "$out/eval_perdigao_dryrun.log"
+  local rc=${PIPESTATUS[0]}
+  echo "RC_DRY_$label=$rc"
+  [ "$rc" -eq 0 ] || return "$rc"
+
+  echo "=== M_I4 $label full CUDA evaluation ==="
+  python -u services/validation/audit_devine_perdigao.py \
+    --config "$cfg" --ann-checkpoint "$ann" --obs-zarr "$OBS_ZARR" \
+    --cache-dir "$CACHE" --out-dir "$out" \
+    --time-subsample 8 --device cuda 2>&1 | tee "$out/eval_perdigao.log"
+  local rce=${PIPESTATUS[0]}
+  echo "RC_EVAL_$label=$rce"
+  return "$rce"
+}
+
+run_arm SCALAR "$CFG_SCALAR" "$ANN_SCALAR" "$OUT_SCALAR"
+RC_SCALAR=$?
+run_arm ENCODER "$CFG_ENC" "$ANN_ENC" "$OUT_ENC"
+RC_ENC=$?
+
+echo "=== M_I4 SUMMARY ==="
+python - <<'PY'
+import json, os
+for label, base in [("SCALAR","data/validation/phase_H_prime_perdigao_M_I3_scalar"),
+                    ("ENCODER","data/validation/phase_H_prime_perdigao_M_I3_encoder")]:
+    p = f"{base}/perdigao_summary.json"
+    if not os.path.exists(p):
+        print(label, "NO SUMMARY (eval failed)"); continue
+    s = json.load(open(p))
+    cm = s["centre_mae"]; pr = s["propagation"]
+    print(f"{label}: centre_mae corr={cm['corrected']:.4f} raw={cm['raw']:.4f} "
+          f"bias_corr={cm['bias_corrected']:+.4f} bias_raw={cm['bias_raw']:+.4f} "
+          f"n_pair={cm['n_pairings']} n_sta={cm['n_stations']} | "
+          f"pct_smooth={pr['pct_smooth']:.1f} pct_spike={pr['pct_spike']:.1f}")
+PY
+
+echo "RC_SCALAR=$RC_SCALAR RC_ENC=$RC_ENC"
+[ "$RC_SCALAR" -eq 0 ] && [ "$RC_ENC" -eq 0 ] || exit 1

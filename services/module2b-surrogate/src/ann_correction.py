@@ -178,6 +178,15 @@ def devine_speed_loss(
     winds, so a stronger penalty on the "obs > pred" branch would force
     correction upward; the paper inverts via wording but the formula split is
     explicit and is what we replicate here.
+
+    NAMING CAVEAT: here `over_mask = (speed_obs > speed_pred)` is the branch
+    where the MODEL UNDER-predicts (obs above pred); it gets `tau_over`. The
+    branch `speed_obs <= speed_pred` is where the MODEL OVER-predicts; it gets
+    `tau_under`. With the M_I3 default (0.6/0.4) the over-prediction branch is
+    penalised HARDER — good against the surrogate's strong-wind compression,
+    but it over-generalises to calm and makes the ANN add wind everywhere
+    (M_I4: Perdigão <3 m/s bias corr +1.6..+2.65 vs raw ~0). See
+    `devine_speed_loss_regime` for the regime-aware fix.
     """
     if speed_pred.shape != speed_obs.shape:
         raise ValueError(
@@ -190,4 +199,64 @@ def devine_speed_loss(
     tau = tau_under * (1.0 - over_mask) + tau_over * over_mask
     mse = (speed_obs - speed_pred) ** 2
     weight = torch.clamp(speed_obs, min=eps)
+    return (weight * tau * mse).mean()
+
+
+def devine_speed_loss_regime(
+    speed_pred: torch.Tensor,
+    speed_obs: torch.Tensor,
+    tau_under: float = 0.6,
+    tau_over: float = 0.4,
+    *,
+    calm_threshold: float = 3.0,
+    calm_width: float = 1.5,
+    calm_over_penalty: float = 2.0,
+    weight_floor: float = 1.0,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Regime-aware asymmetric speed loss (M_I5b fix for low-wind over-add).
+
+    Diagnosis (M_I4): the flat τ-asymmetry meant to fight the surrogate's
+    strong-wind compression (slope 0.59) over-generalises to calm, where the
+    raw surrogate is already good — the ANN then ADDS wind everywhere.
+
+    Fix: make the penalty on the OVER-prediction branch (model predicts more
+    than obs, i.e. `speed_pred > speed_obs`) magnitude-aware. In CALM
+    conditions, over-prediction is the failure mode we want to suppress, so we
+    *raise* the τ on that branch toward `calm_over_penalty`. In strong wind we
+    leave the original asymmetry untouched so the held-out / steep gain is
+    preserved.
+
+    Branches (note: `obs > pred` ⇒ model UNDER-predicts):
+        under-pred (obs > pred): τ = tau_over     (unchanged everywhere)
+        over-pred  (obs <= pred): τ = tau_under in strong wind,
+                                   blended up to (tau_under * calm_over_penalty)
+                                   as obs → 0, gated smoothly by a sigmoid on
+                                   (calm_threshold - speed_obs)/calm_width.
+
+    Two other low-wind safeguards vs the base loss:
+      - `weight_floor`: the base loss multiplies MSE by `speed_obs`, which
+        ~zeroes the gradient in calm (so calm errors are invisible to the
+        optimiser). We floor the weight at `weight_floor` (default 1.0) so calm
+        over-prediction actually contributes to the loss.
+
+    Reduces to the base asymmetric loss when calm_over_penalty=1.0 and
+    weight_floor is set to 0 (with weight = speed_obs).
+    """
+    if speed_pred.shape != speed_obs.shape:
+        raise ValueError(
+            f"shape mismatch: pred {speed_pred.shape} vs obs {speed_obs.shape}"
+        )
+    under_mask = (speed_obs > speed_pred).to(speed_pred.dtype)   # model under-predicts
+    over_mask = 1.0 - under_mask                                 # model over-predicts
+
+    # Smooth calm gate in [0, 1]: ~1 when obs << threshold, ~0 when obs >> threshold.
+    calm_gate = torch.sigmoid((calm_threshold - speed_obs) / max(calm_width, eps))
+    # τ on the over-prediction branch: tau_under in strong wind, up to
+    # tau_under*calm_over_penalty in calm.
+    tau_over_branch = tau_under * (1.0 + (calm_over_penalty - 1.0) * calm_gate)
+
+    tau = tau_over * under_mask + tau_over_branch * over_mask
+    mse = (speed_obs - speed_pred) ** 2
+    weight = torch.clamp(speed_obs, min=weight_floor)
     return (weight * tau * mse).mean()

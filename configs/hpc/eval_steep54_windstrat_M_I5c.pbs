@@ -1,0 +1,42 @@
+#!/bin/bash -l
+#PBS -N eval_steep54_M_I5c
+#PBS -l select=1:ncpus=8:mem=32GB:ngpus=1:gpu_id=A100
+#PBS -l walltime=04:00:00
+#PBS -j oe
+#PBS -m n
+
+cd "$PBS_O_WORKDIR"
+
+BASE="$HOME/dsw"
+# M_I5c — wind-stratified eval of the REGIME-AWARE encoder correction (M_I5
+# best.pt) on the 54 held-out STEEP val stations. Same machinery / bins as M_I5a
+# (M_I3 encoder); only the ANN weights differ. Reads pre-materialised cache only.
+CFG="$BASE/configs/training/devine_style_M_I3_encoder.yaml"
+ANN="$BASE/data/models/surrogate_v2_devine_M_I5_encoder/best.pt"
+OUT="$BASE/data/validation/phase_H_prime_M_I5c_steep54_windstrat"
+
+mkdir -p "$OUT"
+[ -f "$CFG" ] || { echo "MISSING CFG:$CFG"; exit 1; }
+[ -f "$ANN" ] || { echo "MISSING ANN:$ANN"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+export OMP_NUM_THREADS=2
+export MKL_NUM_THREADS=2
+export OPENBLAS_NUM_THREADS=2
+
+cd "$BASE"
+nvidia-smi -L
+
+echo "=== M_I5c steep-54 wind-stratified eval (regime, CUDA) ==="
+python -u services/module2b-surrogate/eval_devine_steep54_windstrat.py \
+  --config "$CFG" --ann-checkpoint "$ANN" --out-dir "$OUT" \
+  2>&1 | tee "$OUT/eval_steep54_windstrat.log"
+RC=${PIPESTATUS[0]}
+echo "RC_EVAL=$RC"
+exit "$RC"

@@ -1,0 +1,42 @@
+# SMOKE — M_I3 ENCODER (M_H'1g arch). Tiny subset, JJA store, on-the-fly
+# materialisation. Confirms terrain-encoder path (use_terrain_encoder=true,
+# terrain 4ch → latent 48) runs end-to-end with the frozen surrogate. NOT prod.
+
+pairings_parquet: /home/maitreje/dsw/data/inference/steep_jja2023_v2.parquet
+era5_store: /home/maitreje/dsw/data/raw/era5_europe_hourly_jja2023_med.zarr
+dem: /home/maitreje/dsw/data/raw/srtm_tiles/
+worldcover: /home/maitreje/dsw/data/raw/worldcover_esa/
+
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt
+surrogate_preset: base
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+target_agl_levels: agl_0_100_24
+n_pressure_levels: 10
+
+val_frac: 0.34
+seed: 42
+exclude_substrings: ["perdigao"]
+max_stations: 6
+max_train_pairings: 240
+max_val_pairings: 120
+
+topo_dim: 12
+enable_phys_features: true
+hidden_units: [50, 10]
+dropout: 0.25
+use_terrain_encoder: true
+terrain_latent_dim: 48
+terrain_in_channels: 4
+
+epochs: 2
+batch_size: 4
+lr: 5.0e-4
+grad_clip_norm: 1.0
+num_workers: 2
+n_prep_workers: 8
+max_era5_delta_h: 3.5
+overwrite_cache: false
+
+output_dir: /home/maitreje/dsw/data/models/surrogate_v2_devine_M_I3_encoder_smoke
+cache_dir: /scratch/maitreje/dsw/phase_H_prime_M_I3_smoke_cache
+device: cuda

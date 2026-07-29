@@ -1,0 +1,53 @@
+# DEVINE-style M_I3 ENCODER (M_H'1g arch) — COMBINED steep + plain dataset
+# Arch: topo_dim=12 scalar features + CNN terrain encoder over the 180×180
+#       terrain (4 channels) → terrain_latent_dim=48 (M_H'1g).
+# Dataset = COMBINED combined_steep_plain_v2.parquet (same as the scalar arm):
+#   steep 344,615 + plain/prod 264,773 = 609,388 pairings, 529 disjoint stations.
+#
+# CACHE PRECONDITION (gatekeeper): identical to the scalar arm — uses the SAME
+# shared cache_dir, must be fully pre-materialised (4 steep seasons with their
+# per-season ERA5 store + plain). overwrite_cache=false → era5_store below is a
+# placeholder, never read on a cache hit.
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+pairings_parquet: /home/maitreje/dsw/data/inference/combined_steep_plain_v2.parquet
+era5_store: /home/maitreje/dsw/data/raw/era5_europe_hourly_jja2023_med.zarr
+dem: /home/maitreje/dsw/data/raw/srtm_tiles/
+worldcover: /home/maitreje/dsw/data/raw/worldcover_esa/
+
+# ── Frozen surrogate v2 ──────────────────────────────────────────────────────
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt
+surrogate_preset: base
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+target_agl_levels: agl_0_100_24
+n_pressure_levels: 10
+
+# ── Splits (watertight, station-disjoint) ────────────────────────────────────
+val_frac: 0.20
+seed: 42
+exclude_substrings: ["perdigao"]
+# Full combined dataset
+
+# ── ANN architecture (M_H'1g encoder) ────────────────────────────────────────
+topo_dim: 12
+enable_phys_features: true
+hidden_units: [50, 10]
+dropout: 0.25
+use_terrain_encoder: true
+terrain_latent_dim: 48
+terrain_in_channels: 4
+
+# ── Training (M_H'1g winner config: lr=5e-4 + grad_clip=1.0) ──────────────────
+epochs: 8
+batch_size: 4
+lr: 5.0e-4
+grad_clip_norm: 1.0
+num_workers: 4
+n_prep_workers: 8
+max_era5_delta_h: 3.5
+overwrite_cache: false            # REQUIRES pre-materialised shared cache
+
+# ── I/O ──────────────────────────────────────────────────────────────────────
+output_dir: /home/maitreje/dsw/data/models/surrogate_v2_devine_M_I3_encoder
+cache_dir: /scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache
+device: cuda

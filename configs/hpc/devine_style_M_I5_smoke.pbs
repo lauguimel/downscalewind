@@ -1,0 +1,50 @@
+#!/bin/bash -l
+#PBS -N devine_M_I5_smoke
+#PBS -l select=1:ncpus=16:mem=64GB:ngpus=1
+#PBS -l walltime=01:30:00
+#PBS -j oe
+#PBS -m n
+
+# M_I5b SMOKE — run BOTH loss variants (regime-aware + symmetric τ) on a tiny
+# station subset of the COMBINED dataset, reading the pre-materialised PRODUCTION
+# cache (overwrite_cache=false, NO re-materialise). Confirms: loss decreases,
+# encoder path runs, AND the LOW-WIND bias drops vs the M_I3 encoder baseline
+# while the high-wind gain is preserved (see the "LOW(...)/HIGH(...)" log lines).
+
+cd "$PBS_O_WORKDIR"
+BASE="$HOME/dsw"
+CACHE="/scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache"
+
+[ -d "$CACHE" ] || { echo "MISSING production cache (M_I3):$CACHE"; exit 1; }
+[ -f "$BASE/data/inference/combined_steep_plain_v2.parquet" ] || \
+    { echo "MISSING combined parquet"; exit 1; }
+[ -f "$BASE/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt" ] || \
+    { echo "MISSING surrogate best.pt"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
+
+nvidia-smi -L
+cd "$BASE"
+
+for VAR in encoder_smoke encoder_smoke_sym; do
+  CFG="$BASE/configs/training/devine_style_M_I5_${VAR}.yaml"
+  OUT="$BASE/data/models/surrogate_v2_devine_M_I5_${VAR}"
+  mkdir -p "$OUT"
+  echo "============================================================"
+  echo "=== M_I5 SMOKE variant=$VAR CFG=$CFG ==="
+  echo "============================================================"
+  python -u services/module2b-surrogate/train_v2_devine_style.py \
+    --config "$CFG" 2>&1 | tee "$OUT/smoke.log"
+  RC=${PIPESTATUS[0]}
+  echo "=== variant=$VAR exit_code=$RC ==="
+  if [ $RC -ne 0 ]; then
+    echo "SMOKE FAILED variant=$VAR rc=$RC"
+  fi
+done
+echo "=== M_I5 SMOKE done (regime + symmetric) ==="

@@ -1,0 +1,67 @@
+# DEVINE-style M_I5b ENCODER — REGIME-AWARE loss fix for low-wind over-correction.
+# Arch = M_I3 encoder (topo_dim=12 scalar features + CNN terrain encoder over the
+#        180×180 terrain, terrain_latent_dim=48). ARCH UNCHANGED vs M_I3.
+# Only change vs devine_style_M_I3_encoder.yaml = the loss:
+#   loss_mode=regime → over-prediction penalty is raised (up to 2×) in calm
+#   conditions (obs < calm_threshold), and the MSE weight is floored so calm
+#   errors are visible. Strong-wind / under-prediction branch is UNCHANGED so the
+#   held-out −22% steep gain is preserved.
+#
+# Dataset = COMBINED combined_steep_plain_v2.parquet (609,388 pairings, 529
+# disjoint stations) — SAME as M_I3. Watertight split seed=42.
+#
+# CACHE PRECONDITION (gatekeeper): reuse the SAME pre-materialised production
+# cache as M_I3 (overwrite_cache=false → era5_store below is a placeholder, never
+# read on a cache hit). NO re-materialise.
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+pairings_parquet: /home/maitreje/dsw/data/inference/combined_steep_plain_v2.parquet
+era5_store: /home/maitreje/dsw/data/raw/era5_europe_hourly_jja2023_med.zarr
+dem: /home/maitreje/dsw/data/raw/srtm_tiles/
+worldcover: /home/maitreje/dsw/data/raw/worldcover_esa/
+
+# ── Frozen surrogate v2 ──────────────────────────────────────────────────────
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt
+surrogate_preset: base
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+target_agl_levels: agl_0_100_24
+n_pressure_levels: 10
+
+# ── Splits (watertight, station-disjoint — SAME as M_I3) ─────────────────────
+val_frac: 0.20
+seed: 42
+exclude_substrings: ["perdigao"]
+
+# ── ANN architecture (M_H'1g encoder — UNCHANGED vs M_I3) ─────────────────────
+topo_dim: 12
+enable_phys_features: true
+hidden_units: [50, 10]
+dropout: 0.25
+use_terrain_encoder: true
+terrain_latent_dim: 48
+terrain_in_channels: 4
+
+# ── Loss (M_I5b REGIME-AWARE — the fix) ──────────────────────────────────────
+loss_mode: regime
+tau_under: 0.6              # over-pred branch base τ (strong wind, = M_I3)
+tau_over: 0.4              # under-pred branch τ (= M_I3 → high-wind gain kept)
+calm_threshold: 3.0       # below this obs speed → calm regime
+calm_width: 1.5           # sigmoid softness of the calm gate
+calm_over_penalty: 2.0    # over-pred τ scaled up to 2× in calm
+weight_floor: 1.0         # floor MSE weight so calm errors are visible
+calm_strat_thr: 3.0       # val low/high stratification threshold
+
+# ── Training (M_I3 winner config: lr=5e-4 + grad_clip=1.0, 6 epochs) ──────────
+epochs: 6
+batch_size: 4
+lr: 5.0e-4
+grad_clip_norm: 1.0
+num_workers: 4
+n_prep_workers: 8
+max_era5_delta_h: 3.5
+overwrite_cache: false            # REQUIRES pre-materialised production cache
+
+# ── I/O ──────────────────────────────────────────────────────────────────────
+output_dir: /home/maitreje/dsw/data/models/surrogate_v2_devine_M_I5_encoder
+cache_dir: /scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache
+device: cuda

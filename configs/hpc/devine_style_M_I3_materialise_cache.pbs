@@ -1,0 +1,48 @@
+#!/bin/bash -l
+#PBS -N devine_M_I3_matcache
+#PBS -l select=1:ncpus=16:mem=48GB
+#PBS -l walltime=12:00:00
+#PBS -J 0-3
+#PBS -j oe
+#PBS -m n
+
+# M_I3 cache pre-materialisation — THE GATEKEEPER (CPU array, one task/season).
+# Builds every combined-dataset grid.zarr into the SHARED training cache_dir,
+# routing each season to its correct ERA5 store. Required because the loader
+# accepts only one era5_store but the 4 steep seasons are temporally disjoint.
+#
+# Prereq: combined_steep_plain_v2.parquet built (build_combined_steep_plain_parquet.py).
+# After this completes, the 2 training runs use overwrite_cache=false (cache-hit).
+
+cd "$PBS_O_WORKDIR"
+BASE="$HOME/dsw"
+
+SEASONS=(mam2023 jja2023 son2023 winter2223)
+STORES=(era5_europe_hourly_mam2023_med.zarr \
+        era5_europe_hourly_jja2023_med.zarr \
+        era5_europe_hourly_son2023_med.zarr \
+        era5_europe_winter2223.zarr)
+SEASON=${SEASONS[$PBS_ARRAY_INDEX]}
+STORE="$BASE/data/raw/${STORES[$PBS_ARRAY_INDEX]}"
+COMBINED="$BASE/data/inference/combined_steep_plain_v2.parquet"
+CACHE="/scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache"
+
+[ -f "$COMBINED" ] || { echo "MISSING combined parquet:$COMBINED"; exit 1; }
+[ -d "$STORE" ] || { echo "MISSING ERA5 store:$STORE"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
+
+cd "$BASE"
+echo "=== M_I3 materialise cache season=$SEASON store=$STORE ==="
+python -u services/module2b-surrogate/materialise_combined_cache.py \
+  --combined-parquet "$COMBINED" \
+  --season "$SEASON" \
+  --era5-store "$STORE" \
+  --dem "$BASE/data/raw/srtm_tiles/" \
+  --worldcover "$BASE/data/raw/worldcover_esa/" \
+  --cache-dir "$CACHE" \
+  --n-workers 16
+echo "=== materialise season=$SEASON exit=$? ==="
