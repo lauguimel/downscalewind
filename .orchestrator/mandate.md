@@ -320,6 +320,27 @@ ERA5 vector (408) + features topo locales → ANN correction (MLP small, ~10k pa
 - **M_I3** Training ablation M_H'1f (scalaire + pente) ET M_H'1g (encodeur), LOSO hold-out montagne + Perdigão.
 - **M_I4** Verdict Boss : voie ANN réhabilitée OU Phase I confirmée.
 
+## 7bis. M_I7 — Généralisation multi-hauteurs (palier A) [OPEN 2026-07-30, user GO]
+
+**Objectif** : étendre la correction DEVINE-style de « pixel 10 m » à « profil 10-100 m », tous régimes de vent.
+Motivé par le benchmark FuXi EU towers : à 10 m on bat FuXi partout (OPE 10m : 0.87 vs 1.11, toutes classes de
+vent), mais en altitude non calibrée on perd (OPE 50m : 1.85 vs 1.11). Vision produit : fire weather (10 m),
+éolien (80-120 m), parapente (v3 crop profond 0-2.5 km — grid.zarr natif monte à 2.5 km, re-train sans re-sim).
+
+- **Palier A (en cours)** : obs déjà locales — Perdigão 48 mâts × 14 niveaux (IOP 2017) + 5 tours ICOS
+  (OPE 10/50/120, IPR 40/60/100, HPB 50/93/131, SAC 10/60/100, TRN 50/100/180), JJA 2020.
+  Builder `build_multiheight_pairings.py` → `multiheight_towers_v1.parquet`. **Hauteurs >100 m CONSERVÉES**
+  dans le dataset (inutilisables par le frozen k24≤100m, prêtes pour v3).
+- **ERA5** : store élargi `era5_hourly_jja2020_eu_wide.zarr` (bbox 45,1.5,49.5,12 — couvre les 5 tours),
+  job 24484278. Perdigão : era5_europe_spring2017_v2.zarr existant.
+- **Training** : loader étendu (height_obs → k_agl au lieu de k=10m fixe) ; gate calme sigmoïde sur Δ dans
+  ANNCorrection (éteint la correction <~3 m/s — résidu calme documenté 3×) ; sur-échantillonnage des pairings
+  tours (~100k) vs 600k 10 m. Base = configs M_I5 (loss régime + encodeur).
+- **Éval** : held-out par station, stratifiée hauteur × classe de vent ; cible = fermer OPE 50m 1.85→~1.2
+  sans dégrader 10 m (1.46 held-out, steep-54 3.02).
+- **Paliers B/C (conditionnels)** : +10-15 tours ICOS (Karlsruhe, Gartow, Lindenberg, OHP, nordiques si
+  grille étendue), puis hors-ICOS (Cabauw, Alaiz NEWA, FINO, Lindenberg DWD). Priorité montagne (parapente).
+
 ## 8. Pointers
 
 - **Verdict M_H1 fail** : `.orchestrator/memory/boss.md` §M_H1 + history.yaml `data/models/surrogate_v2_e2_stage1/`
