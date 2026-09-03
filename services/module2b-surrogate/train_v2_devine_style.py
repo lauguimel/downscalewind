@@ -469,10 +469,11 @@ def main():
         missing, unexpected = ann.load_state_dict(state, strict=False)
         gate_keys = {"gate_v0", "gate_s_raw"}
         bad_missing = [k for k in missing if k not in gate_keys]
-        if bad_missing or unexpected:
+        bad_unexpected = [k for k in unexpected if k not in gate_keys]
+        if bad_missing or bad_unexpected:
             raise RuntimeError(
                 f"init_from={init_from}: incompatible state_dict "
-                f"(missing={bad_missing}, unexpected={list(unexpected)})"
+                f"(missing={bad_missing}, unexpected={bad_unexpected})"
             )
         logger.info("Initialised ANN from %s (epoch=%s, gate params kept at "
                     "init: %s)", init_from, ck.get("epoch", "?"), list(missing))
