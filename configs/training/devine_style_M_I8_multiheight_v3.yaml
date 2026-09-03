@@ -1,0 +1,165 @@
+# DEVINE-style M_I8 — MULTI-HEIGHT correction re-trained against the v3 DEEP-CROP
+# frozen surrogate (32 levels, 0-200 m AGL), superseding M_I7b (v2, 24 levels,
+# 0-100 m AGL). Clone of devine_style_M_I7_multiheight.yaml. Changes vs M_I7b:
+#   1. surrogate_checkpoint -> v3 (surrogate_v3_vit_base_agl200_k32/best.pt).
+#      Architecture is level-independent except vert_basis + film_net.2 per head
+#      (see expand_surrogate_heads_v3.py); nz is NOT a config key of its own —
+#      train_v2_devine_style.py derives nz = target_agl_levels.size (line ~357)
+#      and passes it straight into build_vit_v2(); the checkpoint's head tensors
+#      already carry the 32-level shape, so nz=32 falls out for free once
+#      target_agl_levels is switched below. surrogate_preset stays "base": the
+#      preset name selects backbone width, not level count.
+#   2. target_agl_levels: agl_0_200_32 (was agl_0_100_24). This unlocks the
+#      7,147 ICOS 120/131/180 m rows in multiheight_towers_v1.parquet that
+#      ObsCenteredDataset._materialise_all() filters out today purely because
+#      height_obs > target_agl_levels[-1] (dataset_v2_obs_centered.py:391-397,
+#      the "reserved for v3" comment). Re-run with the SAME parquet unchanged;
+#      the extra rows are picked up automatically once the top level is 200 m.
+#      NOTE (open choice, see header C1/C2 in mission report): whether to also
+#      regenerate multiheight_towers_v1.parquet without the >100 m filter is a
+#      question about the PARQUET BUILDER, not this training config — this
+#      config only changes what the already-built parquet's rows are allowed
+#      to do at load time.
+#   3. CACHE GATE (G1, verified by reading the code, not inferred from
+#      comments): the 600k+ production cache at
+#      /scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache/ is REUSABLE
+#      AS-IS. Materialisation (extract_v2_input_at_coords.build_one, called
+#      from ObsCenteredDataset._materialise_all) writes only native ERA5
+#      pressure-level profiles (input/era5_3d/{u,v,T,q} shape (3,3,N_p) with
+#      N_p=n_pressure_levels, NOT cropped to any AGL grid) plus terrain and
+#      surface fields — target_agl_levels is never passed into build_one and
+#      never touches what lands in grid.zarr. The AGL query grid itself is
+#      synthesized at READ time in _build_features_from_grid_zarr()
+#      (dataset_v2_obs_centered.py:278-284: `levels = target_agl_levels...`,
+#      `geo = np.stack([z/scale, agl/scale])`) from whatever target_agl_levels
+#      the CURRENT run passes in — it is not stored in the cache at all. So
+#      switching agl_0_100_24 -> agl_0_200_32 changes only which synthetic
+#      height grid is read out of an already-cached, uncropped native profile;
+#      it requires zero re-materialisation of the existing cache. The only
+#      NEW work this run must still do is materialise grid.zarrs for the
+#      previously-filtered ICOS 120/131/180 m station rows (new station×hour
+#      keys not yet in the cache directory) — same incremental cost pattern
+#      M_I7b already paid for the tower×hour grids.
+#   4. height_weight_mode / height_weight_10m: selection criterion only (does
+#      not affect training, only which epoch checkpoint becomes best.pt).
+#      protect10m + 0.5 mirrors M_I7b's default (unchanged) so the paper-grade
+#      10 m number stays load-bearing in model selection; see mission report
+#      C2 for whether that is still the right call once >100 m rows are live.
+#   5. Per-epoch checkpointing needs NO new key: train_v2_devine_style.py
+#      unconditionally writes epoch_{epoch:03d}.pt every epoch (line ~709),
+#      independent of any config flag.
+#
+# init_from below CONTINUES from the M_I7b multi-height checkpoint (C1,
+# accepted). ANN input dims do not depend on the surrogate's nz, so the
+# checkpoint's tensor shapes match here (see B2/capacity config for the case
+# where they don't).
+#
+#   6. use_calm_gate: false (C2, accepted; was true in M_I7b). M_I7b measured
+#      the learned gate letting ~44% of the correction through at 0.5 m/s
+#      (calm-regime v0/s did not converge to a useful cutoff) — it was not
+#      doing its job. Running without it makes the light-wind residual
+#      attributable to the correction NETWORK alone, not confounded with an
+#      ineffective gate. Re-parameterising the gate (different functional
+#      form, different conditioning variable) is deferred to a later mandate.
+#
+#   ⚠ BLOCKING RISK (B3, found while wiring this): ANNCorrection only
+#     registers `gate_v0`/`gate_s_raw` as nn.Parameters when use_calm_gate=True
+#     (ann_correction.py:77-83). The M_I7b checkpoint below WAS trained with
+#     use_calm_gate=true and therefore its state_dict contains those two keys.
+#     Loading it into THIS config's use_calm_gate=false model makes
+#     `ann.load_state_dict(state, strict=False)` return
+#     unexpected=['gate_v0','gate_s_raw'] — and
+#     train_v2_devine_style.py:470-476 only exempts GATE KEYS from the
+#     `missing` list, never from `unexpected`:
+#         gate_keys = {"gate_v0", "gate_s_raw"}
+#         bad_missing = [k for k in missing if k not in gate_keys]
+#         if bad_missing or unexpected:      # <- unexpected is unfiltered
+#             raise RuntimeError(...)
+#     Verified empirically (not just read): loading a gate-on state_dict into
+#     a gate-off ANNCorrection of otherwise-identical shape reproduces exactly
+#     this unexpected=['gate_v0','gate_s_raw'] / RuntimeError path. THIS CONFIG
+#     WILL HARD-CRASH AT INIT (hour 0, before any training step) as written.
+#     NOT silently patched here (out of scope for this file). Minimal fix
+#     proposed to the user: filter `unexpected` the same way as `missing`,
+#     i.e. `bad_unexpected = [k for k in unexpected if k not in gate_keys]`
+#     and gate the raise on `bad_missing or bad_unexpected` — a 2-line change
+#     confined to train_v2_devine_style.py:470-476. Do not qsub this config
+#     until that fix lands (or the user picks a different init_from).
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+pairings_parquet: /home/maitreje/dsw/data/inference/combined_steep_plain_v2.parquet
+base_weight: 1.0
+extra_parquets:
+  - path: /home/maitreje/dsw/data/inference/multiheight_towers_v1.parquet
+    weight: 1.0
+    pop_weights:
+      tower_icos: 4.0
+      perdigao_mast: 1.5
+    season_era5_stores:
+      jja2020: /home/maitreje/dsw/data/raw/era5_hourly_jja2020_eu_wide.zarr
+      iop2017: /home/maitreje/dsw/data/raw/era5_europe_spring2017_v2.zarr
+era5_store: /home/maitreje/dsw/data/raw/era5_europe_hourly_jja2023_med.zarr
+dem: /home/maitreje/dsw/data/raw/srtm_tiles/
+worldcover: /home/maitreje/dsw/data/raw/worldcover_esa/
+
+# ── Frozen surrogate v3 (32 levels, 0-200 m AGL) ────────────────────────────
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v3_vit_base_agl200_k32/best.pt
+surrogate_preset: base
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+target_agl_levels: agl_0_200_32
+n_pressure_levels: 10
+
+# ── Splits ───────────────────────────────────────────────────────────────────
+# Unchanged vs M_I7b: exclude_substrings EMPTIED so Perdigão masts (pop
+# perdigao_mast) stay in training; watertight split groups all heights of one
+# physical tower so no height leakage.
+val_frac: 0.20
+seed: 42
+exclude_substrings: []
+
+# ── ANN architecture (M_I5 encoder arch UNCHANGED + calm gate) ───────────────
+topo_dim: 12
+enable_phys_features: true
+hidden_units: [50, 10]
+dropout: 0.25
+use_terrain_encoder: true
+terrain_latent_dim: 48
+terrain_in_channels: 4
+use_calm_gate: false
+gate_v0_init: 2.5
+gate_s_init: 1.0
+
+# ── Model-selection criterion (per-height, NEW vs M_I5/M_I7b default) ───────
+height_weight_mode: protect10m
+height_weight_10m: 0.5
+
+# ── Fine-tune init — CONTINUES from M_I7b (open choice C1, see mission
+# report) rather than restarting from M_I5. ANN shapes are surrogate-nz
+# independent so either checkpoint loads without a strict-key mismatch.
+init_from: /home/maitreje/dsw/data/models/surrogate_v2_devine_M_I7_multiheight/best.pt
+
+# ── Loss (M_I5b REGIME-AWARE — UNCHANGED) ────────────────────────────────────
+loss_mode: regime
+tau_under: 0.6
+tau_over: 0.4
+calm_threshold: 3.0
+calm_width: 1.5
+calm_over_penalty: 2.0
+weight_floor: 1.0
+calm_strat_thr: 3.0
+
+# ── Training (fine-tune: same schedule as M_I7b; walltime padded for the
+# incremental >100 m grid.zarr materialisation, see note 3 above) ───────────
+epochs: 4
+batch_size: 4
+lr: 5.0e-4
+grad_clip_norm: 1.0
+num_workers: 4
+n_prep_workers: 8
+max_era5_delta_h: 3.5
+overwrite_cache: false
+
+# ── I/O ──────────────────────────────────────────────────────────────────────
+output_dir: /home/maitreje/dsw/data/models/surrogate_v3_devine_M_I8_multiheight
+cache_dir: /scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache
+device: cuda

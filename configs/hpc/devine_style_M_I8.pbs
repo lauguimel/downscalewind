@@ -1,0 +1,85 @@
+#!/bin/bash -l
+#PBS -N devine_M_I8_v3_perdigao
+#PBS -l select=1:ncpus=16:mem=96GB:ngpus=1:gpu_id=H100
+#PBS -l walltime=40:00:00
+#PBS -j oe
+#PBS -m n
+
+# M_I8 PRODUCTION — multi-height correction re-trained against the v3 deep-crop
+# frozen surrogate (32 levels, 0-200 m AGL), continuing from M_I7b's best.pt.
+# Same merged dataset as M_I7b (combined 609k 10 m + multiheight_towers_v1,
+# ICOS x4 / Perdigao masts x1.5 via WeightedRandomSampler) but target_agl_levels
+# now agl_0_200_32, so the previously height-filtered ICOS 120/131/180 m rows
+# (7,147, "reserved for v3") are no longer dropped by ObsCenteredDataset.
+# Cache is REUSABLE (G1, see config header comment): target_agl_levels never
+# touches what is written into grid.zarr, only what is read out of it. Walltime
+# padded vs M_I7b's 36h to absorb materialising the newly-unfiltered
+# station x hour grid.zarrs into the shared cache on first run.
+#
+# B4 ARITHMETIC (40h sanity check, follow-up mission): the 7,147 newly-
+# unfiltered ICOS 120/131/180 m rows do NOT need new grid.zarr materialisation
+# in practice. `ObsCenteredDataset._cache_path` strips the height suffix from
+# station_id before building the cache key (dataset_v2_obs_centered.py:418-424,
+# "so all heights of one physical tower share a single materialised
+# grid.zarr"), so the cache key is (base_tower_id, timestamp) only. M_I7b
+# already processed the SAME ICOS towers at the SAME timestamps for their
+# <=100 m rows (h010/h050/h100 etc.), which already created and populated
+# those exact cache entries. The newly-unfiltered h120/h131/h180 rows share
+# those same (tower, timestamp) keys, so `_materialise_all`'s
+# `cache_path.exists()` check (line 473) hits and skips rebuilding — no new
+# I/O, just ~1.1% more rows per epoch (7,147 / ~640k). 40h (already more
+# generous than M_I7b's observed ~35h for an equivalent 4-epoch run) holds
+# with margin.
+# Post-train eval kwargs kept in sync with training (known M_H'1f trap).
+
+cd "$PBS_O_WORKDIR"
+BASE="$HOME/dsw"
+CFG="$BASE/configs/training/devine_style_M_I8_multiheight_v3.yaml"
+OUT="$BASE/data/models/surrogate_v3_devine_M_I8_multiheight"
+CACHE="/scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache"
+mkdir -p "$OUT"
+
+[ -f "$CFG" ] || { echo "MISSING CFG:$CFG"; exit 1; }
+[ -f "$BASE/data/inference/combined_steep_plain_v2.parquet" ] || \
+    { echo "MISSING combined parquet"; exit 1; }
+[ -f "$BASE/data/inference/multiheight_towers_v1.parquet" ] || \
+    { echo "MISSING multiheight parquet"; exit 1; }
+[ -f "$BASE/data/models/surrogate_v3_vit_base_agl200_k32/best.pt" ] || \
+    { echo "MISSING v3 surrogate best.pt"; exit 1; }
+[ -f "$BASE/data/models/surrogate_v2_devine_M_I7_multiheight/best.pt" ] || \
+    { echo "MISSING M_I7b best.pt (init_from)"; exit 1; }
+[ -d "$BASE/data/raw/era5_hourly_jja2020_eu_wide.zarr" ] || \
+    { echo "MISSING jja2020 EU-wide ERA5 store"; exit 1; }
+[ -d "$CACHE" ] || { echo "MISSING production cache (M_I3):$CACHE"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
+
+nvidia-smi -L
+cd "$BASE"
+echo "=== M_I8 PROD v3 multiheight CFG=$CFG OUT=$OUT ==="
+python -u services/module2b-surrogate/train_v2_devine_style.py \
+  --config "$CFG" 2>&1 | tee "$OUT/train.log"
+RC_TRAIN=${PIPESTATUS[0]}
+if [ $RC_TRAIN -ne 0 ]; then
+    echo "TRAIN FAILED rc=$RC_TRAIN"
+    exit $RC_TRAIN
+fi
+
+if [ -f "$OUT/best.pt" ]; then
+    echo "=== eval (raw vs corrected) on val set ==="
+    python -u services/module2b-surrogate/eval_devine_style.py \
+      --config "$CFG" \
+      --ann-checkpoint "$OUT/best.pt" \
+      --out-dir "$OUT" 2>&1 | tee "$OUT/eval.log"
+else
+    echo "WARNING: no best.pt produced; skipping eval"
+fi
+echo "=== summary ==="
+cat "$OUT/eval_summary.json" 2>/dev/null || echo "no eval_summary.json"
+tail -50 "$OUT/history.yaml" 2>/dev/null || echo "no history.yaml"

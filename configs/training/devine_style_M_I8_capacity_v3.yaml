@@ -1,0 +1,135 @@
+# DEVINE-style M_I8-CAPACITY — parallel arm to devine_style_M_I8_multiheight_v3.yaml
+# testing the hypothesis "the correction network (ANNCorrection) is under-sized
+# for the enriched multi-height task". Identical to the main M_I8 config in every
+# respect EXCEPT the correction-network width and its init.
+#
+# WIDTH (B1, measured, not guessed): instantiated ANNCorrection locally (CPU,
+# services/module2b-surrogate/src/ann_correction.py) with era5_dim=408
+# (n_pressure_levels=10 -> 4*9*10 + 4*9 + 10 + 2 = 408), topo_dim=12
+# (enable_phys_features=true), use_terrain_encoder=true, use_calm_gate=false
+# (matching the main M_I8 arch, gate off per C2):
+#   main   hidden_units=[50,10]    terrain_latent_dim=48   ->    92,576 params
+#   this   hidden_units=[320,160]  terrain_latent_dim=128  ->   362,056 params
+#   ratio: 3.91x — a genuine capacity test (target band was 3-5x), not a token
+#   bump. Terrain-encoder conv stack (16/32/64/64 channels) is unchanged in
+#   both — its cost is dominated by the fixed conv channels, not
+#   terrain_latent_dim, so the growth is concentrated where it should be: the
+#   two MLP hidden layers that see the concatenated (era5_flat, topo,
+#   terrain_latent) vector and must now resolve a harder multi-height mapping.
+#
+# INIT (B2, decided by reading code, not assumption): a checkpoint trained
+# with hidden_units=[50,10] / terrain_latent_dim=48 CANNOT be loaded into this
+# wider network. Verified empirically: `ann.load_state_dict(state,
+# strict=False)` in train_v2_devine_style.py:469 raises RuntimeError with
+# "size mismatch for mlp.0.weight: ... [50, 468] ... vs [320, 468]" etc. —
+# PyTorch's `strict=False` only relaxes MISSING/UNEXPECTED KEY checks, it does
+# NOT relax a shape mismatch on a key present in both state dicts, so this
+# crashes exactly as hard as `strict=True` would. Decision: TRAIN FROM SCRATCH
+# — init_from is omitted below (cfg.get("init_from") is falsy -> the whole
+# init_from block at train_v2_devine_style.py:463-479 is skipped, no crash
+# path).
+#
+# EPOCHS (B1/B3 of the follow-up mission, revised 20 -> 5): the training
+# script has NO resume mechanism — grep confirms no `resume`/`start_epoch`/
+# `--resume` anywhere in train_v2_devine_style.py; `init_from` (line 463-479)
+# only restores the ANN's state_dict, never the optimizer or LR schedule, and
+# the epoch loop always runs `for epoch in range(n_epochs)` (line 546) from a
+# freshly constructed `torch.optim.Adam` (line 482) with a schedule sized to
+# THIS run's `n_epochs`. So a wall-clock-killed run cannot be "continued" —
+# each submission is a fresh optimisation. At a conservative 8 h/epoch
+# (M_I7b's own 4-epoch fine-tune took ~35 h wall including cache
+# materialisation, i.e. ~8.75 h/epoch as an upper bound; a from-scratch run
+# has no init but pays a full first-epoch cache-materialisation cost too), 20
+# epochs would need ~160 h and get killed by the 48 h walltime around
+# epoch 6. epochs LOWERED to 5 (48 h / 8 h/epoch = 6, minus 1 for first-epoch
+# cache-materialisation headroom) so the run actually finishes and produces a
+# best.pt instead of being killed mid-epoch with nothing usable.
+# LIMITATION to report, not hide: a from-scratch network given only 5 epochs
+# may not converge to a fair comparison point against M_I7b's 4-epoch
+# FINE-TUNE (which started from an already-trained multi-height model) — the
+# per-epoch checkpoints (train_v2_devine_style.py:709, unconditional) are the
+# way to see whether the val curve is still falling at epoch 5.
+# WALLTIME CEILING: grepped every `#PBS -l walltime=` in configs/hpc/ — the
+# highest ever requested in this repo is 48 h (train_v2_vit_large_resid_s4_geo,
+# train_vit_sweep, train_wind_vit_9k, train_wind_vit_small_9k, and this arm's
+# own PBS). Nothing above 48 h has ever been tried against Aqua's scheduler
+# from this codebase, so raising walltime further is untested territory, not
+# a known-safe option — lowering epochs is the conservative fix.
+#
+# Everything else (data, cache, surrogate v3, target_agl_levels, splits, loss,
+# height-weighted selection) is identical to devine_style_M_I8_multiheight_v3.yaml.
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+pairings_parquet: /home/maitreje/dsw/data/inference/combined_steep_plain_v2.parquet
+base_weight: 1.0
+extra_parquets:
+  - path: /home/maitreje/dsw/data/inference/multiheight_towers_v1.parquet
+    weight: 1.0
+    pop_weights:
+      tower_icos: 4.0
+      perdigao_mast: 1.5
+    season_era5_stores:
+      jja2020: /home/maitreje/dsw/data/raw/era5_hourly_jja2020_eu_wide.zarr
+      iop2017: /home/maitreje/dsw/data/raw/era5_europe_spring2017_v2.zarr
+era5_store: /home/maitreje/dsw/data/raw/era5_europe_hourly_jja2023_med.zarr
+dem: /home/maitreje/dsw/data/raw/srtm_tiles/
+worldcover: /home/maitreje/dsw/data/raw/worldcover_esa/
+
+# ── Frozen surrogate v3 (32 levels, 0-200 m AGL) — same as main M_I8 arm ────
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v3_vit_base_agl200_k32/best.pt
+surrogate_preset: base
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+target_agl_levels: agl_0_200_32
+n_pressure_levels: 10
+
+# ── Splits ───────────────────────────────────────────────────────────────────
+val_frac: 0.20
+seed: 42
+exclude_substrings: []
+
+# ── ANN architecture — WIDER (B1: 92,576 -> 362,056 params, 3.91x) ──────────
+topo_dim: 12
+enable_phys_features: true
+hidden_units: [320, 160]
+dropout: 0.25
+use_terrain_encoder: true
+terrain_latent_dim: 128
+terrain_in_channels: 4
+use_calm_gate: false
+gate_v0_init: 2.5
+gate_s_init: 1.0
+
+# ── Model-selection criterion (per-height) — same as main M_I8 arm ─────────
+height_weight_mode: protect10m
+height_weight_10m: 0.5
+
+# ── Init (B2): FROM SCRATCH — no init_from key. A [50,10]/48 checkpoint
+# cannot shape-match a [320,160]/128 network (see header). ─────────────────
+# init_from: (intentionally omitted)
+
+# ── Loss (M_I5b REGIME-AWARE — UNCHANGED) ────────────────────────────────────
+loss_mode: regime
+tau_under: 0.6
+tau_over: 0.4
+calm_threshold: 3.0
+calm_width: 1.5
+calm_over_penalty: 2.0
+weight_floor: 1.0
+calm_strat_thr: 3.0
+
+# ── Training — FROM SCRATCH, epochs = 5 (B1/B3 of follow-up mission: no
+# resume mechanism exists, so this must fit inside one 48h walltime at a
+# conservative 8h/epoch; see header) ─────────────────────────────────────────
+epochs: 5
+batch_size: 4
+lr: 5.0e-4
+grad_clip_norm: 1.0
+num_workers: 4
+n_prep_workers: 8
+max_era5_delta_h: 3.5
+overwrite_cache: false
+
+# ── I/O ──────────────────────────────────────────────────────────────────────
+output_dir: /home/maitreje/dsw/data/models/surrogate_v3_devine_M_I8_capacity
+cache_dir: /scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache
+device: cuda
