@@ -47,6 +47,13 @@ DEFAULT_AGL_0_100_24 = (
     55.0, 60.0, 65.0, 70.0, 75.0, 80.0, 85.0, 90.0, 95.0, 100.0,
 )
 
+# Deep-crop AGL target grid (v3): identical to DEFAULT_AGL_0_100_24 below 100 m,
+# then 10 m spacing to 160 m and 20 m to 200 m. Covers wind-turbine hub heights
+# (80-150 m) and the tall ICOS/Cabauw tower levels (120/131/180/200 m).
+DEFAULT_AGL_0_200_32 = DEFAULT_AGL_0_100_24 + (
+    110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 180.0, 200.0,
+)
+
 # Default normalisation. Replace with data-driven stats once
 # compute_norm_stats_v2.py has run on the train split.
 DEFAULT_NORM = {
@@ -154,6 +161,7 @@ def parse_agl_levels(levels: str | list[float] | tuple[float, ...] | np.ndarray 
 
     Accepted strings:
       - "agl_0_100_24" / "fwi_0_100_24"
+      - "agl_0_200_32" (deep crop, v3)
       - comma-separated levels, e.g. "0,2,5,10,20,50,100"
     """
     if levels is None:
@@ -164,6 +172,8 @@ def parse_agl_levels(levels: str | list[float] | tuple[float, ...] | np.ndarray 
             return None
         if key in {"agl_0_100_24", "fwi_0_100_24"}:
             arr = np.asarray(DEFAULT_AGL_0_100_24, dtype=np.float32)
+        elif key in {"agl_0_200_32", "deep_0_200_32"}:
+            arr = np.asarray(DEFAULT_AGL_0_200_32, dtype=np.float32)
         else:
             arr = np.asarray([float(x) for x in key.split(",") if x.strip()], dtype=np.float32)
     else:

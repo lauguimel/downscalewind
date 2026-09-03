@@ -1,0 +1,75 @@
+#!/bin/bash -l
+#PBS -N v3_vitb_smoke
+#PBS -l select=1:ncpus=8:mem=48GB:ngpus=1:gpu_id=A100
+#PBS -l walltime=01:30:00
+#PBS -j oe
+#PBS -m n
+
+# Surrogate v3 — deep crop 0-200 m (32 AGL levels), SAME CFD data as v2.
+# The 100 m ceiling of v2 was a target-grid choice, not a data limit: the native
+# grid.zarr spans 2500 m and every column of the 20 sampled cases reaches well
+# above 200 m AGL (lowest column top = 660 m).
+#
+# Init: v2 `..._surface/best.pt` with its 5 output heads expanded 24 -> 32
+# levels (expand_surrogate_heads_v3.py). Backbone + refine convs transfer intact
+# (223/238 tensors); the 8 new levels start as a copy of the 100 m level.
+#
+# agl_weight_height raised 50 -> 80 m: with w = 1 + alpha*exp(-agl/height), the
+# hub band (80-150 m) keeps weight 1.3-1.7 instead of 1.1-1.4, without lowering
+# the near-ground emphasis that the 10 m fire-weather claim rests on (w=3 at 0 m).
+
+cd $PBS_O_WORKDIR
+
+CAMPAIGN="/scratch/maitreje/dsw/complex_terrain_v1"
+DATA="/scratch/maitreje/dsw/training_v2"
+V2="$HOME/dsw/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt"
+OUT="$HOME/dsw/data/models/surrogate_v3_vit_base_agl200_k32_smoke"
+INIT="$OUT/init_from_v2_k32.pt"
+
+mkdir -p "$OUT"
+[ -d "$DATA" ] || { echo MISSING:$DATA; exit 1; }
+[ -f "$V2" ] || { echo MISSING:$V2; exit 1; }
+[ -f "$CAMPAIGN/manifests/dataset_v2_norm.yaml" ] || { echo MISSING:dataset_v2_norm.yaml; exit 1; }
+nvidia-smi >/dev/null || { echo "GPU missing"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+cd "$HOME/dsw/services/module2b-surrogate"
+
+echo "=== head expansion 24 -> 32 levels ==="
+python -u expand_surrogate_heads_v3.py --src "$V2" --dst "$INIT" --nz-old 24 --nz-new 32 \
+  || { echo "EXPAND FAILED"; exit 1; }
+
+echo "=== v3 training (agl_0_200_32) ==="
+python -u train_v2_vit.py \
+  --data-dir "$DATA" \
+  --splits-yaml "$CAMPAIGN/manifests/dataset_v2_splits.yaml" \
+  --norm-yaml "$CAMPAIGN/manifests/dataset_v2_norm.yaml" \
+  --out-dir "$OUT" \
+  --epochs 1 --max-train-cases 24 --max-val-cases 8 \
+  --batch-size 4 \
+  --preset base \
+  --loss-type s4 \
+  --w-amp 0.1 \
+  --w-div 0.05 \
+  --lr 5e-5 \
+  --weight-decay 0.05 \
+  --warmup-epochs 2 \
+  --use-geo \
+  --include-slopes \
+  --use-residual \
+  --residual-baseline-mode surface \
+  --agl-weight-alpha 2.0 \
+  --agl-weight-height 80.0 \
+  --target-agl-levels agl_0_200_32 \
+  --resume "$INIT" \
+  --num-workers 4 \
+  --device cuda 2>&1 | tee "$OUT/train.log"
+RC=${PIPESTATUS[0]}
+echo "RC_TRAIN=$RC"
+exit "$RC"

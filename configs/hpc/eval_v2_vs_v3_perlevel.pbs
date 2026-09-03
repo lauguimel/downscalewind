@@ -1,0 +1,79 @@
+#!/bin/bash -l
+#PBS -N eval_v2_vs_v3
+#PBS -l select=1:ncpus=8:mem=48GB:ngpus=1:gpu_id=A100
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -m n
+
+# Per-level physical evaluation of the v2 (24 levels, 0-100 m) and v3 (32 levels,
+# 0-200 m) surrogates on the SAME val split. Levels k=0..23 are the same physical
+# heights in both, so the k_levels blocks are directly comparable — this answers
+# "did the deep crop cost us anything below 100 m?", which gates whether v3 can
+# replace v2 for the fire-weather (10 m) claim.
+
+cd $PBS_O_WORKDIR
+
+CAMPAIGN="/scratch/maitreje/dsw/complex_terrain_v1"
+DATA="/scratch/maitreje/dsw/training_v2"
+V2="$HOME/dsw/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt"
+V3="$HOME/dsw/data/models/surrogate_v3_vit_base_agl200_k32/best.pt"
+OUT="$HOME/dsw/data/validation/v2_vs_v3_perlevel"
+NCASES="${NCASES:-250}"
+
+mkdir -p "$OUT"
+for f in "$V2" "$V3"; do [ -f "$f" ] || { echo "MISSING:$f"; exit 1; }; done
+nvidia-smi >/dev/null || { echo "GPU missing"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+
+cd "$HOME/dsw/services/module2b-surrogate"
+
+for TAG in v2 v3; do
+    case "$TAG" in
+        v2) W="$V2" ;;
+        v3) W="$V3" ;;
+    esac
+    echo "=== eval $TAG (max-cases=$NCASES, split=val) ==="
+    python -u evaluate_v2_physical.py \
+      --model-type vit --vit-preset base \
+      --weights "$W" \
+      --data-dir "$DATA" \
+      --splits-yaml "$CAMPAIGN/manifests/dataset_v2_splits.yaml" \
+      --norm-yaml "$CAMPAIGN/manifests/dataset_v2_norm.yaml" \
+      --split val \
+      --max-cases "$NCASES" \
+      --output "$OUT/$TAG" \
+      --device cuda 2>&1 | tee "$OUT/eval_$TAG.log"
+    RC=${PIPESTATUS[0]}
+    echo "RC_$TAG=$RC"
+    [ "$RC" -eq 0 ] || exit "$RC"
+done
+
+echo "=== per-level comparison (levels 0-23, shared heights) ==="
+python - <<'PY'
+import json, pathlib
+out = pathlib.Path.home() / "dsw/data/validation/v2_vs_v3_perlevel"
+s2 = json.loads((out / "v2" / "summary.json").read_text())
+s3 = json.loads((out / "v3" / "summary.json").read_text())
+lv2 = s2["k_levels"]; lv3 = s3["k_levels"]
+rows = []
+for vn in lv2:
+    a, b = lv2[vn], lv3[vn]
+    n = min(len(a), 24)
+    for k in range(n):
+        ka, kb = a[k], b[k]
+        key = "rmse" if "rmse" in ka else list(ka)[0]
+        rows.append((vn, k, ka.get(key), kb.get(key)))
+print(f"{'var':6s} {'k':>3s} {'v2':>10s} {'v3':>10s} {'delta%':>8s}")
+for vn, k, x, y in rows:
+    if x is None or y is None or x == 0:
+        continue
+    print(f"{vn:6s} {k:3d} {x:10.4f} {y:10.4f} {100*(y-x)/x:+8.2f}")
+json.dump({"v2": lv2, "v3": lv3}, (out / "perlevel_compare.json").open("w"), indent=2)
+print("wrote", out / "perlevel_compare.json")
+PY
