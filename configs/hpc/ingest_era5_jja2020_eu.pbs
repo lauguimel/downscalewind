@@ -1,0 +1,71 @@
+#!/bin/bash -l
+#PBS -N ingest_era5_jja2020eu
+#PBS -l select=1:ncpus=2:mem=16GB
+#PBS -l walltime=10:00:00
+#PBS -j oe
+#PBS -m n
+
+# FuXi-CFD EU-towers benchmark — ERA5 ingestion for the ICOS tall-tower sites
+# used in the FuXi-CFD paper EU validation (OPE Houdelaincourt 48.56N/5.50E,
+# IPR Ispra 45.81N/8.64E). Obs coverage: 2020-06-01 -> 2020-09-09 hourly.
+#
+# One bbox covers both sites: S=45, W=4.5, N=49.5, E=9.5 (5deg x 5deg).
+# Two modes (qsub -v MODE=full|100m, chain them for the CDS sequential limit):
+#   full : pressure {u,v,t,q} 10 plevels (--no-z) + surface {t2m,d2m,u10,v10}
+#          -> era5_hourly_jja2020_eu.zarr   (OUR surrogate v2 inputs)
+#   100m : single-level {u100,v100} (--surface-only)
+#          -> era5_100m_jja2020eu.zarr      (FuXi-CFD native input + 100 m baseline)
+
+cd $PBS_O_WORKDIR
+
+BASE="$HOME/dsw"
+: "${MODE:=full}"
+: "${BBOX:=45,4.5,49.5,9.5}"
+: "${START:=2020-06}"
+: "${END:=2020-09}"
+: "${OUTPUT_OVERRIDE:=}"
+
+case "$MODE" in
+    full)
+        OUTPUT="$BASE/data/raw/era5_hourly_jja2020_eu.zarr"
+        EXTRA_ARGS="--no-z"
+        CACHE="/scratch/maitreje/dsw/era5_hourly_cache_jja2020_eu"
+        ;;
+    100m)
+        OUTPUT="$BASE/data/raw/era5_100m_jja2020eu.zarr"
+        EXTRA_ARGS="--surface-only --surface-vars 100m_u_component_of_wind,100m_v_component_of_wind"
+        CACHE="/scratch/maitreje/dsw/era5_100m_cache_jja2020_eu"
+        ;;
+    *) echo "Unknown MODE=$MODE (full|100m)"; exit 1 ;;
+esac
+if [ -n "$OUTPUT_OVERRIDE" ]; then
+    OUTPUT="$BASE/data/raw/$OUTPUT_OVERRIDE"
+    CACHE="${CACHE}_$(basename "$OUTPUT_OVERRIDE" .zarr)"
+fi
+
+echo "MODE=$MODE | START=$START | END=$END | BBOX=$BBOX | OUTPUT=$OUTPUT"
+
+if [ -d "$OUTPUT" ] && { [ -f "$OUTPUT/zarr.json" ] || [ -f "$OUTPUT/.zgroup" ]; }; then
+    echo "OUTPUT exists, refusing to overwrite. Delete first if you really mean to."
+    exit 0
+fi
+
+module load Miniconda3/24.9.2-0
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+
+if [ ! -f "$HOME/.cdsapirc" ]; then
+    echo "MISSING: $HOME/.cdsapirc"
+    exit 1
+fi
+python -c "import cdsapi; print('cdsapi ok')" || exit 1
+
+cd "$BASE"
+python -u services/data-ingestion/ingest_era5_europe_hourly.py \
+    --output "$OUTPUT" \
+    --start "$START" \
+    --end "$END" \
+    --bbox "$BBOX" \
+    $EXTRA_ARGS \
+    --max-days-per-req 7 \
+    --cache-dir "$CACHE"

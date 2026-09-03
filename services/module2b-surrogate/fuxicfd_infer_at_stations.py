@@ -351,14 +351,33 @@ class FuxiRunner:
 
     def forward_speed10_centre(self, x_batch: np.ndarray) -> np.ndarray:
         """Run a (B,4,300,300) batch -> 10 m centre-pixel speed per sample (B,)."""
+        return self.forward_speed_centre(x_batch)
+
+    def forward_speed_centre(self, x_batch: np.ndarray,
+                             level_indices: "np.ndarray | list[int] | None" = None,
+                             ) -> np.ndarray:
+        """Run a (B,4,300,300) batch -> centre-pixel speed per sample (B,).
+
+        Output levels are 10..140 m AGL in 5 m steps (height.npy[2:29], so
+        level 0 = 10 m). `level_indices` selects the level per sample (int or
+        one per sample); None = 10 m for every sample.
+        """
         pred = self.sess.run(None, {self.input_name: x_batch})[0]  # (B,27,4,300,300)
         mean = self.out_stats["mean"][:, :, None, None]            # (27,4,1,1)
         std = self.out_stats["std"][:, :, None, None]
+        n_levels = pred.shape[1]
+        if level_indices is None:
+            levels = np.full(pred.shape[0], OUT_LEVEL_10M, dtype=int)
+        else:
+            levels = np.broadcast_to(np.asarray(level_indices, dtype=int),
+                                     (pred.shape[0],))
+        if levels.min() < 0 or levels.max() >= n_levels:
+            raise ValueError(f"level index out of range 0..{n_levels - 1}: {levels}")
         speeds = np.empty(pred.shape[0], dtype=np.float32)
         for b in range(pred.shape[0]):
             p = pred[b] * std + mean                               # (27,4,300,300)
-            u = p[OUT_LEVEL_10M, 0, FUXI_CENTRE, FUXI_CENTRE]
-            v = p[OUT_LEVEL_10M, 1, FUXI_CENTRE, FUXI_CENTRE]
+            u = p[levels[b], 0, FUXI_CENTRE, FUXI_CENTRE]
+            v = p[levels[b], 1, FUXI_CENTRE, FUXI_CENTRE]
             speeds[b] = math.hypot(float(u), float(v))
         return speeds
 
