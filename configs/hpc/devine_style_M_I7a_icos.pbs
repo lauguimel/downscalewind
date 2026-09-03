@@ -1,0 +1,66 @@
+#!/bin/bash -l
+#PBS -N devine_M_I7a_icos
+#PBS -l select=1:ncpus=16:mem=96GB:ngpus=1:gpu_id=H100
+#PBS -l walltime=30:00:00
+#PBS -j oe
+#PBS -m n
+
+# M_I7 PRODUCTION — multi-height fine-tune from M_I5 best.pt. Merged dataset =
+# combined 609k 10 m + multiheight_towers_v1 (ICOS ×4, Perdigão masts ×1.5 via
+# WeightedRandomSampler). Calm gate ON (sigmoid on ERA5 10 m speed, v0 init 2.5).
+# 4 epochs ≈ 20 h on ~640k rows (24 h walltime). First run also materialises
+# ~60k new tower×hour grid.zarrs into the shared production cache — if that
+# blows the walltime, pre-materialise via a cache job and resubmit.
+# Post-train eval kwargs kept in sync with training (known M_H'1f trap).
+
+cd "$PBS_O_WORKDIR"
+BASE="$HOME/dsw"
+CFG="$BASE/configs/training/devine_style_M_I7a_icos.yaml"
+OUT="$BASE/data/models/surrogate_v2_devine_M_I7a_icos"
+CACHE="/scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache"
+mkdir -p "$OUT"
+
+[ -f "$CFG" ] || { echo "MISSING CFG:$CFG"; exit 1; }
+[ -f "$BASE/data/inference/combined_steep_plain_v2.parquet" ] || \
+    { echo "MISSING combined parquet"; exit 1; }
+[ -f "$BASE/data/inference/multiheight_towers_v1.parquet" ] || \
+    { echo "MISSING multiheight parquet"; exit 1; }
+[ -f "$BASE/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt" ] || \
+    { echo "MISSING surrogate best.pt"; exit 1; }
+[ -f "$BASE/data/models/surrogate_v2_devine_M_I5_encoder/best.pt" ] || \
+    { echo "MISSING M_I5 best.pt (init_from)"; exit 1; }
+[ -d "$BASE/data/raw/era5_hourly_jja2020_eu_wide.zarr" ] || \
+    { echo "MISSING jja2020 EU-wide ERA5 store"; exit 1; }
+[ -d "$CACHE" ] || { echo "MISSING production cache (M_I3):$CACHE"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
+
+nvidia-smi -L
+cd "$BASE"
+echo "=== M_I7 PROD multiheight CFG=$CFG OUT=$OUT ==="
+python -u services/module2b-surrogate/train_v2_devine_style.py \
+  --config "$CFG" 2>&1 | tee "$OUT/train.log"
+RC_TRAIN=${PIPESTATUS[0]}
+if [ $RC_TRAIN -ne 0 ]; then
+    echo "TRAIN FAILED rc=$RC_TRAIN"
+    exit $RC_TRAIN
+fi
+
+if [ -f "$OUT/best.pt" ]; then
+    echo "=== eval (raw vs corrected) on val set ==="
+    python -u services/module2b-surrogate/eval_devine_style.py \
+      --config "$CFG" \
+      --ann-checkpoint "$OUT/best.pt" \
+      --out-dir "$OUT" 2>&1 | tee "$OUT/eval.log"
+else
+    echo "WARNING: no best.pt produced; skipping eval"
+fi
+echo "=== summary ==="
+cat "$OUT/eval_summary.json" 2>/dev/null || echo "no eval_summary.json"
+tail -50 "$OUT/history.yaml" 2>/dev/null || echo "no history.yaml"

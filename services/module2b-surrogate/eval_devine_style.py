@@ -43,6 +43,7 @@ from train_v2_devine_style import (  # noqa: E402
     _denorm_uv_at_center,
     _load_norm_overrides,
     build_frozen_surrogate,
+    resolve_pairings,
 )
 
 logger = logging.getLogger("eval_devine")
@@ -116,8 +117,8 @@ def main():
     era5_layout = _build_era5_layout(n_pressure=int(cfg.get("n_pressure_levels", 10)))
     era5_dim = era5_layout["total_dim"]
 
-    # Val split (same as train)
-    pairings = Path(cfg["pairings_parquet"])
+    # Val split (same as train — including the M_I7 merged multi-pop parquet)
+    pairings = resolve_pairings(cfg, out_dir)
     _, val_sids = watertight_station_split(
         pairings, val_frac=float(cfg.get("val_frac", 0.2)),
         seed=int(cfg.get("seed", 42)),
@@ -170,6 +171,10 @@ def main():
         use_terrain_encoder=bool(cfg.get("use_terrain_encoder", False)),
         terrain_latent_dim=int(cfg.get("terrain_latent_dim", 48)),
         terrain_in_channels=int(cfg.get("terrain_in_channels", 4)),
+        use_calm_gate=bool(cfg.get("use_calm_gate", False)),
+        gate_v0_init=float(cfg.get("gate_v0_init", 2.5)),
+        gate_s_init=float(cfg.get("gate_s_init", 1.0)),
+        gate_norm=norm,
     ).to(device)
     ck = torch.load(str(args.ann_checkpoint), map_location=device, weights_only=False)
     ann.load_state_dict(ck["model"])

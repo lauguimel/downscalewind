@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -44,6 +45,11 @@ logger = logging.getLogger(__name__)
 # Native grid + central pixel constants (must match utils.inference_input)
 NI, NJ = 180, 180
 I_CENTER, J_CENTER = NI // 2, NJ // 2  # (90, 90)
+
+# Multi-height station ids encode the level as a suffix (e.g. icos_HPB_h093,
+# perdigao_rne01_h010). All heights of one physical tower share lat/lon, hence
+# the SAME input grid — the suffix is stripped for cache paths and split groups.
+_HEIGHT_SUFFIX_RE = re.compile(r"_h\d+$")
 
 PHYS_FEATURE_NORM = {
     "grad_T_850_surf": {"mean": -8.0, "std": 6.0},    # K, lapse surface->850 hPa
@@ -321,6 +327,7 @@ class Pairing:
     speed_obs: float
     source: str
     grid_zarr_path: Path  # cached materialised grid.zarr
+    weight: float = 1.0   # per-sample sampling weight (M_I7 per-pop reweighting)
 
 
 # ─── Dataset ─────────────────────────────────────────────────────────────────
@@ -362,16 +369,32 @@ class ObsCenteredDataset(Dataset):
 
         df = pd.read_parquet(pairings_parquet)
         required_cols = {"station_id", "timestamp", "lat", "lon", "elev",
-                         "height_obs", "speed_obs"}
+                         "speed_obs"}
         missing = required_cols - set(df.columns)
         if missing:
             raise ValueError(f"pairings parquet missing columns: {missing}")
+        if "height_obs" not in df.columns:
+            # Backward compat: legacy 10 m parquets → fixed 10 m AGL level.
+            df["height_obs"] = 10.0
+            logger.info("No height_obs column: assuming 10 m for all %d rows",
+                        len(df))
 
         if station_filter is not None:
             keep = set(station_filter)
             df = df[df["station_id"].isin(keep)].reset_index(drop=True)
         df = df.dropna(subset=["speed_obs", "lat", "lon", "height_obs"])
         df = df[df["speed_obs"] > 0.0].reset_index(drop=True)
+
+        # M_I7: drop obs above the top AGL level of the frozen surrogate grid
+        # (e.g. ICOS 120/131/180 m vs agl_0_100_24). Kept in the parquet for a
+        # future v3 deep-crop retrain; unusable by the current k24<=100m head.
+        agl_top = float(self.target_agl_levels[-1])
+        above = df["height_obs"] > agl_top
+        n_above = int(above.sum())
+        if n_above > 0:
+            logger.info("Filtered %d/%d pairings with height_obs > %.0f m "
+                        "(reserved for v3)", n_above, len(df), agl_top)
+            df = df[~above].reset_index(drop=True)
 
         if max_pairings is not None and len(df) > max_pairings:
             df = df.sample(n=max_pairings, random_state=seed).reset_index(drop=True)
@@ -393,8 +416,12 @@ class ObsCenteredDataset(Dataset):
 
     @staticmethod
     def _cache_path(cache_dir: Path, station_id: str, ts_iso: str) -> Path:
+        # Strip the multi-height suffix so all heights of one physical tower
+        # share a single materialised grid.zarr (identical lat/lon → identical
+        # inputs; only k_obs differs). Legacy ids are unaffected (no suffix).
+        base_id = _HEIGHT_SUFFIX_RE.sub("", station_id)
         ts_tag = ts_iso.replace(":", "").replace("-", "")[:13]
-        return cache_dir / f"{station_id}_{ts_tag}" / "grid.zarr"
+        return cache_dir / f"{base_id}_{ts_tag}" / "grid.zarr"
 
     def _materialise_all(
         self,
@@ -445,13 +472,17 @@ class ObsCenteredDataset(Dataset):
                     continue
             elif not cache_path.exists() or overwrite:
                 assert build_one is not None
+                # Per-row ERA5 store override (M_I7 multi-season merged
+                # parquets carry an `era5_store` column); default otherwise.
+                row_store = getattr(row, "era5_store", None)
+                store = Path(str(row_store)) if row_store else era5_store
                 try:
                     build_one(
                         site_id=sid,
                         lat=float(row.lat),
                         lon=float(row.lon),
                         timestamp_iso=ts_iso,
-                        era5_store=era5_store,
+                        era5_store=store,
                         dem=dem,
                         worldcover=worldcover,
                         output=cache_path,
@@ -478,6 +509,7 @@ class ObsCenteredDataset(Dataset):
                     speed_obs=float(row.speed_obs),
                     source=str(getattr(row, "source", "")),
                     grid_zarr_path=cache_path,
+                    weight=float(getattr(row, "sample_weight", 1.0) or 1.0),
                 )
             )
         if require_cached:
@@ -490,6 +522,12 @@ class ObsCenteredDataset(Dataset):
 
     def __len__(self) -> int:
         return len(self.pairings)
+
+    @property
+    def sample_weights(self) -> list[float]:
+        """Per-pairing sampling weights (all 1.0 unless the parquet carries a
+        `sample_weight` column, e.g. the M_I7 merged multi-pop parquet)."""
+        return [p.weight for p in self.pairings]
 
     def __getitem__(self, idx: int):
         p = self.pairings[idx]
@@ -554,15 +592,21 @@ def watertight_station_split(
 
     Returns (train_station_ids, val_station_ids). Excludes any station whose id
     contains a forbidden substring (Perdigão is reserved for M_H'1 IOP test).
+
+    Multi-height ids (`<tower>_hNNN`) are grouped by their physical tower so
+    all heights of one tower land in the SAME split (no height leakage).
     """
     df = pd.read_parquet(pairings_parquet, columns=["station_id"])
     sids = sorted(set(df["station_id"].astype(str)))
     for sub in exclude_substrings:
         sids = [s for s in sids if sub.lower() not in s.lower()]
+    groups: dict[str, list[str]] = {}
+    for s in sids:
+        groups.setdefault(_HEIGHT_SUFFIX_RE.sub("", s), []).append(s)
     rng = np.random.default_rng(seed)
-    sids_arr = np.array(sids)
-    rng.shuffle(sids_arr)
-    n_val = max(1, int(round(len(sids_arr) * val_frac)))
-    val = sids_arr[:n_val].tolist()
-    train = sids_arr[n_val:].tolist()
+    keys = np.array(sorted(groups))
+    rng.shuffle(keys)
+    n_val = max(1, int(round(len(keys) * val_frac)))
+    val = [s for k in keys[:n_val] for s in groups[k]]
+    train = [s for k in keys[n_val:] for s in groups[k]]
     return train, val

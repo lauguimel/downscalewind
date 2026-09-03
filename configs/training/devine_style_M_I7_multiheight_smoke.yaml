@@ -1,0 +1,77 @@
+# SMOKE — M_I7 multi-height fine-tune. Tiny subset (~500 pairings), 2 epochs.
+# Goal: (a) merged parquet + WeightedRandomSampler path runs, (b) calm gate
+# builds AND M_I5 best.pt loads with strict-except-gate init, (c) multiheight
+# pairings materialise (new caches: ICOS jja2020 store + Perdigão iop2017
+# store via season_era5_stores), (d) >100 m rows filtered with logged count,
+# (e) per-sample k_obs indexing at 20-100 m works end to end.
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+pairings_parquet: /home/maitreje/dsw/data/inference/combined_steep_plain_v2.parquet
+base_weight: 1.0
+extra_parquets:
+  - path: /home/maitreje/dsw/data/inference/multiheight_towers_v1.parquet
+    weight: 1.0
+    pop_weights:
+      tower_icos: 4.0
+      perdigao_mast: 1.5
+    season_era5_stores:
+      jja2020: /home/maitreje/dsw/data/raw/era5_hourly_jja2020_eu_wide.zarr
+      iop2017: /home/maitreje/dsw/data/raw/era5_europe_spring2017_v2.zarr
+era5_store: /home/maitreje/dsw/data/raw/era5_europe_hourly_jja2023_med.zarr
+dem: /home/maitreje/dsw/data/raw/srtm_tiles/
+worldcover: /home/maitreje/dsw/data/raw/worldcover_esa/
+
+# ── Frozen surrogate v2 ──────────────────────────────────────────────────────
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v2_vit_base_resid_s4_geo_agl100_k24_surface/best.pt
+surrogate_preset: base
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+target_agl_levels: agl_0_100_24
+n_pressure_levels: 10
+
+# ── Splits (subset: ~500 pairings total) ─────────────────────────────────────
+val_frac: 0.20
+seed: 42
+exclude_substrings: []
+max_stations: 40
+max_train_pairings: 400
+max_val_pairings: 100
+
+# ── ANN architecture (M_I5 encoder arch + calm gate) ─────────────────────────
+topo_dim: 12
+enable_phys_features: true
+hidden_units: [50, 10]
+dropout: 0.25
+use_terrain_encoder: true
+terrain_latent_dim: 48
+terrain_in_channels: 4
+use_calm_gate: true
+gate_v0_init: 2.5
+gate_s_init: 1.0
+
+# ── Fine-tune init ───────────────────────────────────────────────────────────
+init_from: /home/maitreje/dsw/data/models/surrogate_v2_devine_M_I5_encoder/best.pt
+
+# ── Loss (M_I5b REGIME-AWARE — UNCHANGED) ────────────────────────────────────
+loss_mode: regime
+tau_under: 0.6
+tau_over: 0.4
+calm_threshold: 3.0
+calm_width: 1.5
+calm_over_penalty: 2.0
+weight_floor: 1.0
+calm_strat_thr: 3.0
+
+# ── Training ─────────────────────────────────────────────────────────────────
+epochs: 2
+batch_size: 4
+lr: 5.0e-4
+grad_clip_norm: 1.0
+num_workers: 2
+n_prep_workers: 8
+max_era5_delta_h: 3.5
+overwrite_cache: false
+
+# ── I/O ──────────────────────────────────────────────────────────────────────
+output_dir: /home/maitreje/dsw/data/models/surrogate_v2_devine_M_I7_multiheight_smoke
+cache_dir: /scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache
+device: cuda

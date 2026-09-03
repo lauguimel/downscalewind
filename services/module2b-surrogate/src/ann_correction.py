@@ -22,8 +22,17 @@ signal that prevents pathological corrections.
 """
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
+
+# Fallback surface-wind normalisation for the calm gate (matches
+# dataset_v2.DEFAULT_NORM); training passes the resolved norm dict instead.
+_GATE_NORM_DEFAULT = {
+    "u10_offset": 0.0, "u10_scale": 10.0,
+    "v10_offset": 0.0, "v10_scale": 10.0,
+}
 
 
 class ANNCorrection(nn.Module):
@@ -52,6 +61,10 @@ class ANNCorrection(nn.Module):
         use_terrain_encoder: bool = False,
         terrain_latent_dim: int = 48,
         terrain_in_channels: int = 4,
+        use_calm_gate: bool = False,
+        gate_v0_init: float = 2.5,
+        gate_s_init: float = 1.0,
+        gate_norm: dict | None = None,
     ) -> None:
         super().__init__()
         self.era5_dim = era5_dim
@@ -59,6 +72,34 @@ class ANNCorrection(nn.Module):
         self.use_terrain_encoder = use_terrain_encoder
         self.terrain_latent_dim = terrain_latent_dim
         self.terrain_in_channels = terrain_in_channels
+        self.use_calm_gate = use_calm_gate
+
+        if use_calm_gate:
+            # M_I7 calm gate: delta_gated = delta * sigmoid((speed10 - v0) / s)
+            # with speed10 = |(u10, v10)| at the 3x3 centre of the INPUT
+            # era5_flat vector, in physical m/s. Shuts the correction off in
+            # calm regimes (documented calm over-add residual). Parameters are
+            # ONLY created when the flag is on so existing (M_I5) checkpoints
+            # load byte-identically with the flag off.
+            n_p = (era5_dim - 38) // 37
+            if 37 * n_p + 38 != era5_dim:
+                raise ValueError(
+                    f"era5_dim={era5_dim} incompatible with the flat layout "
+                    "(4*9*Np pressure + 4*9 surface + Np + 2)"
+                )
+            # Surface block order: t2m, d2m, u10, v10 (9 floats each, centre=4).
+            surf0 = 4 * 9 * n_p
+            self._u10_center_idx = surf0 + 2 * 9 + 4
+            self._v10_center_idx = surf0 + 3 * 9 + 4
+            gn = {**_GATE_NORM_DEFAULT, **(gate_norm or {})}
+            self._gate_u10_scale = float(gn["u10_scale"])
+            self._gate_u10_offset = float(gn["u10_offset"])
+            self._gate_v10_scale = float(gn["v10_scale"])
+            self._gate_v10_offset = float(gn["v10_offset"])
+            self.gate_v0 = nn.Parameter(torch.tensor(float(gate_v0_init)))
+            # s is kept positive via softplus; store the inverse-softplus init.
+            s_raw = math.log(math.expm1(max(float(gate_s_init), 1e-4)))
+            self.gate_s_raw = nn.Parameter(torch.tensor(s_raw))
 
         in_dim = era5_dim + topo_dim
         if use_terrain_encoder:
@@ -154,7 +195,24 @@ class ANNCorrection(nn.Module):
             parts.append(self.terrain_encoder(terrain))
         x = torch.cat(parts, dim=-1)
         delta = self.mlp(x)
+        if self.use_calm_gate:
+            delta = delta * self._calm_gate(era5_flat).unsqueeze(-1)
         return era5_flat + delta  # residual skip connection
+
+    def _calm_gate(self, era5_flat: torch.Tensor) -> torch.Tensor:
+        """Sigmoid gate in (0, 1) on the ERA5 10 m wind speed at the centre.
+
+        Uses the INPUT (uncorrected) era5_flat vector: denormalises u10/v10 at
+        the 3x3 centre, computes speed10, and returns
+        sigmoid((speed10 - v0) / softplus(s_raw)).
+        """
+        u10 = (era5_flat[:, self._u10_center_idx] * self._gate_u10_scale
+               + self._gate_u10_offset)
+        v10 = (era5_flat[:, self._v10_center_idx] * self._gate_v10_scale
+               + self._gate_v10_offset)
+        speed10 = torch.sqrt(u10 * u10 + v10 * v10 + 1e-8)
+        s = torch.nn.functional.softplus(self.gate_s_raw) + 1e-4
+        return torch.sigmoid((speed10 - self.gate_v0) / s)
 
 
 def devine_speed_loss(

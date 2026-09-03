@@ -26,9 +26,10 @@ import time
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import yaml
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 _SCRIPT = Path(__file__).resolve().parent
 if str(_SCRIPT) not in sys.path:
@@ -171,6 +172,68 @@ def _build_era5_layout(n_pressure: int = 10) -> dict:
     return layout
 
 
+# ─── Multi-parquet merge (M_I7) ──────────────────────────────────────────────
+
+
+def resolve_pairings(cfg: dict, out_dir: Path) -> Path:
+    """Return the pairings parquet path, merging `extra_parquets` if present.
+
+    Config schema:
+        pairings_parquet: <base path>          # weight 1.0, cfg-level era5_store
+        extra_parquets:                        # optional list of entries
+          - path: <parquet>
+            weight: 2.0                        # uniform sample weight (default 1)
+            pop_weights: {tower_icos: 4.0}     # per-`pop`-column override
+            era5_store: <zarr>                 # optional per-entry store
+            season_era5_stores: {jja2020: <zarr>}  # per-`season`-column store
+
+    Per-pop reweighting is implemented downstream via WeightedRandomSampler on
+    a `sample_weight` column (NOT row duplication): fractional weights work,
+    epoch length stays = n_rows, and the materialised grid.zarr cache is not
+    inflated by duplicate pairings.
+    """
+    extras = cfg.get("extra_parquets") or []
+    base = Path(cfg["pairings_parquet"])
+    if not extras:
+        return base
+
+    def _load(path: Path, entry: dict | None) -> pd.DataFrame:
+        df = pd.read_parquet(path)
+        entry = entry or {}
+        w = float(entry.get("weight", 1.0))
+        df["sample_weight"] = w
+        pop_w = entry.get("pop_weights") or {}
+        if pop_w:
+            if "pop" not in df.columns:
+                raise ValueError(f"pop_weights given but no `pop` column in {path}")
+            for pop, pw in pop_w.items():
+                df.loc[df["pop"] == pop, "sample_weight"] = float(pw)
+        store = entry.get("era5_store", cfg.get("era5_store"))
+        df["era5_store"] = str(store) if store else ""
+        season_stores = entry.get("season_era5_stores") or {}
+        if season_stores:
+            if "season" not in df.columns:
+                raise ValueError(
+                    f"season_era5_stores given but no `season` column in {path}")
+            for season, sp in season_stores.items():
+                df.loc[df["season"] == season, "era5_store"] = str(sp)
+        return df
+
+    frames = [_load(base, {"weight": float(cfg.get("base_weight", 1.0))})]
+    for entry in extras:
+        frames.append(_load(Path(entry["path"]), entry))
+    merged = pd.concat(frames, ignore_index=True, sort=False)
+    # Mixed per-source dtypes leave `timestamp` as object after concat, which
+    # pyarrow refuses to serialise — coerce to a single datetime64[ns] column.
+    merged["timestamp"] = pd.to_datetime(merged["timestamp"])
+    out = out_dir / "merged_pairings.parquet"
+    merged.to_parquet(out, index=False)
+    logger.info("Merged %d parquets → %s (%d rows, weights %s)",
+                1 + len(extras), out, len(merged),
+                sorted(merged["sample_weight"].unique().tolist()))
+    return out
+
+
 # ─── Build the surrogate v2 (frozen) ─────────────────────────────────────────
 
 
@@ -297,7 +360,7 @@ def main():
     logger.info("Resolved nz=%d, era5_dim=%d", nz, era5_dim)
 
     # ── Splits ───────────────────────────────────────────────────────────────
-    pairings = Path(cfg["pairings_parquet"])
+    pairings = resolve_pairings(cfg, out_dir)
     train_sids, val_sids = watertight_station_split(
         pairings, val_frac=float(cfg.get("val_frac", 0.2)),
         seed=int(cfg.get("seed", 42)),
@@ -343,8 +406,22 @@ def main():
 
     bs = int(cfg.get("batch_size", 8))
     num_workers = int(cfg.get("num_workers", 2))
+    # Per-pop reweighting (M_I7): draw with replacement following the merged
+    # parquet's sample_weight column; falls back to plain shuffling when all
+    # weights are 1.0 (legacy configs).
+    weights = train_ds.sample_weights
+    use_sampler = any(abs(w - 1.0) > 1e-9 for w in weights)
+    sampler = None
+    if use_sampler:
+        sampler = WeightedRandomSampler(
+            torch.as_tensor(weights, dtype=torch.double),
+            num_samples=len(train_ds), replacement=True,
+        )
+        logger.info("WeightedRandomSampler on: %d samples, weight range %.2f-%.2f",
+                    len(weights), min(weights), max(weights))
     train_loader = DataLoader(
-        train_ds, batch_size=bs, shuffle=True, num_workers=num_workers,
+        train_ds, batch_size=bs, shuffle=sampler is None, sampler=sampler,
+        num_workers=num_workers,
         collate_fn=collate_obs_centered, pin_memory=True,
         persistent_workers=num_workers > 0,
     )
@@ -374,9 +451,31 @@ def main():
         use_terrain_encoder=bool(cfg.get("use_terrain_encoder", False)),
         terrain_latent_dim=int(cfg.get("terrain_latent_dim", 48)),
         terrain_in_channels=int(cfg.get("terrain_in_channels", 4)),
+        use_calm_gate=bool(cfg.get("use_calm_gate", False)),
+        gate_v0_init=float(cfg.get("gate_v0_init", 2.5)),
+        gate_s_init=float(cfg.get("gate_s_init", 1.0)),
+        gate_norm=norm,
     ).to(device)
     n_ann = sum(p.numel() for p in ann.parameters())
     logger.info("ANN params: %d (%.1f k)", n_ann, n_ann / 1e3)
+
+    # ── Optional fine-tune init (M_I7: start from the M_I5 best.pt) ──────────
+    init_from = cfg.get("init_from")
+    if init_from:
+        ck = torch.load(str(init_from), map_location=device, weights_only=False)
+        state = ck["model"] if "model" in ck else ck
+        # strict=False ONLY to tolerate gate params absent from an older
+        # checkpoint; any other mismatch is a hard error.
+        missing, unexpected = ann.load_state_dict(state, strict=False)
+        gate_keys = {"gate_v0", "gate_s_raw"}
+        bad_missing = [k for k in missing if k not in gate_keys]
+        if bad_missing or unexpected:
+            raise RuntimeError(
+                f"init_from={init_from}: incompatible state_dict "
+                f"(missing={bad_missing}, unexpected={list(unexpected)})"
+            )
+        logger.info("Initialised ANN from %s (epoch=%s, gate params kept at "
+                    "init: %s)", init_from, ck.get("epoch", "?"), list(missing))
 
     base_lr = float(cfg.get("lr", 1e-3))
     optimizer = torch.optim.Adam(ann.parameters(), lr=base_lr)
@@ -468,7 +567,7 @@ def main():
         # Val — collect per-sample (obs, corrected pred, raw pred) speeds for
         # wind-stratified diagnostics (the M_I5b key metric is the low-wind bias).
         ann.eval()
-        obs_all, corr_all, raw_all = [], [], []
+        obs_all, corr_all, raw_all, k_all = [], [], [], []
         with torch.no_grad():
             vagg = {"loss": 0.0, "n": 0}
             for batch in val_loader:
@@ -481,9 +580,11 @@ def main():
                 obs_all.append(diag_c["speed_obs_vec"])
                 corr_all.append(diag_c["speed_pred_vec"])
                 raw_all.append(diag_r["speed_pred_vec"])
+                k_all.append(batch[5].detach().cpu().reshape(-1))
         obs = torch.cat(obs_all)
         corr = torch.cat(corr_all)
         raw = torch.cat(raw_all)
+        k_obs_vec = torch.cat(k_all)
         val_loss = vagg["loss"] / max(1, vagg["n"])
         val_mae = float((corr - obs).abs().mean())
         val_bias = float((corr - obs).mean())
@@ -507,6 +608,39 @@ def main():
         high_bias_raw = _m(raw - obs, high)
         high_mae_corr = _m((corr - obs).abs(), high)
         high_mae_raw = _m((raw - obs).abs(), high)
+
+        # ── Per-height metrics + height-balanced selection score (M_I8) ───────
+        # The aggregate val_mae is dominated by the 10 m rows (~96% of the val
+        # set: ISD stations only measure at 10 m), so selecting the best epoch on
+        # it is blind to the multi-height objective — this is what made M_I7a
+        # uninterpretable. `sel_score` instead averages the per-height MAEs so a
+        # height counts the same whatever its row count.
+        #   mode "equal"      : every height weighs 1/H  (best profile)
+        #   mode "protect10m" : 10 m weighs `w10`, the rest share (1 - w10)
+        #                       (guards the fire-weather headline)
+        agl_levels_v = parse_agl_levels(cfg.get("target_agl_levels", "agl_0_100_24"))
+        err_c = (corr - obs).abs()
+        per_height: dict[str, dict[str, float]] = {}
+        for k in sorted(set(int(x) for x in k_obs_vec.tolist())):
+            m = k_obs_vec == k
+            h = float(agl_levels_v[k]) if agl_levels_v is not None and k < len(agl_levels_v) else float(k)
+            per_height[f"{h:.0f}m"] = {
+                "k": k, "n": int(m.sum()),
+                "mae_corr": _m(err_c, m),
+                "mae_raw": _m((raw - obs).abs(), m),
+                "bias_corr": _m(corr - obs, m),
+            }
+        sel_mode = str(cfg.get("height_weight_mode", "protect10m"))
+        w10 = float(cfg.get("height_weight_10m", 0.5))
+        maes = {hh: d["mae_corr"] for hh, d in per_height.items()
+                if not math.isnan(d["mae_corr"])}
+        if not maes:
+            sel_score = val_mae
+        elif sel_mode == "equal" or "10m" not in maes or len(maes) == 1:
+            sel_score = sum(maes.values()) / len(maes)
+        else:
+            others = [v for hh, v in maes.items() if hh != "10m"]
+            sel_score = w10 * maes["10m"] + (1.0 - w10) * (sum(others) / len(others))
 
         wall = time.time() - t0
         lr_end = float(optimizer.param_groups[0]["lr"])
@@ -535,8 +669,20 @@ def main():
             "high_bias_raw": high_bias_raw,
             "high_mae_corr": high_mae_corr,
             "high_mae_raw": high_mae_raw,
+            # height-resolved diagnostics (M_I8)
+            "per_height": per_height,
+            "sel_score": sel_score,
+            "sel_mode": sel_mode,
         }
         history.append(entry)
+        logger.info(
+            "   per-height mae_corr: %s",
+            " ".join(f"{hh}:{d['mae_corr']:.3f}(n={d['n']})"
+                     for hh, d in sorted(per_height.items(),
+                                         key=lambda kv: kv[1]["k"])),
+        )
+        logger.info("   sel_score(%s)=%.4f  (aggregate val_mae=%.4f)",
+                    sel_mode, sel_score, val_mae)
         logger.info(
             "ep=%d wall=%.1fs train_loss=%.4f mae=%.3f | val_loss=%.4f mae=%.3f bias=%+.3f "
             "| RAW mae=%.3f bias=%+.3f | Δmae=%+.3f",
@@ -550,25 +696,37 @@ def main():
             n_high, high_bias_corr, high_bias_raw, high_mae_corr, high_mae_raw,
         )
 
-        # Checkpoint best (by val_mae)
-        if val_mae < best_val_mae:
-            best_val_mae = val_mae
-            torch.save(
-                {"model": ann.state_dict(),
-                 "epoch": epoch,
-                 "val_mae": val_mae,
-                 "val_mae_raw": val_mae_raw,
-                 "cfg": cfg},
-                out_dir / "best.pt",
-            )
+        # Checkpoint. `best.pt` now tracks the height-balanced sel_score, and
+        # every epoch is also kept so a run can be re-diagnosed (or a different
+        # selection rule applied) without retraining — M_I7a could not be.
+        ckpt = {"model": ann.state_dict(),
+                "epoch": epoch,
+                "val_mae": val_mae,
+                "val_mae_raw": val_mae_raw,
+                "sel_score": sel_score,
+                "per_height": per_height,
+                "cfg": cfg}
+        torch.save(ckpt, out_dir / f"epoch_{epoch:03d}.pt")
+        if sel_score < best_val_mae:
+            best_val_mae = sel_score
+            torch.save(ckpt, out_dir / "best.pt")
 
     (out_dir / "history.yaml").write_text(yaml.safe_dump(history))
+    best_entry = min(history, key=lambda e: e.get("sel_score", math.inf)) if history else None
     (out_dir / "summary.json").write_text(json.dumps({
         "n_epochs": n_epochs,
-        "best_val_mae": best_val_mae,
+        # `best_sel_score` is what best.pt was selected on (height-balanced);
+        # `best_val_mae_aggregate` is the plain aggregate at that same epoch,
+        # kept so the number stays comparable with pre-M_I8 runs.
+        "best_sel_score": best_val_mae,
+        "selection_mode": str(cfg.get("height_weight_mode", "protect10m")),
+        "best_epoch": best_entry.get("epoch") if best_entry else None,
+        "best_val_mae_aggregate": best_entry.get("val_mae") if best_entry else None,
+        "best_per_height": best_entry.get("per_height") if best_entry else None,
         "final": history[-1] if history else None,
     }, indent=2))
-    logger.info("Done. best_val_mae=%.4f, output_dir=%s", best_val_mae, out_dir)
+    logger.info("Done. best sel_score=%.4f (epoch=%s), output_dir=%s",
+                best_val_mae, best_entry.get("epoch") if best_entry else "?", out_dir)
 
 
 if __name__ == "__main__":
