@@ -69,8 +69,13 @@ def build_one(
     overwrite: bool = False,
     extra_meta: dict | None = None,
     max_era5_delta_h: float = 3.5,
+    write_coords: bool = True,
 ) -> Path:
-    """Build a single grid.zarr at (lat, lon, ts). Returns the output path."""
+    """Build a single grid.zarr at (lat, lon, ts). Returns the output path.
+
+    `write_coords=False` skips `coords/{x,y,z}` (see write_input_grid_zarr) —
+    used only by the obs-centred training cache, which never reads them.
+    """
     t0 = time.time()
     logger.info("[%s @ %s] lat=%.4f lon=%.4f → %s",
                 site_id, timestamp_iso, lat, lon, output)
@@ -110,6 +115,7 @@ def build_one(
         timestamp_iso=timestamp_iso,
         extra_meta=extra_meta,
         overwrite=overwrite,
+        write_coords=write_coords,
     )
     logger.info("  wrote %s (%.2fs)", out, time.time() - t0)
     return out

@@ -73,6 +73,15 @@ def main() -> None:
     ap.add_argument("--max-era5-delta-h", type=float, default=3.5)
     ap.add_argument("--max-rows", type=int, default=None,
                     help="debug cap on number of rows")
+    ap.add_argument("--no-coords", action="store_true", default=False,
+                    help="skip coords/{x,y,z} in written grid.zarr (~97%% of "
+                         "an entry's bytes, dead weight for the obs-centred "
+                         "training reader). Default keeps current behaviour "
+                         "(coords written). NOTE: the idempotent skip-cached "
+                         "check below only tests path existence, not content "
+                         "— a slim re-materialisation of ALREADY-cached rows "
+                         "needs those entries removed first, this flag alone "
+                         "only affects rows that get (re)built.")
     args = ap.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -119,6 +128,7 @@ def main() -> None:
             workdir=args.cache_dir,
             max_era5_delta_h=args.max_era5_delta_h,
             n_workers=args.n_workers,
+            write_coords=not args.no_coords,
         )
         n_built += len(res)
         n_fail += len(todo) - len(res)

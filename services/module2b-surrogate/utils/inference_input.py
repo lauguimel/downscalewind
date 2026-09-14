@@ -483,8 +483,18 @@ def write_input_grid_zarr(
     timestamp_iso: str,
     extra_meta: dict[str, Any] | None = None,
     overwrite: bool = False,
+    write_coords: bool = True,
 ) -> Path:
-    """Write a grid.zarr with only coords/ + input/ groups (no target/)."""
+    """Write a grid.zarr with only coords/ + input/ groups (no target/).
+
+    `write_coords=False` skips the `coords/{x,y,z}` group entirely. `coords/z`
+    alone is (180,180,40) float32 = ~5.2 MB, ~97% of an entry's on-disk size,
+    and the obs-centred training read path (`_build_features_from_grid_zarr`
+    in dataset_v2_obs_centered.py) recomputes AGL heights from
+    `terrain + agl` and never reads `coords/*` — so it is dead weight there.
+    Every other caller (inference/evaluation on campaign-style grid.zarr)
+    keeps the default `True` and is byte-identical to before.
+    """
     import shutil
     import zarr
 
@@ -501,12 +511,13 @@ def write_input_grid_zarr(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     g = zarr.open_group(str(out_path), mode="w")
 
-    x_1d = (np.arange(NI) + 0.5) * DX - HALF_EXTENT_M
-    y_1d = (np.arange(NJ) + 0.5) * DX - HALF_EXTENT_M
-    coords = g.create_group("coords")
-    _write(coords, "x", x_1d.astype(np.float32))
-    _write(coords, "y", y_1d.astype(np.float32))
-    _write(coords, "z", z_grid.astype(np.float32))
+    if write_coords:
+        x_1d = (np.arange(NI) + 0.5) * DX - HALF_EXTENT_M
+        y_1d = (np.arange(NJ) + 0.5) * DX - HALF_EXTENT_M
+        coords = g.create_group("coords")
+        _write(coords, "x", x_1d.astype(np.float32))
+        _write(coords, "y", y_1d.astype(np.float32))
+        _write(coords, "z", z_grid.astype(np.float32))
 
     inp = g.create_group("input")
     _write(inp, "terrain", terrain.astype(np.float32))

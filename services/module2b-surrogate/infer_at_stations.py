@@ -215,9 +215,14 @@ def _stratify_pairings(df: pd.DataFrame) -> pd.DataFrame:
 def materialise_grid_zarr(
     *, station_id: str, lat: float, lon: float, elev: float,
     timestamp_ns: int, era5_store: Path, dem: Path, worldcover: Path | None,
-    workdir: Path, max_era5_delta_h: float,
+    workdir: Path, max_era5_delta_h: float, write_coords: bool = True,
 ) -> Path:
-    """Wrap M_G6 build_one() with a per-pairing tmp directory."""
+    """Wrap M_G6 build_one() with a per-pairing tmp directory.
+
+    `write_coords=False` skips coords/{x,y,z} (see write_input_grid_zarr) —
+    only safe for caches consumed exclusively via
+    dataset_v2_obs_centered._build_features_from_grid_zarr.
+    """
     ts_iso = str(np.array(int(timestamp_ns)).astype("datetime64[ns]"))
     tag = ts_iso.replace(":", "").replace("-", "")[:13]
     out = workdir / f"{station_id}_{tag}" / "grid.zarr"
@@ -234,6 +239,7 @@ def materialise_grid_zarr(
         overwrite=True,
         extra_meta={"station_elev": float(elev)},
         max_era5_delta_h=max_era5_delta_h,
+        write_coords=write_coords,
     )
 
 
@@ -254,6 +260,9 @@ def _materialise_one_pickleable(args: dict) -> tuple[int, str | None, str | None
             worldcover=Path(args["worldcover"]) if args.get("worldcover") else None,
             workdir=Path(args["workdir"]),
             max_era5_delta_h=args["max_era5_delta_h"],
+            # Plain bool in the pickled dict — not a closure — so it survives
+            # ProcessPoolExecutor's pickle/unpickle round trip intact.
+            write_coords=bool(args.get("write_coords", True)),
         )
         return args["row_idx"], str(gz), None
     except Exception as exc:  # pragma: no cover — exhaustive worker safety
@@ -263,13 +272,16 @@ def _materialise_one_pickleable(args: dict) -> tuple[int, str | None, str | None
 def parallel_materialise(
     df_chunk: pd.DataFrame, *, era5_store: Path, dem: Path,
     worldcover: Path | None, workdir: Path, max_era5_delta_h: float,
-    n_workers: int,
+    n_workers: int, write_coords: bool = True,
 ) -> dict[int, str]:
     """Materialise grid.zarr for every row in `df_chunk` using a process pool.
 
     Returns a dict {row_idx_int: grid_zarr_path_str} for successes only. Errors
     are logged and skipped. Each worker writes to a separate grid.zarr file
     under `workdir/<station_id>_<ts_tag>/grid.zarr` — no shared write target.
+
+    `write_coords=False` (default True) skips coords/{x,y,z} on every row —
+    see write_input_grid_zarr / materialise_grid_zarr.
     """
     payloads: list[dict] = []
     for row_idx, row in df_chunk.iterrows():
@@ -282,6 +294,7 @@ def parallel_materialise(
             "timestamp_ns": int(row["timestamp_ns"]),
             "era5_store": str(era5_store),
             "dem": str(dem),
+            "write_coords": bool(write_coords),
             "worldcover": str(worldcover) if worldcover else None,
             "workdir": str(workdir),
             "max_era5_delta_h": float(max_era5_delta_h),

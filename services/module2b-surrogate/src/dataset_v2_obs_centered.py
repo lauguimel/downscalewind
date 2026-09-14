@@ -490,6 +490,11 @@ class ObsCenteredDataset(Dataset):
                         max_era5_delta_h=max_era5_delta_h,
                         extra_meta={"station_elev": float(row.elev),
                                     "height_obs": float(row.height_obs)},
+                        # coords/{x,y,z} are dead weight here: this training
+                        # cache is only ever read by _build_features_from_grid_zarr,
+                        # which recomputes AGL heights from terrain + agl and
+                        # never touches coords/* (~97% of an entry's bytes).
+                        write_coords=False,
                     )
                 except Exception as exc:
                     n_err += 1
