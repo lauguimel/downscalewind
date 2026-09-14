@@ -1,5 +1,160 @@
 # Boss memory — DownscaleWind orchestrator
 
+> ⚠️ Ce fichier saute de 2026-06-12 à 2026-09-03. Tout le travail juillet-août
+> (benchmark FuXi, M_I7 multi-hauteurs, surrogate v3) est résumé dans
+> `~/.claude/.../memory/MEMORY.md` §"Phase H'/M_I". Ne pas le re-dériver ici.
+
+## M_I8 préparé 2026-09-03 — correction multi-hauteurs sur surrogate v3
+
+Reprise après /clear. Config + PBS écrits localement, **non commités, non soumis**
+(ordonnanceur PBS Aqua DOWN, cf. plus bas).
+
+**Faits établis par lecture de code + mesure (pas inférés)** :
+- **Cache RÉUTILISABLE.** `extract_v2_input_at_coords.build_one` n'utilise jamais
+  `target_agl_levels` : le grid.zarr caché ne contient que les niveaux de pression
+  ERA5 natifs + terrain + surface. La grille verticale AGL est construite à la
+  LECTURE (`dataset_v2_obs_centered.py:278-284`). ⇒ passer de `agl_0_100_24` à
+  `agl_0_200_32` ne force AUCUNE re-matérialisation des 600k+ grilles.
+- **Aucune régénération du parquet multi-hauteurs.** Mesuré sur Aqua :
+  `multiheight_towers_v1.parquet` = 161 959 lignes dont **7 147 à 120/131/180 m**
+  déjà présentes. Le filtre est piloté par le preset
+  (`dataset_v2_obs_centered.py:391-397`) → il s'ouvre seul avec le v3.
+  ⇒ la "décision user en attente (b)" de MEMORY.md est CLOSE, sans action.
+- **`nz` n'est pas une clé de config** : `train_v2_devine_style.py:356` calcule
+  `nz = target_agl_levels.size`. Une seule ligne bascule sur les têtes k32 du v3.
+- **Pondération par hauteur = critère de SÉLECTION uniquement**
+  (`train_v2_devine_style.py:633`, `sel_score`), pas la loss. Avec les checkpoints
+  par epoch, `protect10m` et `equal` se jugent après coup sur UN seul run.
+  ⇒ la "décision user en attente (c)" est CLOSE aussi.
+- **Pas de reprise (resume) dans le trainer** : `init_from` ne restaure que les
+  poids (pas l'optimiseur ni le scheduler), la boucle repart de `range(n_epochs)`
+  (L546) avec un Adam neuf (L482). **Un job tué au mur de temps est perdu.**
+  Chaînage possible seulement via `init_from` = checkpoint d'epoch (poids seuls).
+- **Cache partagé entre hauteurs** : `_cache_path` (`dataset_v2_obs_centered.py:418-424`)
+  retire le suffixe `_hNNN` → toutes les hauteurs d'une tour à un instant partagent
+  UN grid.zarr. Les lignes >100 m n'ajoutent ~aucune matérialisation (+1.1% de lignes).
+
+**Bug trouvé et corrigé (aurait planté au chargement, pas à 35 h)** :
+`train_v2_devine_style.py:469-476` filtrait `missing` avec `gate_keys` mais PAS
+`unexpected`. Avec `use_calm_gate: false` + checkpoint M_I7b (entraîné gate ON),
+`gate_v0`/`gate_s_raw` deviennent `unexpected` → RuntimeError immédiat. Fix = 2 lignes
+symétriques (`bad_unexpected`). Reproduit avant/après + contrôle négatif (une vraie
+clé inconnue plante toujours).
+
+**Décisions user 2026-09-03** :
+- Porte de calme **COUPÉE** (`use_calm_gate: false`). Motif : M_I7b a mesuré qu'elle
+  laisse passer ~44% de la correction à 0.5 m/s → elle ne fait pas son travail ;
+  sans elle le résidu vent faible devient attribuable (réseau vs porte).
+  Reparamétrage (seuil dur au lieu d'appris) = mandat ultérieur, pas M_I8.
+- **Bras capacité EN PARALLÈLE** (hypothèse user "ANN sous-dimensionné").
+  `hidden_units [50,10]→[320,160]`, `terrain_latent_dim 48→128` :
+  **92 576 → 362 056 params (×3.9)**, compté en instanciant ANNCorrection.
+  Ne peut PAS charger M_I7b (size mismatch reproduit) → **from scratch**.
+- `init_from` du run principal = M_I7b (le réseau de correction ne dépend pas de nz).
+
+**Limite assumée** : sans resume, le bras capacité tient 5 epochs dans 48 h
+(~8 h/epoch, prudent d'après les ~35 h/4 epochs de M_I7b). Un réseau ×3.9 entraîné
+de zéro en 5 epochs peut ne pas avoir convergé. Aucun PBS du dépôt n'a jamais demandé
+>48 h. Plan si la val baisse encore à ep5 : resoumettre avec `init_from` = son best.pt.
+
+**Fichiers (non commités)** : `configs/training/devine_style_M_I8_multiheight_v3.yaml`,
+`configs/training/devine_style_M_I8_capacity_v3.yaml`, `configs/hpc/devine_style_M_I8.pbs`,
+`configs/hpc/devine_style_M_I8_capacity.pbs`, + fix dans `train_v2_devine_style.py`.
+
+**SOUMIS 2026-09-04** : jobs **25214651** (principal, 40 h) + **25214652** (capacité, 48 h),
+queue gpu_batch, Q au moment de la soumission (file aqua = 18 200 en attente). Tous les chemins
+des 2 configs vérifiés présents ; cache = **634 205 entrées**.
+Code déployé par scp (⚠️ `~/dsw` sur Aqua **n'est PAS un dépôt git** — sync manuelle obligatoire).
+Seul `train_v2_devine_style.py` était périmé là-bas (version pré-M_I8, sans `sel_score`/per-height) ;
+les 6 autres fichiers source vérifiés **identiques au bit près** (md5). Aucun travail Aqua-only perdu
+(diff = uniquement des ajouts du dépôt).
+
+**Panne PBS 2026-09-03→04** : `pbs_server` down ~20 h (port 15001 refusé DEPUIS le login node,
+alors que 22 et 15007 du même hôte répondaient → daemon mort, ni réseau ni auth ni compte).
+Revenu seul. ⚠️ **Erreur Boss à ne pas refaire** : j'ai conclu "Aqua totalement injoignable,
+la panne s'étend" sur des timeouts SSH qui étaient en réalité **le VPN Cisco côté user**.
+Règle : sur ce projet, un timeout SSH vers aqua = VPN d'abord, panne ensuite.
+
+## ⚠️ CACHE OBS-CENTRÉ = 2.8 To dont 97% MORT (mesuré 2026-09-04)
+
+Mesuré sur un vrai cache du dépôt (`data/inference/stations_perdigao/rne03_20170501T0000/grid.zarr`),
+pas estimé : **47 fichiers, ~4.7 Mo par grid.zarr** → 634k entrées = **~2.8 To et ~28 M fichiers**.
+- `coords/z` (180,180,40 f32) = **5.18 Mo à lui seul = 97%** du volume, **écrit mais JAMAIS relu**
+  par l'entraînement : `_build_features_from_grid_zarr` (dataset_v2_obs_centered.py:251-313) ne lit
+  que `input/terrain`, `input/era5_*` + attrs. Les altitudes sont RECALCULÉES depuis `terrain + agl`.
+  Seul autre lecteur de `coords/z` = `evaluate_v2_physical.py:359`, sur un chemin de repli et sur
+  les grid.zarr de CAMPAGNE, pas ce cache. `coords/x`, `coords/y` idem morts.
+- Sans `coords/*` : **~110 Ko/entrée → ~67 Go** au total (÷40).
+- Compresseur = **zstd niveau 0** (défaut zarr v3 : `write_input_grid_zarr` ne passe aucun
+  compressor), PAS le Blosc/LZ4 réglé dans `shared/data_io.py`. Ratio réel ~0.88 seulement.
+- **HYPOTHÈSE (non mesurée)** : le GPU sous-utilisé observé depuis Phase G viendrait de là —
+  lire 4.7 Mo/échantillon pour en utiliser 110 Ko = 40× d'I/O gaspillée. À tester en profilant.
+- **Chantier séparé, PAS avant M_I8** : le gain ne s'applique qu'aux entrées re-matérialisées.
+  Devient un **prérequis** si on migre vers une machine locale (2.8 To ne rentre nulle part).
+
+### M_I9-CACHE implémenté 2026-09-04 (local uniquement, RIEN déployé sur Aqua)
+- Flag `write_coords` (défaut **True** = comportement inchangé pour tous les appelants existants),
+  activé uniquement sur les 2 chemins qui alimentent le cache d'entraînement :
+  `ObsCenteredDataset._materialise_all` et `materialise_combined_cache.py` (nouveau CLI `--no-coords`)
+  → `parallel_materialise` → `_materialise_one_pickleable` → `build_one` → `write_input_grid_zarr`.
+  Flag passé dans le dict `payload` (pas de closure) pour survivre au pickle du ProcessPoolExecutor.
+- **Mesuré** sur `data/inference/stations_perdigao/rne03_20170501T0000/grid.zarr` :
+  4.666 Mo / 47 fichiers → **0.119 Mo / 25 fichiers (−97.4%)**. 634 205 entrées : **2.96 To → 76 Go**.
+- Test `services/module2b-surrogate/tests/test_write_coords_optout.py` : **5/5**, dont l'assertion
+  clé = features d'entraînement **bit-à-bit identiques** avec et sans `coords`.
+- Fichiers modifiés (non commités) : `utils/inference_input.py`, `extract_v2_input_at_coords.py`,
+  `src/dataset_v2_obs_centered.py`, `infer_at_stations.py`, `materialise_combined_cache.py`.
+
+### ⚠️ CORRECTION : la matérialisation parallèle EXISTE DÉJÀ (je m'étais trompé)
+`infer_at_stations.parallel_materialise` (L263-288) = vrai ProcessPoolExecutor avec `n_workers`,
+1 grid.zarr par ligne, pas de cible partagée. C'est lui qui a construit le cache
+(job 22231418[], 4/4 Exit 0, ~4 h, 605k entrées, cf. boss.md §M_I3). La boucle séquentielle de
+`_materialise_all` n'est que le chemin "à la volée" du loader. ⇒ **"paralléliser = mission séparée"
+était FAUX**. Coût d'une régénération allégée (dérivé de 604 869 entrées / 4 h / 64 cœurs
+= 2363 entrées/cœur-heure) : **≈ 4 h 15 sur 64 cœurs**, ≈ 2 h 50 sur 96.
+- ⚠️ **Le filtre anti-doublon `_cached` (materialise_combined_cache.py ~L97-100) ne teste que
+  l'EXISTENCE du chemin, pas le contenu** → relancer avec `--no-coords` sur le cache actuel ne
+  réduit RIEN. **Protocole obligatoire : construire À CÔTÉ (nouveau cache_dir, 76 Go), valider
+  par un run court, PUIS effacer les 2.9 To.** Jamais effacer-puis-reconstruire.
+- ⚠️ **Piège latent** : `materialise_combined_cache.py:100` nomme `{station_id}_{tag}` SANS
+  `_HEIGHT_SUFFIX_RE.sub`, alors que `_cache_path` (dataset_v2_obs_centered.py:418-424) retire
+  le suffixe `_hNNN`. Compatible aujourd'hui seulement parce que `combined_steep_plain_v2.parquet`
+  n'a pas de suffixe. Pointer ce script sur un parquet multi-hauteurs écrirait au mauvais nom →
+  cache invisible pour l'entraînement. À corriger par précaution (non fait).
+
+### Campagne 9k locale (UGA) : suppression des 164 Go AUTORISÉE, PAS des 32 Go
+Vérifié de première main sur Aqua : `~/dsw/_archive/training_9k` = **9000 dossiers, 164 Go,
+`dataset.csv` identique** (même 1ère ligne `site_00000_case_ts000,...,35800,train`) → même taille
+que la copie UGA ⇒ copie complète, pas tronquée. Plus `~/dsw/_archive/campaign_9k` (OpenFOAM brut)
+et `~/dsw/tars/{training,campaign}_9k_chunk{1..4}.tar` (~258 Go).
+**MAIS `training_9k_full` (32 Go, 1739 entrées) est INTROUVABLE sur Aqua** (`_archive` et
+`/scratch` vérifiés) — contenu différent des 9000 cas, l'argument "l'un couvre l'autre" ne tient
+pas. ⇒ **ne PAS l'effacer**. Effacer les seuls 164 Go fait passer UGA de 242 à ~406 Go libres,
+largement suffisant.
+**FAIT 2026-09-04** : `~/dsw/data/cfd-database/training_9k` supprimé sur UGA après re-vérification
+de la cible (9000 dossiers, 164 Go, même 1ère ligne de dataset.csv). Disque UGA **242 → 404 Go
+libres**. `training_9k_full` (32 Go, 1739 entrées) CONSERVÉ — toujours sans copie connue.
+Récupérable depuis Aqua `~/dsw/_archive/training_9k` si jamais besoin.
+
+## Plan B machine locale UGA (évalué 2026-09-04, pas engagé)
+
+`lrp-m-bj5s604.u-ga.fr` (alias ssh `UGA`, VPN UGA requis) : **RTX A6000 48 Go libre, 96 cœurs,
+125 Go RAM, torch 2.10+cu128 CUDA OK**. Disque = **242 Go libres** seulement.
+- `~/dsw` = 302 Go dont **`data/cfd-database/training_9k` (164 Go) + `training_9k_full` (32 Go)**
+  = campagne v1 PÉRIMÉE (preuve : `n_cells: 35800`/cas vs ~2.16 M en v2 ; dataset.csv du 2026-04-02).
+  Inventaire écrit avant toute suppression : `~/dsw/inventory_training_9k_2026-09-03.txt`.
+  **NE PAS effacer sans avoir vérifié qu'une copie subsiste sur Aqua** (user : "il me semble périmée").
+- Présent : srtm_tiles (8 Go) + srtm_europe.tif. **Absent : ERA5 (data/raw quasi vide, 312 Ko),
+  WorldCover, checkpoints v3.**
+- A6000 ≈ 3× plus lente qu'une H100 en tensor BF16 — **mais sans importance si le goulot est l'I/O**
+  (cf. entrée cache ci-dessus). Test décisif = profiler l'utilisation GPU sur une fraction d'epoch.
+- Avantage réel = pas de file d'attente et **pas de mur de temps** → lève la limite à 5 epochs du
+  bras capacité (le trainer n'a PAS de resume).
+- Transfert : **ne PAS déplacer le cache**, copier les SOURCES et re-matérialiser sur place.
+  Les 2 VPN (QUT/UGA) ne coexistent pas forcément → relais séquentiel via le portable
+  (74 Go libres seulement → par lots). Streamer en **une archive compressée**, jamais fichier
+  par fichier (28 M fichiers = coût métadonnées, pas bande passante).
+
 ## ✅ VERDICT diagnostic terrain-fix 2026-06-12 — bug RÉEL mais IMPACT MARGINAL, chiffres TIENNENT
 
 Job 22309966 exit 0 (walltime 2h41, A100). Fix L83 `abs(floor(lon))` appliqué. Modèle M_I5 régime (best.pt ep2)
