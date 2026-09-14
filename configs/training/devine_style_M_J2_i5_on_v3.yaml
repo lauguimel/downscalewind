@@ -1,0 +1,78 @@
+# DEVINE-style M_J2 — ABLATION ONLY, no training. Evaluation config that pairs
+# the FROZEN M_I5 correction network (calibrated at 10 m only, no calm gate)
+# with the v3 deep-crop frozen surrogate (32 levels, 0-200 m AGL), to isolate
+# the surrogate's own contribution from the M_I8 multi-height calibration on
+# the FuXi EU-towers benchmark.
+#
+# Provenance: architecture keys below are copied VERBATIM from
+# configs/training/devine_style_M_I5_encoder.yaml (the file whose checkpoint
+# — data/models/surrogate_v2_devine_M_I5_encoder/best.pt — this run loads).
+# ONLY surrogate_checkpoint and target_agl_levels are overridden to the v3
+# values (from devine_style_M_I8_multiheight_v3.yaml). Nothing else changes.
+#
+# Why this is legitimate (verified by reading the code, not inferred):
+#   - ANNCorrection (src/ann_correction.py) takes era5_flat with
+#     era5_dim = 4*9*n_pressure_levels + 4*9 + n_pressure_levels + 2 = 408
+#     for n_pressure_levels=10 — a function of n_pressure_levels ONLY, never
+#     of nz (the AGL level count of the frozen surrogate). So the M_I5
+#     checkpoint's shapes do not depend on which surrogate (v2/24 or v3/32)
+#     sits behind it.
+#   - score_fuxi_vs_ours.score_ours() builds the frozen surrogate and the
+#     ANNCorrection as two INDEPENDENT modules: build_frozen_surrogate(...,
+#     nz=target_agl.size, ...) for the surrogate, and a separate
+#     ANNCorrection(era5_dim=..., topo_dim=..., ...) for the correction net.
+#     It never passes use_calm_gate (defaults False in ANNCorrection.__init__),
+#     so M_I5's gate-free checkpoint loads with ann.load_state_dict(strict=True)
+#     — no missing/unexpected keys expected at all (unlike the M_I8 gate-on/
+#     gate-off case documented in devine_style_M_I8_multiheight_v3.yaml).
+#
+# This file is NEVER passed to train_v2_devine_style.py — evaluation only,
+# via score_fuxi_eu_towers.py --config this_file --ann-checkpoint
+# data/models/surrogate_v2_devine_M_I5_encoder/best.pt.
+
+# ── Data (unused by scoring except dem/worldcover/cache_dir/era5_store, all
+#    overridden on the CLI by the PBS script below except dem/worldcover) ────
+pairings_parquet: /home/maitreje/dsw/data/inference/combined_steep_plain_v2.parquet
+era5_store: /home/maitreje/dsw/data/raw/era5_europe_hourly_jja2023_med.zarr
+dem: /home/maitreje/dsw/data/raw/srtm_tiles/
+worldcover: /home/maitreje/dsw/data/raw/worldcover_esa/
+
+# ── Frozen surrogate v3 (32 levels, 0-200 m AGL) — THE ONLY SUBSTANTIVE
+#    OVERRIDE vs devine_style_M_I5_encoder.yaml ──────────────────────────────
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v3_vit_base_agl200_k32/best.pt
+surrogate_preset: base
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+target_agl_levels: agl_0_200_32
+n_pressure_levels: 10
+
+# ── Splits (copied from M_I5 — irrelevant to scoring, kept for provenance) ──
+val_frac: 0.20
+seed: 42
+exclude_substrings: ["perdigao"]
+
+# ── ANN architecture — VERBATIM from devine_style_M_I5_encoder.yaml. This is
+#    the exact shape the M_I5 checkpoint's state_dict was trained with. ─────
+topo_dim: 12
+enable_phys_features: true
+hidden_units: [50, 10]
+dropout: 0.25
+use_terrain_encoder: true
+terrain_latent_dim: 48
+terrain_in_channels: 4
+
+# ── Loss / training keys copied for provenance only — NOT used by
+#    score_fuxi_eu_towers.py (no training happens in this run). ─────────────
+loss_mode: regime
+tau_under: 0.6
+tau_over: 0.4
+calm_threshold: 3.0
+calm_width: 1.5
+calm_over_penalty: 2.0
+weight_floor: 1.0
+calm_strat_thr: 3.0
+max_era5_delta_h: 3.5
+
+# ── I/O ──────────────────────────────────────────────────────────────────────
+output_dir: /home/maitreje/dsw/data/models/surrogate_v2_devine_M_I5_encoder
+cache_dir: /scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache
+device: cuda

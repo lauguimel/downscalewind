@@ -1,0 +1,30 @@
+# M_K2 — Perdigao crest/valley contrast: config for run_masts_M_K2.py.
+# Frozen v3 surrogate (32 levels, 0-200 m AGL) + M_I8 multi-height ANN.
+# READ-ONLY: require_cached=True in the driver, nothing is materialised.
+
+era5_store: /home/maitreje/dsw/data/raw/era5_europe_spring2017_v2.zarr   # IOP 2017, dt=6h
+dem: /home/maitreje/dsw/data/raw/srtm_tiles/
+worldcover: /home/maitreje/dsw/data/raw/worldcover_esa/
+
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v3_vit_base_agl200_k32/best.pt
+surrogate_preset: base
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+target_agl_levels: agl_0_200_32
+n_pressure_levels: 10
+
+# ANN architecture — MUST match devine_style_M_I8_multiheight_v3.yaml
+topo_dim: 12
+enable_phys_features: true
+hidden_units: [50, 10]
+dropout: 0.25
+use_terrain_encoder: true
+terrain_latent_dim: 48
+terrain_in_channels: 4
+use_calm_gate: false
+
+seed: 42
+max_era5_delta_h: 3.5
+# Shared production cache: Perdigao mast x exact-hour grid.zarrs already exist
+# (47810 entries), so the run never writes to it.
+cache_dir: /scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache
+device: cuda

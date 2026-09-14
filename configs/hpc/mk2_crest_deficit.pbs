@@ -1,0 +1,53 @@
+#!/bin/bash -l
+#PBS -N mk2_crest_deficit
+#PBS -l select=1:ncpus=8:mem=32GB:ngpus=1
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -m n
+
+# M_K2 — per-mast Perdigao inference (RAW v3 vs M_I8-calibrated) on a FIXED
+# set of hours shared by all 47 masts. Forward passes only: the driver runs
+# ObsCenteredDataset with require_cached=True, so no grid.zarr is written.
+# ~47 masts x 184 ERA5 slots = ~8.6k pairings x 2 surrogate forwards.
+
+cd "$PBS_O_WORKDIR"
+BASE="$HOME/dsw"
+CFG="$BASE/configs/training/eval_perdigao_M_K2.yaml"
+ANN="$BASE/data/models/surrogate_v3_devine_M_I8_multiheight/best.pt"
+PARQ="$BASE/data/inference/multiheight_towers_v1.parquet"
+OUT="$BASE/data/validation/crest_deficit"
+mkdir -p "$OUT"
+
+[ -f "$CFG" ] || { echo "MISSING CFG:$CFG"; exit 1; }
+[ -f "$ANN" ] || { echo "MISSING ANN:$ANN"; exit 1; }
+[ -f "$PARQ" ] || { echo "MISSING PARQUET:$PARQ"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
+
+nvidia-smi -L
+cd "$BASE"
+
+echo "=== M_K2 SMOKE (4 hours) ==="
+python -u data/validation/crest_deficit/run_masts_M_K2.py \
+  --config "$CFG" --ann-checkpoint "$ANN" --multiheight-parquet "$PARQ" \
+  --out-dir "$OUT/_smoke" --device cuda --batch-size 8 --num-workers 2 \
+  --max-hours 4 2>&1 | tee "$OUT/mk2_smoke.log"
+RC=${PIPESTATUS[0]}
+echo "RC_SMOKE=$RC"
+[ "$RC" -eq 0 ] || exit "$RC"
+
+echo "=== M_K2 FULL ==="
+python -u data/validation/crest_deficit/run_masts_M_K2.py \
+  --config "$CFG" --ann-checkpoint "$ANN" --multiheight-parquet "$PARQ" \
+  --out-dir "$OUT" --device cuda --batch-size 16 --num-workers 6 \
+  2>&1 | tee "$OUT/mk2_full.log"
+RC=${PIPESTATUS[0]}
+echo "RC_FULL=$RC"
+cat "$OUT/mk2_run_summary.json" 2>/dev/null
+exit "$RC"

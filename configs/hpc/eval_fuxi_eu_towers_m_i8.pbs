@@ -1,0 +1,69 @@
+#!/bin/bash -l
+#PBS -N fuxi_eu_towers_mi8
+#PBS -l select=1:ncpus=8:mem=48GB:ngpus=1:gpu_id=A100
+#PBS -l walltime=02:00:00
+#PBS -j oe
+#PBS -m n
+
+# FuXi-CFD EU-towers benchmark (OPE + IPR, JJA 2020) — M_I8 RE-RUN (mission
+# M_I8-EVAL): same script/sample/FuXi model as configs/hpc/eval_fuxi_eu_towers.pbs
+# (2026-07-30 baseline), swapping ONLY our ANN+surrogate for the new
+# multi-height M_I8 model (v3 surrogate, 32 levels 0-200 m AGL).
+#
+# FuXi predictions are deterministic given the sample (seed=42, same pairings
+# parquet) and do not depend on our model at all, so this run seeds the resume
+# cache with the 2026-07-30 FuXi outputs (fuxi_partial.parquet, pre-copied into
+# OUT below) to skip ~60 min of redundant CPU ONNX inference — see mission
+# report. grid.zarr cache dir is also shared with the 2026-07-30 run (obs-
+# centred cache is agl-grid-independent, see devine_style_M_I8_multiheight_v3.yaml
+# note 3): no re-materialisation needed for these towers (max height 100 m).
+
+cd "$PBS_O_WORKDIR"
+BASE="$HOME/dsw"
+
+CFG="$BASE/configs/training/devine_style_M_I8_multiheight_v3.yaml"
+ANN="$BASE/data/models/surrogate_v3_devine_M_I8_multiheight/best.pt"
+PAIRINGS="$BASE/data/inference/icos_eu_towers.parquet"
+ERA5="$BASE/data/raw/era5_hourly_jja2020_eu.zarr"
+STORE100="$BASE/data/raw/era5_100m_jja2020eu.zarr"
+ONNX="$BASE/data/models/fuxicfd_official/fuxicfd-model/model/fuxicfd_model.onnx"
+SCALER="$BASE/data/models/fuxicfd_official/fuxicfd-model/inference_example/normalization"
+CACHE="/scratch/maitreje/dsw/fuxi_eu_towers_cache"
+OUT="$BASE/data/validation/fuxi_eu_towers_m_i8"
+
+NPS="${NPS:-250}"
+
+mkdir -p "$OUT" "$CACHE"
+for f in "$CFG" "$ANN" "$PAIRINGS" "$ONNX"; do
+  [ -e "$f" ] || { echo "MISSING:$f"; exit 1; }
+done
+for d in "$ERA5" "$STORE100"; do
+  [ -d "$d" ] || { echo "MISSING store:$d"; exit 1; }
+done
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+  [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+
+cd "$BASE"
+nvidia-smi -L
+
+echo "=== FuXi-CFD EU towers (OPE/IPR, JJA 2020) — M_I8 multiheight — NPS=$NPS ==="
+python -u services/module2b-surrogate/score_fuxi_eu_towers.py \
+  --config "$CFG" --ann-checkpoint "$ANN" \
+  --pairings "$PAIRINGS" \
+  --era5-store "$ERA5" --store-100m "$STORE100" \
+  --onnx "$ONNX" --scaler-dir "$SCALER" \
+  --cache-dir "$CACHE" --out-dir "$OUT" \
+  --n-per-station "$NPS" \
+  --device cuda --fuxi-device cpu \
+  --batch-size 16 --fuxi-batch-size 16 \
+  --max-delta-h 1.5 --n-prep-workers 8 --seed 42 \
+  2>&1 | tee "$OUT/score.log"
+RC=${PIPESTATUS[0]}
+echo "RC_SCORE=$RC"
+exit "$RC"
