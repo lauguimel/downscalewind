@@ -1,0 +1,11 @@
+# Aqua paths for run_hub_height_inference.py — Penmanshiel 2018 (see local twin for semantics).
+pairings_parquet: /home/maitreje/dsw/data/inference/penmanshiel_turbines_v1.parquet
+era5_store: /home/maitreje/dsw/data/raw/era5_penmanshiel_2018.zarr
+dem: /home/maitreje/dsw/data/raw/srtm_tiles            # dir holds Copernicus DSM tiles despite its name
+worldcover: /home/maitreje/dsw/data/raw/worldcover_per_site/penmanshiel.tif
+cache_dir: /scratch/maitreje/dsw/hub_height/cache_penmanshiel
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v3_vit_base_agl200_k32/best.pt
+ann_checkpoint: /home/maitreje/dsw/data/models/surrogate_v3_devine_M_I8_multiheight/best.pt
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+out_dir: /home/maitreje/dsw/data/validation/hub_height_benchmark/penmanshiel_2018
+max_era5_delta_h: 0.6

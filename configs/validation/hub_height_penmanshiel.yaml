@@ -1,0 +1,12 @@
+# Local paths for run_hub_height_inference.py — Penmanshiel (Scottish Borders), 2018.
+# Checkpoints must be copied from Aqua first (see data/validation/hub_height_benchmark/README.md).
+pairings_parquet: data/inference/penmanshiel_turbines_v1.parquet
+era5_store: data/raw/era5_penmanshiel_2018.zarr
+dem: data/raw/copdem_tiles            # Copernicus DSM tiles (training used SRTM; see README caveat)
+worldcover: data/raw/worldcover_per_site/penmanshiel.tif
+cache_dir: data/inference/cache_hub_penmanshiel
+surrogate_checkpoint: data/models/surrogate_v3_vit_base_agl200_k32/best.pt
+ann_checkpoint: data/models/surrogate_v3_devine_M_I8_multiheight/best.pt
+norm_yaml: data/campaign/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+out_dir: data/validation/hub_height_benchmark/penmanshiel_2018
+max_era5_delta_h: 0.6

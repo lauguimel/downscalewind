@@ -1,0 +1,11 @@
+# Aqua paths — Alaiz MP5 mast 2017-07 → 2019-07. Pairings parquet pending NEWA SFTP credentials.
+pairings_parquet: /home/maitreje/dsw/data/inference/alaiz_mp5_mast_v1.parquet
+era5_store: /home/maitreje/dsw/data/raw/era5_alaiz_2017_2019.zarr
+dem: /home/maitreje/dsw/data/raw/srtm_tiles
+worldcover: /home/maitreje/dsw/data/raw/worldcover_esa
+cache_dir: /scratch/maitreje/dsw/hub_height/cache_alaiz
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v3_vit_base_agl200_k32/best.pt
+ann_checkpoint: /home/maitreje/dsw/data/models/surrogate_v3_devine_M_I8_multiheight/best.pt
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+out_dir: /home/maitreje/dsw/data/validation/hub_height_benchmark/alaiz_2017_2019
+max_era5_delta_h: 0.6

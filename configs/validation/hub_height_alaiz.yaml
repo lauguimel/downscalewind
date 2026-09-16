@@ -1,0 +1,12 @@
+# Local paths for run_hub_height_inference.py — Alaiz MP5 mast (Navarre), 2017-07 → 2019-07.
+# Pairings parquet to be built once the NEWA SFTP credentials arrive (jmsq@dtu.dk).
+pairings_parquet: data/inference/alaiz_mp5_mast_v1.parquet
+era5_store: data/raw/era5_alaiz_2017_2019.zarr
+dem: data/raw/copdem_tiles
+worldcover: data/raw/worldcover_per_site/alaiz_mp5.tif
+cache_dir: data/inference/cache_hub_alaiz
+surrogate_checkpoint: data/models/surrogate_v3_vit_base_agl200_k32/best.pt
+ann_checkpoint: data/models/surrogate_v3_devine_M_I8_multiheight/best.pt
+norm_yaml: data/campaign/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+out_dir: data/validation/hub_height_benchmark/alaiz_2017_2019
+max_era5_delta_h: 0.6
