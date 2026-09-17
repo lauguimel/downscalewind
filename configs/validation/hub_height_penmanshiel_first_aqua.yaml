@@ -1,0 +1,11 @@
+# Aqua paths — FIRST RESULTS run: 3 turbines, every 3rd hour, Jan-Sep 2018 (partial ERA5 store).
+pairings_parquet: /home/maitreje/dsw/data/inference/penmanshiel_turbines_first.parquet
+era5_store: /home/maitreje/dsw/data/raw/era5_penmanshiel_2018_jan_sep.zarr
+dem: /home/maitreje/dsw/data/raw/srtm_tiles            # dir holds Copernicus DSM tiles despite its name
+worldcover: /home/maitreje/dsw/data/raw/worldcover_per_site/penmanshiel.tif
+cache_dir: /scratch/maitreje/dsw/hub_height/cache_penmanshiel
+surrogate_checkpoint: /home/maitreje/dsw/data/models/surrogate_v3_vit_base_agl200_k32/best.pt
+ann_checkpoint: /home/maitreje/dsw/data/models/surrogate_v3_devine_M_I8_multiheight/best.pt
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+out_dir: /home/maitreje/dsw/data/validation/hub_height_benchmark/penmanshiel_2018_first
+max_era5_delta_h: 0.6

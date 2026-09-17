@@ -89,6 +89,9 @@ def main() -> None:
     ap.add_argument("--station-filter", default=None, help="comma-separated station_ids")
     ap.add_argument("--hour-stride", type=int, default=1)
     ap.add_argument("--max-rows", type=int, default=None, help="debug: cap pairings")
+    ap.add_argument("--profile-heights", default=None,
+                    help="comma-separated AGL heights (m): also write speed_raw_h<H>/speed_corr_h<H> "
+                         "at the nearest model level, to inspect the predicted vertical profile")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 
@@ -103,6 +106,11 @@ def main() -> None:
     era5_layout = _build_era5_layout(n_pressure=int(cfg.get("n_pressure_levels", 10)))
     era5_dim = era5_layout["total_dim"]
 
+    levels = parse_agl_levels(agl_name)
+    prof = [float(h) for h in args.profile_heights.split(",")] if args.profile_heights else []
+    prof_k = {h: int(abs(levels - h).argmin()) for h in prof}
+    if prof:
+        logger.info("profile levels: %s", {h: float(levels[k]) for h, k in prof_k.items()})
     stations = args.station_filter.split(",") if args.station_filter else None
     pair_path = build_pairings(Path(site["pairings_parquet"]), out_dir / "pairings.parquet",
                                stations, args.hour_stride, args.max_rows)
@@ -163,6 +171,13 @@ def main() -> None:
             sp_raw = torch.sqrt((ur + u0r) ** 2 + (vr + v0r) ** 2 + 1e-8)
             sp_corr = torch.sqrt((uc + u0c) ** 2 + (vc + v0c) ** 2 + 1e-8)
             sp_base = torch.sqrt(u0r ** 2 + v0r ** 2 + 1e-8)
+            prof_out: dict[str, torch.Tensor] = {}
+            for h, k in prof_k.items():
+                kk = torch.full_like(k_obs, k)
+                a, b = _denorm_uv_at_center(pred_raw, norm, kk)
+                c, d = _denorm_uv_at_center(pred_corr, norm, kk)
+                prof_out[f"speed_raw_h{int(h)}"] = torch.sqrt((a + u0r) ** 2 + (b + v0r) ** 2 + 1e-8)
+                prof_out[f"speed_corr_h{int(h)}"] = torch.sqrt((c + u0c) ** 2 + (d + v0c) ** 2 + 1e-8)
             for i, m in enumerate(meta):
                 rows.append({
                     "station_id": str(m["station_id"]),
@@ -174,6 +189,7 @@ def main() -> None:
                     "speed_era5_baseline_patch": float(sp_base[i]),
                     "u10_era5_baseline_patch": float(u0r[i]),
                     "v10_era5_baseline_patch": float(v0r[i]),
+                    **{name: float(t[i]) for name, t in prof_out.items()},
                 })
             if bi % 50 == 0:
                 logger.info("batch %d | rows=%d | %.1fs", bi, len(rows), time.time() - t0)

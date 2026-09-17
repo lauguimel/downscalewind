@@ -1,0 +1,57 @@
+#!/bin/bash -l
+#PBS -N hub_icos_tower
+#PBS -l select=1:ncpus=16:mem=64GB:ngpus=1
+#PBS -l walltime=03:00:00
+#PBS -j oe
+#PBS -m n
+
+# Out-of-sample ICOS tall tower, JJA 2020, all wind heights <= 200 m, hourly.
+# Usage: qsub -v TOWER=kit,ERA5=/home/maitreje/dsw/data/raw/era5_hourly_jja2020_eu_wide.zarr configs/hpc/hub_height_icos_tower.pbs
+cd "$PBS_O_WORKDIR"
+BASE="$HOME/dsw"
+: "${TOWER:?set TOWER (kit|oxk|toh|kre)}"; : "${ERA5:?set ERA5 store path}"
+UP=$(echo "$TOWER" | tr a-z A-Z)
+TRAIN_CFG="$BASE/configs/training/devine_style_M_I8_multiheight_v3.yaml"
+OUT="$BASE/data/validation/hub_height_benchmark/icos_${TOWER}_jja2020"
+SITE_CFG="$OUT/site_config.yaml"
+mkdir -p "$OUT"
+[ -d "$ERA5/coords" ] || { echo "MISSING ERA5:$ERA5"; exit 1; }
+cat > "$SITE_CFG" <<YAML
+pairings_parquet: $BASE/data/inference/icos_oos_towers_v1.parquet
+era5_store: $ERA5
+dem: $BASE/data/raw/srtm_tiles
+worldcover: $BASE/data/raw/worldcover_per_site/icos_${TOWER}.tif
+cache_dir: /scratch/maitreje/dsw/hub_height/cache_icos_${TOWER}
+surrogate_checkpoint: $BASE/data/models/surrogate_v3_vit_base_agl200_k32/best.pt
+ann_checkpoint: $BASE/data/models/surrogate_v3_devine_M_I8_multiheight/best.pt
+norm_yaml: /scratch/maitreje/dsw/complex_terrain_v1/manifests/dataset_v2_norm.yaml
+out_dir: $OUT
+max_era5_delta_h: 0.6
+YAML
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
+nvidia-smi -L
+cd "$BASE"
+STATIONS=$(python - <<PY
+import pandas as pd
+d = pd.read_parquet("data/inference/icos_oos_towers_v1.parquet")
+print(",".join(sorted(s for s in d.station_id.unique() if s.startswith("icos_${UP}_"))))
+PY
+)
+echo "stations: $STATIONS"
+python -u services/validation/run_hub_height_inference.py \
+  --train-config "$TRAIN_CFG" --site-config "$SITE_CFG" --device cuda \
+  --batch-size 8 --num-workers 4 --n-prep-workers 14 --station-filter "$STATIONS" \
+  --profile-heights 10,30,60,100,150,200 2>&1 | tee "$OUT/run.log"
+RC=${PIPESTATUS[0]}; echo "RC_RUN=$RC"; [ "$RC" -eq 0 ] || exit "$RC"
+python -u services/validation/score_towers_hub_height.py \
+  --predictions "$OUT/predictions.parquet" \
+  --newa "data/raw/newa_ts/newa_${TOWER}_jja2020.parquet" \
+  --gwa-json data/raw/gwa_points_hub_sites.json --gwa-site "$TOWER" --out-dir "$OUT" 2>&1 | tee "$OUT/score.log"

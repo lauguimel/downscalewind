@@ -47,7 +47,54 @@ Pairings: `data/inference/penmanshiel_turbines_v1.parquet` (builder
   capacity factor via the empirical site power curve. Run now with NEWA + GWA only; add `--predictions`
   once the model has run and `--era5-u100` once the 100 m store is downloaded.
 
-## Model side (blocked until VPN)
+## First model results (2026-09-17, Aqua jobs 25413254 + 25413485)
+
+Penmanshiel, 3 turbines (T01/T08/T15), every 3rd hour, Jan-Sep 2018 (partial ERA5 store), 2 178 site-mean hours, hub 59 m.
+
+| product | bias | MAE | corr | capacity factor |
+|---|---|---|---|---|
+| observed | | | | 0.289 |
+| ours raw (v3) | -0.41 | 1.64 | 0.833 | 0.290 |
+| ours calibrated (M_I8) | +1.08 | 1.92 | 0.820 | 0.393 |
+| ERA5 10 m (driver) | -0.44 | 1.52 | 0.839 | 0.275 |
+| NEWA 3 km | +1.02 | 2.03 | 0.795 | 0.407 |
+| GWA climatology | +2.27 | | | |
+
+Predicted mean profile (raw): 10 m 4.69 / 30 m 5.55 / 60 m 6.37 / 100 m 7.06 / 150 m 7.61 m/s → shear exponent
+10-100 m = **0.175** (physically sound). ERA5 10 m = 6.34 m/s: the coastal cell is partly marine, so the surrogate
+SLOWS the 10 m wind by 26 % and rebuilds the profile; "raw 59 m ≈ ERA5 10 m" is a coincidence of this site, not a flat profile.
+Calibrated profile: 6.27 / 7.15 / 7.85 / 9.16 / 9.75 → M_I8 adds ≈ +1.5 m/s at every height (learned on stations where the
+raw surrogate under-predicts). Here it over-corrects below 12 m/s (bias +1.2) and helps only above 12 m/s
+(bias -2.73 → -0.13; obs>8 m/s: obs 11.32, raw 9.99, calibrated 11.92). Same signature as the Perdigão calm-regime over-correction.
+Nacelle anemometer check: the empirical site power curve matches the MM92 manufacturer curve scaled by rotor area
+(82/92.5)^2 within a few % at 6, 8 and 10 m/s → nacelle wind is reliable.
+GPU note: batch 32 OOMs on a 40 GB A100 (two 180x180x32 forwards) → batch 8 + expandable_segments.
+
+## ICOS out-of-sample towers (2026-09-17) — Karlsruhe KIT, JJA 2020, job 25413849
+
+Towers never used in training, ICOS ATC meteo (CC BY 4.0), ingested with the renewed token: KIT (30/60/100/200 m),
+KRE (10/50/125 m), TOH (10/76/110/147 m; 76 m reads higher than 110/147 m → exposure issue, score per height only),
+OXK (wind at 163 m only). Pairings `data/inference/icos_oos_towers_v1.parquet` (29 056 rows), builder
+`services/validation/build_icos_oos_pairings.py`, per-height scorer `services/validation/score_towers_hub_height.py`,
+PBS `configs/hpc/hub_height_icos_tower.pbs` (qsub -v TOWER=…,ERA5=…).
+
+KIT MAE (m/s), n=2424 h per height:
+
+| height | obs mean | ours raw | ours calibrated | NEWA 3 km | ERA5 10 m |
+|---|---|---|---|---|---|
+| 30 m | 1.90 | 0.99 | 1.41 | n/a | 0.78 |
+| 60 m | 3.25 | 1.20 | **0.97** | 1.46 | 0.99 |
+| 100 m | 4.01 | 1.52 | **1.29** | 1.55 | 1.63 |
+| 200 m | 5.17 | 2.03 | **1.50** | 1.68 | 2.73 |
+
+Raw predicted profile 10→200 m: 1.86 / 2.20 / 2.48 / 2.78 / 3.07 / 3.34 (shear exponent 30-200 m ≈ 0.22) vs observed
+1.90 → 5.17 (≈ 0.53, summer nocturnal stable shear over forest/valley): neutral RANS cannot produce that shear, so the raw
+surrogate under-predicts aloft (bias −1.2 at 100 m, −1.8 at 200 m). M_I8 restores most of it (4.51 at 100 m) and beats NEWA
+at 60/100/200 m. Opposite verdict to Penmanshiel (windy coastal hills, calibration over-corrects): the calibration carries
+the regime of its training towers (inland, summer). GWA is an ANNUAL climatology scored against SUMMER obs here
+(+1.5 to +2.1 m/s): not a fair comparison, report only with matching periods.
+
+## Model side
 
 Checkpoints live on Aqua only: `~/dsw/data/models/surrogate_v3_vit_base_agl200_k32/best.pt`,
 `~/dsw/data/models/surrogate_v3_devine_M_I8_multiheight/best.pt`. Plan: scp both locally

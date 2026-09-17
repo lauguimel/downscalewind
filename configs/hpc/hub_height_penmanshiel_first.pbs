@@ -1,0 +1,53 @@
+#!/bin/bash -l
+#PBS -N hub_penm_first
+#PBS -l select=1:ncpus=16:mem=64GB:ngpus=1
+#PBS -l walltime=01:00:00
+#PBS -j oe
+#PBS -m n
+
+# First-results run of the hub-height benchmark: 3 turbines (T01, T08, T15), every 3rd hour,
+# Jan-Sep 2018, on the partial ERA5 store built from the CDS chunks already downloaded.
+# Cache entries are shared with the full run (same cache_dir), so nothing is wasted.
+
+cd "$PBS_O_WORKDIR"
+BASE="$HOME/dsw"
+TRAIN_CFG="$BASE/configs/training/devine_style_M_I8_multiheight_v3.yaml"
+SITE_CFG="$BASE/configs/validation/hub_height_penmanshiel_first_aqua.yaml"
+OUT="$BASE/data/validation/hub_height_benchmark/penmanshiel_2018_first"
+mkdir -p "$OUT"
+[ -d "$BASE/data/raw/era5_penmanshiel_2018_jan_sep.zarr/coords" ] || { echo "MISSING partial ERA5 store"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
+nvidia-smi -L
+cd "$BASE"
+
+python - <<'PY'
+import pandas as pd
+df = pd.read_parquet("data/inference/penmanshiel_turbines_v1.parquet")
+df["timestamp"] = pd.to_datetime(df["timestamp"])
+keep = df[(df.timestamp < "2018-10-01") & (df.timestamp.dt.hour % 3 == 0)
+          & df.station_id.isin(["penmanshiel_T01", "penmanshiel_T08", "penmanshiel_T15"])]
+keep.to_parquet("data/inference/penmanshiel_turbines_first.parquet", index=False)
+print("first-run pairings:", len(keep), keep.station_id.nunique(), keep.timestamp.min(), keep.timestamp.max())
+PY
+
+python -u services/validation/run_hub_height_inference.py \
+  --train-config "$TRAIN_CFG" --site-config "$SITE_CFG" --device cuda \
+  --batch-size 8 --num-workers 4 --n-prep-workers 14 \
+  --profile-heights 10,30,59,100,150 2>&1 | tee "$OUT/run.log"
+RC=${PIPESTATUS[0]}; echo "RC_RUN=$RC"; [ "$RC" -eq 0 ] || exit "$RC"
+
+python -u services/validation/score_hub_height.py \
+  --pairings data/inference/penmanshiel_turbines_first.parquet \
+  --predictions "$OUT/predictions.parquet" \
+  --newa data/raw/newa_ts/newa_penmanshiel_2018.parquet \
+  --gwa-json data/raw/gwa_points_hub_sites.json --gwa-site penmanshiel \
+  --hub-height 59 --rated-kw 2050 --out-dir "$OUT" 2>&1 | tee "$OUT/score.log"
+cat "$OUT/summary.json"

@@ -29,6 +29,7 @@ conda activate fuxicfd
 for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
     [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
 done
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 OPENBLAS_NUM_THREADS=2
 nvidia-smi -L
 cd "$BASE"
@@ -44,7 +45,7 @@ mv "$OUT/summary.json" "$OUT/summary_smoke.json"
 echo "=== FULL (14 turbines x 8760 h) ==="
 python -u services/validation/run_hub_height_inference.py \
   --train-config "$TRAIN_CFG" --site-config "$SITE_CFG" --device cuda \
-  --batch-size 32 --num-workers 4 --n-prep-workers 14 2>&1 | tee "$OUT/full.log"
+  --batch-size 8 --num-workers 4 --n-prep-workers 14 2>&1 | tee "$OUT/full.log"
 RC=${PIPESTATUS[0]}; echo "RC_FULL=$RC"; [ "$RC" -eq 0 ] || exit "$RC"
 
 echo "=== SCORE ==="

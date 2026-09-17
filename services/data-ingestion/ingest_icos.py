@@ -97,6 +97,15 @@ ICOS_STATIONS: dict[str, dict] = {
     "JFJ":    {"type": "AS", "name": "Jungfraujoch",         "lat": 46.5475, "lon":  7.9851, "altitude_m": 3572.0, "country": "CH", "description": "Swiss high-alpine (3572 m)",   "heights_m": [5.0, 14.0]},
     "PUY":    {"type": "AS", "name": "Puy de Dôme",          "lat": 45.7722, "lon":  2.9658, "altitude_m": 1465.0, "country": "FR", "description": "Massif Central summit",        "heights_m": [10.0]},
     "TRN":    {"type": "AS", "name": "Trainou",              "lat": 47.9647, "lon":  2.1125, "altitude_m":  131.0, "country": "FR", "description": "Loire valley tall tower",     "heights_m": [5.0, 50.0, 100.0, 180.0]},
+    # ── ICOS Atmosphere — towers NEVER used in training (hub-height out-of-sample benchmark, 2026-09-17).
+    #    Coordinates from meta.icos-cp.eu; heights_m are nominal, the AS reader discovers the real levels.
+    "BRM":    {"type": "AS", "name": "Beromünster",          "lat": 47.1896, "lon":  8.1755, "altitude_m":  797.0, "country": "CH", "description": "Swiss pre-Alpine hills, 212 m tower", "heights_m": [12.0, 45.0, 72.0, 132.0, 212.0]},
+    "KIT":    {"type": "AS", "name": "Karlsruhe",            "lat": 49.0915, "lon":  8.4249, "altitude_m":  110.0, "country": "DE", "description": "Rhine valley edge, 200 m tower",     "heights_m": [30.0, 60.0, 100.0, 200.0]},
+    "OXK":    {"type": "AS", "name": "Ochsenkopf",           "lat": 50.0300, "lon": 11.8083, "altitude_m": 1022.0, "country": "DE", "description": "Fichtelgebirge summit, 163 m tower", "heights_m": [23.0, 90.0, 163.0]},
+    "TOH":    {"type": "AS", "name": "Torfhaus",             "lat": 51.8088, "lon": 10.5350, "altitude_m":  801.0, "country": "DE", "description": "Harz mountains, 147 m tower (FuXi-CFD site)", "heights_m": [10.0, 76.0, 110.0, 147.0]},
+    "SSL":    {"type": "AS", "name": "Schauinsland",         "lat": 47.9167, "lon":  7.9166, "altitude_m": 1205.0, "country": "DE", "description": "Black Forest mountain station",     "heights_m": [12.0, 35.0]},
+    "KRE":    {"type": "AS", "name": "Křešín u Pacova",      "lat": 49.5720, "lon": 15.0800, "altitude_m":  534.0, "country": "CZ", "description": "Bohemian-Moravian highlands, 250 m tower", "heights_m": [10.0, 50.0, 125.0, 250.0]},
+    "OHP":    {"type": "AS", "name": "Obs. Haute-Provence (AS)", "lat": 43.9310, "lon": 5.7120, "altitude_m": 650.0, "country": "FR", "description": "Provence hills, 100 m tower",       "heights_m": [10.0, 50.0, 100.0]},
     "SAC":    {"type": "AS", "name": "Saclay",               "lat": 48.7227, "lon":  2.1420, "altitude_m":  160.0, "country": "FR", "description": "Paris basin tall tower",       "heights_m": [15.0, 60.0, 100.0]},
 }
 
