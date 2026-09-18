@@ -51,7 +51,9 @@ python -u services/validation/run_hub_height_inference.py \
   --batch-size 8 --num-workers 4 --n-prep-workers 14 --station-filter "$STATIONS" \
   --profile-heights 10,30,60,100,150,200 2>&1 | tee "$OUT/run.log"
 RC=${PIPESTATUS[0]}; echo "RC_RUN=$RC"; [ "$RC" -eq 0 ] || exit "$RC"
+# Optional ERA5 100 m competitor: qsub -v ...,U100=/path/to/store_with_u100_v100.zarr
+EXTRA=""; [ -n "$U100" ] && [ -d "$U100/coords" ] && EXTRA="--era5-u100 $U100"
 python -u services/validation/score_towers_hub_height.py \
   --predictions "$OUT/predictions.parquet" \
   --newa "data/raw/newa_ts/newa_${TOWER}_jja2020.parquet" \
-  --gwa-json data/raw/gwa_points_hub_sites.json --gwa-site "$TOWER" --out-dir "$OUT" 2>&1 | tee "$OUT/score.log"
+  --gwa-json data/raw/gwa_points_hub_sites.json --gwa-site "$TOWER" --out-dir "$OUT" $EXTRA 2>&1 | tee "$OUT/score.log"

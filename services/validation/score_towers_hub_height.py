@@ -3,7 +3,9 @@
 One row per (station_id = tower_hNNN, product): n, obs_mean, pred_mean, bias, MAE, RMSE, corr, slope.
 Products: ours_raw, ours_corr, era5_10m_patch (from predictions.parquet), newa_meso (log-interpolated
 between the two bracketing NEWA levels, heights >= 50 m only), era5_100m (only for heights within
-25 m of 100 m, no vertical adjustment), gwa_climatology (mean bias only).
+25 m of 100 m, no vertical adjustment), era5_10_100m_loginterp (heights between 10 and 75 m,
+log-height interpolation of the two native ERA5 winds; nothing above 125 m, that would be an
+extrapolation), gwa_climatology (mean bias only).
 """
 from __future__ import annotations
 
@@ -36,14 +38,29 @@ def _interp_levels(w: pd.DataFrame, z: float) -> pd.Series | None:
     return w[lo] + (w[hi] - w[lo]) * (np.log(z / lo) / np.log(hi / lo))
 
 
+def _era5_100m_at(store: Path, lat: float, lon: float) -> pd.Series:
+    """Nearest-gridpoint ERA5 100 m wind speed (surface-only zarr with u100/v100)."""
+    import zarr
+    g = zarr.open_group(str(store), mode="r")
+    lats, lons = g["coords/lat"][:], g["coords/lon"][:]
+    i, j = int(np.argmin(np.abs(lats - lat))), int(np.argmin(np.abs(lons - lon)))
+    if abs(lats[i] - lat) > 0.25 or abs(lons[j] - lon) > 0.25:
+        raise click.ClickException(f"{store} does not cover ({lat:.2f}, {lon:.2f})")
+    t = pd.to_datetime(g["coords/time"][:].astype("int64"))
+    u = g["surface/u100"][:, i, j]; v = g["surface/v100"][:, i, j]
+    return pd.Series(np.sqrt(u ** 2 + v ** 2), index=t, name="era5_100m")
+
+
 @click.command()
 @click.option("--predictions", type=Path, required=True)
+@click.option("--pairings", type=Path, default=None,
+              help="obs parquet with station_id, lat, lon (default: pairings.parquet next to predictions)")
 @click.option("--newa", type=Path, default=None)
 @click.option("--era5-u100", type=Path, default=None)
 @click.option("--gwa-json", type=Path, default=None)
 @click.option("--gwa-site", default=None)
 @click.option("--out-dir", type=Path, required=True)
-def main(predictions, newa, era5_u100, gwa_json, gwa_site, out_dir):
+def main(predictions, pairings, newa, era5_u100, gwa_json, gwa_site, out_dir):
     out_dir.mkdir(parents=True, exist_ok=True)
     pr = pd.read_parquet(predictions)
     pr["timestamp"] = pd.to_datetime(pr["timestamp_iso"]).dt.tz_localize(None)
@@ -53,9 +70,11 @@ def main(predictions, newa, era5_u100, gwa_json, gwa_site, out_dir):
         nw = n.pivot_table(index="timestamp", columns="height_m", values="ws_newa")
     e100 = None
     if era5_u100 and (era5_u100 / "coords").exists():
-        import zarr
-        g = zarr.open_group(str(era5_u100), mode="r")
-        lat0, lon0 = None, None
+        pa = pd.read_parquet(pairings or predictions.parent / "pairings.parquet",
+                             columns=["station_id", "lat", "lon"])
+        pa = pa[pa.station_id.isin(pr.station_id.unique())]
+        # all heights of one tower share the same gridpoint
+        e100 = _era5_100m_at(era5_u100, float(pa.lat.mean()), float(pa.lon.mean()))
     gwa = json.loads(Path(gwa_json).read_text()).get(gwa_site) if gwa_json and gwa_site else None
 
     rows = []
@@ -68,6 +87,14 @@ def main(predictions, newa, era5_u100, gwa_json, gwa_site, out_dir):
             s = _interp_levels(nw, z)
             if s is not None:
                 prods["newa_meso"] = s.reindex(d.index)
+        if e100 is not None:
+            e = e100.reindex(d.index)
+            if abs(z - 100.0) <= 25.0:
+                prods["era5_100m"] = e
+            elif 10.0 < z < 100.0:
+                # what an ERA5 user would do: log-height interpolation between native 10 m and 100 m
+                e10 = d.speed_era5_baseline_patch
+                prods["era5_10_100m_loginterp"] = e10 + (e - e10) * (np.log(z / 10.0) / np.log(10.0))
         for name, ser in prods.items():
             rows.append({"station_id": sid, "height": z, "product": name, **_metrics(d.speed_obs, ser)})
         if gwa:
