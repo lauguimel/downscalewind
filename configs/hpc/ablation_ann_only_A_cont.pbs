@@ -1,0 +1,36 @@
+#!/bin/bash -l
+#PBS -N abl_ann_only_A_cont
+#PBS -l select=1:ncpus=24:mem=96GB
+#PBS -l walltime=30:00:00
+#PBS -j oe
+#PBS -m n
+
+# Ablation A: M_I8's correction network trained WITHOUT the CFD surrogate
+# (ANNDirect predicts u/v at the station).  Same data/loss/schedule as M_I8.
+# Runs on CPU: without the 29.7 M-param surrogate the model is ~88 k params and
+# the run is bound by grid.zarr reads, not by compute.
+# Eval is NOT chained here (M_I8's chained eval died on walltime); submit
+# eval_ablation_ann_only_A.pbs afterwards.
+
+cd "$PBS_O_WORKDIR"
+BASE="$HOME/dsw"
+CFG="$BASE/configs/training/ablation_ann_only_A_cont.yaml"
+OUT="$BASE/data/models/ablation_ann_only_A_terrain_cnn_cont"
+mkdir -p "$OUT"
+[ -f "$CFG" ] || { echo "MISSING CFG:$CFG"; exit 1; }
+[ -d /scratch/maitreje/dsw/phase_H_prime_M_I3_combined_cache ] || { echo "MISSING cache"; exit 1; }
+
+module load Miniconda3/24.9.2-0 || module load Anaconda3/2024.02-1
+eval "$(conda shell.bash hook)"
+conda activate fuxicfd
+for d in $CONDA_PREFIX/lib/python*/site-packages/nvidia/*/lib; do
+    [ -d "$d" ] && export LD_LIBRARY_PATH="$d:$LD_LIBRARY_PATH"
+done
+# CPU job: 12 loader workers + 8 compute threads on 24 cores
+export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8
+ulimit -n 65536 2>/dev/null || ulimit -n 8192 2>/dev/null || true
+echo "ulimit -n = $(ulimit -n)"
+cd "$BASE"
+python -u services/module2b-surrogate/train_v2_devine_style.py --config "$CFG" 2>&1 | tee "$OUT/train.log"
+echo "RC_TRAIN=${PIPESTATUS[0]}"
+tail -n 40 "$OUT/history.yaml" 2>/dev/null

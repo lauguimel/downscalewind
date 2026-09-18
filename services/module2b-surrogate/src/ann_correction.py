@@ -215,6 +215,59 @@ class ANNCorrection(nn.Module):
         return torch.sigmoid((speed10 - self.gate_v0) / s)
 
 
+class ANNDirect(ANNCorrection):
+    """Ablation "no surrogate": the SAME inputs as ANNCorrection (era5_flat, topo
+    features, optional terrain encoder) plus the target height AGL, but the MLP
+    predicts the (u, v) residual to ERA5 u10/v10 at the station DIRECTLY, in m/s.
+
+    The chain being ablated is  ERA5 -> ANN -> frozen CFD surrogate -> u,v at the
+    station = ERA5 u10/v10 + surrogate residual.  Here the surrogate is removed and
+    the residual comes from the MLP itself.  Zero-init output => starts as ERA5 10 m.
+    """
+
+    def __init__(
+        self,
+        era5_dim: int = 408,
+        topo_dim: int = 8,
+        hidden_units: tuple[int, int] = (50, 10),
+        dropout: float = 0.25,
+        use_terrain_encoder: bool = False,
+        terrain_latent_dim: int = 48,
+        terrain_in_channels: int = 4,
+        height_scale: float = 200.0,
+    ) -> None:
+        # +1 input feature: height AGL / height_scale
+        super().__init__(
+            era5_dim=era5_dim, topo_dim=topo_dim + 1, hidden_units=hidden_units,
+            dropout=dropout, zero_init_output=False,
+            use_terrain_encoder=use_terrain_encoder,
+            terrain_latent_dim=terrain_latent_dim,
+            terrain_in_channels=terrain_in_channels, use_calm_gate=False,
+        )
+        self.height_scale = float(height_scale)
+        last = self.mlp[-1]
+        out = nn.Linear(last.in_features, 2)
+        nn.init.zeros_(out.weight)
+        nn.init.zeros_(out.bias)
+        self.mlp[-1] = out
+
+    def forward(  # type: ignore[override]
+        self,
+        era5_flat: torch.Tensor,
+        topo_features: torch.Tensor,
+        height_agl: torch.Tensor,
+        terrain: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Returns (B, 2) = (du, dv) in m/s to add to ERA5 u10/v10 at the centre."""
+        h = (height_agl.to(era5_flat.dtype) / self.height_scale).unsqueeze(-1)
+        parts = [era5_flat, topo_features, h]
+        if self.use_terrain_encoder:
+            if terrain is None:
+                raise ValueError("terrain is required when use_terrain_encoder=True")
+            parts.append(self.terrain_encoder(terrain))
+        return self.mlp(torch.cat(parts, dim=-1))
+
+
 def devine_speed_loss(
     speed_pred: torch.Tensor,
     speed_obs: torch.Tensor,

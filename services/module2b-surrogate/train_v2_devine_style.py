@@ -37,6 +37,7 @@ if str(_SCRIPT) not in sys.path:
 
 from src.ann_correction import (  # noqa: E402
     ANNCorrection,
+    ANNDirect,
     devine_speed_loss,
     devine_speed_loss_regime,
 )
@@ -290,6 +291,7 @@ def _step(
     tau_over: float = 0.4,
     loss_mode: str = "devine",
     regime_kwargs: dict | None = None,
+    agl_levels: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict]:
     terrain, era5, geo, topo, speed_obs, k_obs, _meta = batch
     terrain = terrain.to(device, non_blocking=True)
@@ -299,19 +301,30 @@ def _step(
     speed_obs = speed_obs.to(device, non_blocking=True)
     k_obs = k_obs.to(device, non_blocking=True)
 
-    if use_ann:
-        era5_corrected = ann(era5, topo, terrain=terrain)
+    if surrogate is None:
+        # Ablation "ann_only": the MLP predicts the (u, v) residual to ERA5 u10/v10
+        # at the station itself; "raw" (use_ann=False) is then plain ERA5 10 m.
+        u10_b, v10_b = _era5_baseline_uv_at_center(era5, norm, era5_layout)
+        if use_ann:
+            duv = ann(era5, topo, agl_levels[k_obs], terrain=terrain)
+            u_pred = u10_b + duv[:, 0]
+            v_pred = v10_b + duv[:, 1]
+        else:
+            u_pred, v_pred = u10_b, v10_b
     else:
-        era5_corrected = era5
+        if use_ann:
+            era5_corrected = ann(era5, topo, terrain=terrain)
+        else:
+            era5_corrected = era5
 
-    # Surrogate forward — gradient flows but parameters are frozen
-    pred = surrogate(terrain, era5_corrected, geo)
-    u_res, v_res = _denorm_uv_at_center(pred, norm, k_obs)
+        # Surrogate forward — gradient flows but parameters are frozen
+        pred = surrogate(terrain, era5_corrected, geo)
+        u_res, v_res = _denorm_uv_at_center(pred, norm, k_obs)
 
-    # Add ERA5 baseline at centre to recover absolute u/v (use_residual mode='surface')
-    u10_b, v10_b = _era5_baseline_uv_at_center(era5_corrected, norm, era5_layout)
-    u_pred = u_res + u10_b
-    v_pred = v_res + v10_b
+        # Add ERA5 baseline at centre to recover absolute u/v (use_residual mode='surface')
+        u10_b, v10_b = _era5_baseline_uv_at_center(era5_corrected, norm, era5_layout)
+        u_pred = u_res + u10_b
+        v_pred = v_res + v10_b
     speed_pred = torch.sqrt(u_pred * u_pred + v_pred * v_pred + 1e-8)
 
     if loss_mode == "regime":
@@ -350,6 +363,11 @@ def main():
     cfg = yaml.safe_load(args.config.read_text())
     out_dir = Path(cfg["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Many loader workers (CPU runs) exhaust the per-process fd limit with the
+    # default "file_descriptor" tensor sharing -> "Too many open files".
+    if int(cfg.get("num_workers", 2)) > 4:
+        torch.multiprocessing.set_sharing_strategy("file_system")
 
     device = cfg.get("device", "cuda")
     norm = {**DEFAULT_NORM, **_load_norm_overrides(Path(cfg["norm_yaml"]))}
@@ -431,31 +449,46 @@ def main():
         persistent_workers=num_workers > 0,
     )
 
-    # ── Frozen surrogate v2 ──────────────────────────────────────────────────
-    surrogate = build_frozen_surrogate(
-        Path(cfg["surrogate_checkpoint"]),
-        era5_dim=era5_dim, nz=nz,
-        terrain_in_channels=cfg.get("terrain_in_channels", 4),
-        geo_channels=cfg.get("geo_channels", 2),
-        preset=cfg.get("surrogate_preset", "base"),
-        device=device,
-    )
+    ann_only = bool(cfg.get("ann_only", False))
+    if ann_only:
+        # ── Ablation: no surrogate, the MLP predicts u/v at the station ──────
+        surrogate = None
+        ann = ANNDirect(
+            era5_dim=era5_dim,
+            topo_dim=int(cfg.get("topo_dim", 8)),
+            hidden_units=tuple(cfg.get("hidden_units", [50, 10])),
+            dropout=float(cfg.get("dropout", 0.25)),
+            use_terrain_encoder=bool(cfg.get("use_terrain_encoder", False)),
+            terrain_latent_dim=int(cfg.get("terrain_latent_dim", 48)),
+            terrain_in_channels=int(cfg.get("terrain_in_channels", 4)),
+        ).to(device)
+        logger.info("ann_only=True: NO surrogate, ANNDirect predicts (du, dv) at the station")
+    else:
+        # ── Frozen surrogate v2 ──────────────────────────────────────────────
+        surrogate = build_frozen_surrogate(
+            Path(cfg["surrogate_checkpoint"]),
+            era5_dim=era5_dim, nz=nz,
+            terrain_in_channels=cfg.get("terrain_in_channels", 4),
+            geo_channels=cfg.get("geo_channels", 2),
+            preset=cfg.get("surrogate_preset", "base"),
+            device=device,
+        )
 
-    # ── ANN correction ───────────────────────────────────────────────────────
-    ann = ANNCorrection(
-        era5_dim=era5_dim,
-        topo_dim=int(cfg.get("topo_dim", 8)),
-        hidden_units=tuple(cfg.get("hidden_units", [50, 10])),
-        dropout=float(cfg.get("dropout", 0.25)),
-        zero_init_output=True,
-        use_terrain_encoder=bool(cfg.get("use_terrain_encoder", False)),
-        terrain_latent_dim=int(cfg.get("terrain_latent_dim", 48)),
-        terrain_in_channels=int(cfg.get("terrain_in_channels", 4)),
-        use_calm_gate=bool(cfg.get("use_calm_gate", False)),
-        gate_v0_init=float(cfg.get("gate_v0_init", 2.5)),
-        gate_s_init=float(cfg.get("gate_s_init", 1.0)),
-        gate_norm=norm,
-    ).to(device)
+        # ── ANN correction ───────────────────────────────────────────────────
+        ann = ANNCorrection(
+            era5_dim=era5_dim,
+            topo_dim=int(cfg.get("topo_dim", 8)),
+            hidden_units=tuple(cfg.get("hidden_units", [50, 10])),
+            dropout=float(cfg.get("dropout", 0.25)),
+            zero_init_output=True,
+            use_terrain_encoder=bool(cfg.get("use_terrain_encoder", False)),
+            terrain_latent_dim=int(cfg.get("terrain_latent_dim", 48)),
+            terrain_in_channels=int(cfg.get("terrain_in_channels", 4)),
+            use_calm_gate=bool(cfg.get("use_calm_gate", False)),
+            gate_v0_init=float(cfg.get("gate_v0_init", 2.5)),
+            gate_s_init=float(cfg.get("gate_s_init", 1.0)),
+            gate_norm=norm,
+        ).to(device)
     n_ann = sum(p.numel() for p in ann.parameters())
     logger.info("ANN params: %d (%.1f k)", n_ann, n_ann / 1e3)
 
@@ -538,7 +571,9 @@ def main():
     logger.info("loss_mode=%s tau_under=%.3f tau_over=%.3f regime=%s strat_thr=%.2f",
                 loss_mode, tau_under, tau_over, regime_kwargs or "-", calm_strat_thr)
     step_loss_kwargs = dict(tau_under=tau_under, tau_over=tau_over,
-                            loss_mode=loss_mode, regime_kwargs=regime_kwargs)
+                            loss_mode=loss_mode, regime_kwargs=regime_kwargs,
+                            agl_levels=torch.as_tensor(target_agl_levels, dtype=torch.float32,
+                                                       device=device))
 
     # ── Training loop ────────────────────────────────────────────────────────
     history = []

@@ -30,7 +30,7 @@ _SCRIPT = Path(__file__).resolve().parent
 if str(_SCRIPT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT))
 
-from src.ann_correction import ANNCorrection  # noqa: E402
+from src.ann_correction import ANNCorrection, ANNDirect  # noqa: E402
 from src.dataset_v2 import DEFAULT_NORM, parse_agl_levels  # noqa: E402
 from src.dataset_v2_obs_centered import (  # noqa: E402
     ObsCenteredDataset,
@@ -104,11 +104,15 @@ def _speed_at_obs(surrogate, terrain, era5_in, geo, k_obs, norm, era5_layout):
     return torch.sqrt((u_res + u10_b) ** 2 + (v_res + v10_b) ** 2 + 1e-8)
 
 
-def _eval_loader_both(ann, surrogate, loader, norm, era5_layout, device, log_every=500):
+def _eval_loader_both(ann, surrogate, loader, norm, era5_layout, device, log_every=500,
+                      agl_levels=None):
     """Raw and corrected predictions in ONE pass over the loader (data loading is
-    the bottleneck), plus the uncorrected ERA5 10 m speed at the patch centre."""
+    the bottleneck), plus the uncorrected ERA5 10 m speed at the patch centre.
+    surrogate=None -> ann_only ablation (ANNDirect): raw = ERA5 10 m, corr = ERA5 + MLP residual."""
     obs_l, raw_l, corr_l, era5_l, meta_l = [], [], [], [], []
-    ann.eval(); surrogate.eval()
+    ann.eval()
+    if surrogate is not None:
+        surrogate.eval()
     t0 = time.time()
     with torch.no_grad():
         for i, batch in enumerate(loader):
@@ -118,10 +122,15 @@ def _eval_loader_both(ann, surrogate, loader, norm, era5_layout, device, log_eve
             geo = geo.to(device, non_blocking=True)
             topo = topo.to(device, non_blocking=True)
             k_obs = k_obs.to(device, non_blocking=True)
-            raw = _speed_at_obs(surrogate, terrain, era5, geo, k_obs, norm, era5_layout)
-            corr = _speed_at_obs(surrogate, terrain, ann(era5, topo, terrain=terrain), geo,
-                                 k_obs, norm, era5_layout)
             u10, v10 = _era5_baseline_uv_at_center(era5, norm, era5_layout)
+            if surrogate is None:
+                duv = ann(era5, topo, agl_levels[k_obs], terrain=terrain)
+                raw = torch.sqrt(u10 ** 2 + v10 ** 2 + 1e-8)
+                corr = torch.sqrt((u10 + duv[:, 0]) ** 2 + (v10 + duv[:, 1]) ** 2 + 1e-8)
+            else:
+                raw = _speed_at_obs(surrogate, terrain, era5, geo, k_obs, norm, era5_layout)
+                corr = _speed_at_obs(surrogate, terrain, ann(era5, topo, terrain=terrain), geo,
+                                     k_obs, norm, era5_layout)
             obs_l.extend(speed_obs.numpy().tolist())
             raw_l.extend(raw.cpu().numpy().tolist())
             corr_l.extend(corr.cpu().numpy().tolist())
@@ -153,6 +162,8 @@ def main():
     out_dir = args.out_dir or Path(cfg["output_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    if int(cfg.get("num_workers", 2)) > 4:  # see train_v2_devine_style.py (fd limit)
+        torch.multiprocessing.set_sharing_strategy("file_system")
     device = cfg.get("device", "cuda")
     norm = {**DEFAULT_NORM, **_load_norm_overrides(Path(cfg["norm_yaml"]))}
     target_agl_levels = parse_agl_levels(cfg.get("target_agl_levels", "agl_0_100_24"))
@@ -196,29 +207,41 @@ def main():
         persistent_workers=num_workers > 0,
     )
 
-    # Surrogate v2 frozen
-    surrogate = build_frozen_surrogate(
-        Path(cfg["surrogate_checkpoint"]),
-        era5_dim=era5_dim, nz=nz,
-        terrain_in_channels=4, geo_channels=2,
-        preset=cfg.get("surrogate_preset", "base"),
-        device=device,
-    )
+    ann_only = bool(cfg.get("ann_only", False))
+    if ann_only:
+        surrogate = None
+        ann = ANNDirect(
+            era5_dim=era5_dim, topo_dim=int(cfg.get("topo_dim", 8)),
+            hidden_units=tuple(cfg.get("hidden_units", [50, 10])),
+            dropout=float(cfg.get("dropout", 0.25)),
+            use_terrain_encoder=bool(cfg.get("use_terrain_encoder", False)),
+            terrain_latent_dim=int(cfg.get("terrain_latent_dim", 48)),
+            terrain_in_channels=int(cfg.get("terrain_in_channels", 4)),
+        ).to(device)
+    else:
+        # Surrogate frozen
+        surrogate = build_frozen_surrogate(
+            Path(cfg["surrogate_checkpoint"]),
+            era5_dim=era5_dim, nz=nz,
+            terrain_in_channels=4, geo_channels=2,
+            preset=cfg.get("surrogate_preset", "base"),
+            device=device,
+        )
 
-    # ANN
-    ann = ANNCorrection(
-        era5_dim=era5_dim, topo_dim=int(cfg.get("topo_dim", 8)),
-        hidden_units=tuple(cfg.get("hidden_units", [50, 10])),
-        dropout=float(cfg.get("dropout", 0.25)),
-        zero_init_output=True,
-        use_terrain_encoder=bool(cfg.get("use_terrain_encoder", False)),
-        terrain_latent_dim=int(cfg.get("terrain_latent_dim", 48)),
-        terrain_in_channels=int(cfg.get("terrain_in_channels", 4)),
-        use_calm_gate=bool(cfg.get("use_calm_gate", False)),
-        gate_v0_init=float(cfg.get("gate_v0_init", 2.5)),
-        gate_s_init=float(cfg.get("gate_s_init", 1.0)),
-        gate_norm=norm,
-    ).to(device)
+        # ANN
+        ann = ANNCorrection(
+            era5_dim=era5_dim, topo_dim=int(cfg.get("topo_dim", 8)),
+            hidden_units=tuple(cfg.get("hidden_units", [50, 10])),
+            dropout=float(cfg.get("dropout", 0.25)),
+            zero_init_output=True,
+            use_terrain_encoder=bool(cfg.get("use_terrain_encoder", False)),
+            terrain_latent_dim=int(cfg.get("terrain_latent_dim", 48)),
+            terrain_in_channels=int(cfg.get("terrain_in_channels", 4)),
+            use_calm_gate=bool(cfg.get("use_calm_gate", False)),
+            gate_v0_init=float(cfg.get("gate_v0_init", 2.5)),
+            gate_s_init=float(cfg.get("gate_s_init", 1.0)),
+            gate_norm=norm,
+        ).to(device)
     ck = torch.load(str(args.ann_checkpoint), map_location=device, weights_only=False)
     ann.load_state_dict(ck["model"])
     logger.info("Loaded ANN from %s (epoch=%d)", args.ann_checkpoint, ck.get("epoch", -1))
@@ -226,7 +249,8 @@ def main():
     # Eval RAW (no ANN) and CORRECTED in a single pass
     t0 = time.time()
     res_raw, res_corr, era5_speed = _eval_loader_both(
-        ann, surrogate, val_loader, norm, era5_layout, device)
+        ann, surrogate, val_loader, norm, era5_layout, device,
+        agl_levels=torch.as_tensor(target_agl_levels, dtype=torch.float32, device=device))
     wall = time.time() - t0
 
     summary = {
