@@ -97,6 +97,49 @@ def _eval_loader(
     }
 
 
+def _speed_at_obs(surrogate, terrain, era5_in, geo, k_obs, norm, era5_layout):
+    pred = surrogate(terrain, era5_in, geo)
+    u_res, v_res = _denorm_uv_at_center(pred, norm, k_obs)
+    u10_b, v10_b = _era5_baseline_uv_at_center(era5_in, norm, era5_layout)
+    return torch.sqrt((u_res + u10_b) ** 2 + (v_res + v10_b) ** 2 + 1e-8)
+
+
+def _eval_loader_both(ann, surrogate, loader, norm, era5_layout, device, log_every=500):
+    """Raw and corrected predictions in ONE pass over the loader (data loading is
+    the bottleneck), plus the uncorrected ERA5 10 m speed at the patch centre."""
+    obs_l, raw_l, corr_l, era5_l, meta_l = [], [], [], [], []
+    ann.eval(); surrogate.eval()
+    t0 = time.time()
+    with torch.no_grad():
+        for i, batch in enumerate(loader):
+            terrain, era5, geo, topo, speed_obs, k_obs, meta = batch
+            terrain = terrain.to(device, non_blocking=True)
+            era5 = era5.to(device, non_blocking=True)
+            geo = geo.to(device, non_blocking=True)
+            topo = topo.to(device, non_blocking=True)
+            k_obs = k_obs.to(device, non_blocking=True)
+            raw = _speed_at_obs(surrogate, terrain, era5, geo, k_obs, norm, era5_layout)
+            corr = _speed_at_obs(surrogate, terrain, ann(era5, topo, terrain=terrain), geo,
+                                 k_obs, norm, era5_layout)
+            u10, v10 = _era5_baseline_uv_at_center(era5, norm, era5_layout)
+            obs_l.extend(speed_obs.numpy().tolist())
+            raw_l.extend(raw.cpu().numpy().tolist())
+            corr_l.extend(corr.cpu().numpy().tolist())
+            era5_l.extend(torch.sqrt(u10 ** 2 + v10 ** 2).cpu().numpy().tolist())
+            meta_l.extend(meta)
+            if i % log_every == 0:
+                logger.info("batch %d/%d (%.0f s)", i, len(loader), time.time() - t0)
+
+    def _res(pred_l):
+        obs = np.asarray(obs_l, dtype=np.float32); pred = np.asarray(pred_l, dtype=np.float32)
+        err = pred - obs
+        return {"n": int(obs.size), "mae": float(np.abs(err).mean()),
+                "rmse": float(np.sqrt((err ** 2).mean())), "bias": float(err.mean()),
+                "obs": obs, "pred": pred, "meta": meta_l}
+
+    return _res(raw_l), _res(corr_l), np.asarray(era5_l, dtype=np.float32)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=Path, required=True)
@@ -180,11 +223,10 @@ def main():
     ann.load_state_dict(ck["model"])
     logger.info("Loaded ANN from %s (epoch=%d)", args.ann_checkpoint, ck.get("epoch", -1))
 
-    # Eval RAW (no ANN)
+    # Eval RAW (no ANN) and CORRECTED in a single pass
     t0 = time.time()
-    res_raw = _eval_loader(None, surrogate, val_loader, norm, era5_layout, device)
-    # Eval CORRECTED
-    res_corr = _eval_loader(ann, surrogate, val_loader, norm, era5_layout, device)
+    res_raw, res_corr, era5_speed = _eval_loader_both(
+        ann, surrogate, val_loader, norm, era5_layout, device)
     wall = time.time() - t0
 
     summary = {
@@ -199,8 +241,8 @@ def main():
     (out_dir / "eval_summary.json").write_text(json.dumps(summary, indent=2))
 
     rows = []
-    for m, o, p_raw, p_corr in zip(
-        res_raw["meta"], res_raw["obs"], res_raw["pred"], res_corr["pred"]
+    for m, o, p_raw, p_corr, p_era5 in zip(
+        res_raw["meta"], res_raw["obs"], res_raw["pred"], res_corr["pred"], era5_speed
     ):
         rows.append({
             "station_id": m["station_id"],
@@ -210,6 +252,7 @@ def main():
             "speed_obs": float(o),
             "speed_pred_raw": float(p_raw),
             "speed_pred_corr": float(p_corr),
+            "speed_era5_10m": float(p_era5),
         })
     pd.DataFrame(rows).to_parquet(out_dir / "eval_pairings.parquet", index=False)
     logger.info("eval done: %s", summary)
